@@ -35,6 +35,7 @@ def default_tutorial_history_path(environ: Mapping[str, str] | None = None) -> P
 
 def run_init_tutorial_once(
     *,
+    force: bool = False,
     history_path: str | Path | None = None,
     environ: Mapping[str, str] | None = None,
     input_func: InputFunc | None = None,
@@ -46,7 +47,7 @@ def run_init_tutorial_once(
         if not stream.isatty():
             return False
 
-    if not should_show_tutorial(INIT_TUTORIAL_ID, INIT_TUTORIAL_VERSION, path=history_path, environ=environ):
+    if not force and not should_show_tutorial(INIT_TUTORIAL_ID, INIT_TUTORIAL_VERSION, path=history_path, environ=environ):
         return False
 
     language = prompt_tutorial_language(

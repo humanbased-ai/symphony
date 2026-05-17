@@ -6,6 +6,7 @@ import getpass
 import logging
 import logging.handlers
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -55,6 +56,30 @@ DEFAULT_PORT = 7337
 LOGGER = logging.getLogger(__name__)
 TickHook = Callable[[], Any]
 StatusServer = Callable[[StatusAPI, int], Awaitable[None]]
+
+
+# ---------------------------------------------------------------------------
+# ANSI color helpers — disabled when NO_COLOR is set or stdout is not a TTY
+# ---------------------------------------------------------------------------
+
+def _use_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    return sys.stdout.isatty()
+
+
+def _clr(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _use_color() else text
+
+
+def _ok(t: str) -> str:   return _clr(t, "32")   # green
+def _warn(t: str) -> str: return _clr(t, "33")   # yellow
+def _fail(t: str) -> str: return _clr(t, "31")   # red
+def _cyan(t: str) -> str: return _clr(t, "36")   # cyan
+def _bold(t: str) -> str: return _clr(t, "1")    # bold
+def _dim(t: str) -> str:  return _clr(t, "2")    # dim
 
 
 def _cli_name() -> str:
@@ -627,6 +652,14 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
     parser = build_onboard_parser()
     args = parser.parse_args(argv)
 
+    # Auto-detect GitHub org/repo from the git remote before scanning
+    if not args.github_org or not args.github_repo:
+        detected_org, detected_repo = _detect_github_from_remote()
+        if detected_org and not args.github_org:
+            args.github_org = detected_org
+        if detected_repo and not args.github_repo:
+            args.github_repo = detected_repo
+
     print_setup_checks("Environment scan", setup_environment_checks(args))
 
     workflow_path = Path(args.workflow_path).expanduser()
@@ -634,8 +667,9 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         checks = doctor_checks(workflow_path, logs_root="./log", port=DEFAULT_PORT)
         print_setup_checks("Existing setup", checks)
         if all(ok for ok, _, _ in checks):
-            print(f"Onboarding already complete: {workflow_path}")
+            print(f"\nOnboarding already complete: {workflow_path}")
             print("Skipped init because WORKFLOW.md and local prerequisites validated.")
+            _offer_tutorial(args)
             return 0
 
         message = (
@@ -644,7 +678,7 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         )
         parser.exit(2, f"symphony onboard: {message}\n")
 
-    return _run_init_with_args(args, parser, command_name="onboard", show_environment_scan=False)
+    return _run_init_with_args(args, parser, command_name="onboard", show_environment_scan=False, show_tutorial_before=False)
 
 
 def _run_init_with_args(
@@ -653,6 +687,7 @@ def _run_init_with_args(
     *,
     command_name: str,
     show_environment_scan: bool = True,
+    show_tutorial_before: bool = True,
 ) -> int:
     try:
         mode = _resolve_init_mode(args)
@@ -661,7 +696,7 @@ def _run_init_with_args(
         if show_environment_scan:
             print_setup_checks("Environment scan", setup_environment_checks(args))
 
-        if not automated:
+        if not automated and show_tutorial_before:
             run_init_tutorial_once()
 
         # --- Step 1: Linear project slug ---
@@ -787,8 +822,31 @@ def _run_init_with_args(
         print("GitHub token not stored. Set GITHUB_TOKEN or re-run with --github-token.")
 
     print(f"\nWrote workflow: {workflow_path}")
-    print(f"Next: symphony doctor {workflow_path}")
+    print(f"Next: {_cyan(_cli_name() + ' doctor ' + str(workflow_path))}")
+
+    if not automated and not show_tutorial_before:
+        _offer_tutorial(args)
+
     return 0
+
+
+def _offer_tutorial(args: argparse.Namespace) -> None:
+    """Prompt to show the Symphony intro tutorial; only runs in interactive TTY mode."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        mode = _resolve_init_mode(args)
+    except OnboardingError:
+        return
+    if mode == "automated":
+        return
+    try:
+        answer = input("\nShow a quick intro to Symphony? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if answer in {"", "y", "yes"}:
+        run_init_tutorial_once(force=True)
 
 
 def _resolve_init_mode(args: argparse.Namespace) -> str:
@@ -893,7 +951,10 @@ def setup_environment_checks(
         )
         github_org = getattr(args, "github_org", None) or ""
         github_repo = getattr(args, "github_repo", None) or ""
-        repo_detail = f"{github_org}/{github_repo}" if github_org and github_repo else "not configured yet"
+        if github_org and github_repo:
+            repo_detail = f"{github_org}/{github_repo}"
+        else:
+            repo_detail = "not configured — pass --github-org and --github-repo"
         checks.append((bool(github_org and github_repo), "github repo", repo_detail))
     else:
         command_ok, command_detail = _check_command(getattr(args, "codex_command", "codex app-server"))
@@ -903,10 +964,11 @@ def setup_environment_checks(
 
 
 def print_setup_checks(title: str, checks: Sequence[tuple[bool, str, str]]) -> None:
-    print(f"\n{title}:")
+    print(f"\n{_bold(title)}:")
     for ok, label, detail in checks:
-        marker = "ok" if ok else "needs setup"
-        print(f"[{marker}] {label}: {detail}")
+        icon = _ok("✓") if ok else _fail("✗")
+        detail_text = _dim(detail) if ok else _warn(detail)
+        print(f"  {icon} {label:<20} {detail_text}")
 
 
 def _linear_setup_auth_source(
@@ -1059,11 +1121,42 @@ def _check_gh_auth() -> tuple[bool, str]:
             text=True,
             timeout=10,
         )
-        return (True, "authenticated") if result.returncode == 0 else (False, "not authenticated — run: gh auth login")
+        if result.returncode != 0:
+            return False, "not authenticated — run: gh auth login"
+        output = result.stdout + result.stderr
+        m = re.search(r"Logged in to \S+ account (\S+)", output)
+        account = m.group(1) if m else None
+        detail = f"authenticated ({account})" if account else "authenticated"
+        return True, detail
     except FileNotFoundError:
         return False, "gh CLI not found — install from cli.github.com"
     except Exception as exc:
         return False, str(exc)
+
+
+def _detect_github_from_remote() -> tuple[str, str] | tuple[None, None]:
+    """Parse GitHub org and repo from the `origin` git remote URL."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None, None
+        url = result.stdout.strip()
+        # SSH: git@github.com:org/repo.git
+        m = re.match(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$", url)
+        if m:
+            return m.group(1), m.group(2)
+        # HTTPS: https://github.com/org/repo.git
+        m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", url)
+        if m:
+            return m.group(1), m.group(2)
+        return None, None
+    except Exception:
+        return None, None
 
 
 def _resolve_linear_token(config: WorkflowConfig) -> str | None:

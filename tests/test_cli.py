@@ -6,15 +6,20 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
+from unittest.mock import patch
+
 from symphony.cli import (
     RuntimeWorkflowReloader,
     StartupError,
+    _detect_github_from_remote,
+    _check_gh_auth,
     create_runtime,
     create_status_api,
     create_status_http_server,
     doctor_checks,
     load_startup_context,
     main,
+    print_setup_checks,
     run_once,
     setup_environment_checks,
 )
@@ -212,11 +217,18 @@ Body
     def test_init_automated_reports_all_missing_inputs_without_prompting(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            # Use an isolated credentials path so the test is not affected by any
+            # real credentials on the machine.
+            credentials_path = str(Path(temp_dir) / "credentials.json")
             stderr = StringIO()
 
             with redirect_stderr(stderr):
                 with self.assertRaises(SystemExit) as raised:
-                    main(["init", "--mode", "automated", "--workflow-path", str(workflow_path)])
+                    main([
+                        "init", "--mode", "automated",
+                        "--workflow-path", str(workflow_path),
+                        "--credentials-path", credentials_path,
+                    ])
 
             self.assertEqual(2, raised.exception.code)
             message = stderr.getvalue()
@@ -441,6 +453,118 @@ Invalid prompt.
 
         self.assertEqual("tick-result", result)
         self.assertEqual(1, runtime.ticks)
+
+
+class DetectGithubFromRemoteTests(unittest.TestCase):
+    def _run(self, stdout: str, returncode: int = 0) -> tuple[str | None, str | None]:
+        import subprocess
+        fake = type("R", (), {"returncode": returncode, "stdout": stdout})()
+        with patch("subprocess.run", return_value=fake):
+            return _detect_github_from_remote()
+
+    def test_parses_ssh_url(self):
+        org, repo = self._run("git@github.com:codatta/symphony.git\n")
+        self.assertEqual("codatta", org)
+        self.assertEqual("symphony", repo)
+
+    def test_parses_https_url(self):
+        org, repo = self._run("https://github.com/codatta/symphony.git\n")
+        self.assertEqual("codatta", org)
+        self.assertEqual("symphony", repo)
+
+    def test_parses_https_url_without_git_suffix(self):
+        org, repo = self._run("https://github.com/acme/my-repo\n")
+        self.assertEqual("acme", org)
+        self.assertEqual("my-repo", repo)
+
+    def test_returns_none_on_non_github_remote(self):
+        org, repo = self._run("https://gitlab.com/acme/repo.git\n")
+        self.assertIsNone(org)
+        self.assertIsNone(repo)
+
+    def test_returns_none_on_nonzero_exit(self):
+        org, repo = self._run("", returncode=128)
+        self.assertIsNone(org)
+        self.assertIsNone(repo)
+
+
+class CheckGhAuthTests(unittest.TestCase):
+    def _run(self, stdout: str, stderr: str = "", returncode: int = 0) -> tuple[bool, str]:
+        fake = type("R", (), {"returncode": returncode, "stdout": stdout, "stderr": stderr})()
+        with patch("subprocess.run", return_value=fake):
+            return _check_gh_auth()
+
+    def test_returns_authenticated_with_account_name(self):
+        ok, detail = self._run(
+            stdout="",
+            stderr="github.com\n  ✓ Logged in to github.com account codatta (keyring)\n",
+        )
+        self.assertTrue(ok)
+        self.assertIn("codatta", detail)
+
+    def test_returns_authenticated_without_parseable_account(self):
+        ok, detail = self._run(stdout="ok", stderr="")
+        self.assertTrue(ok)
+        self.assertIn("authenticated", detail)
+
+    def test_returns_false_on_nonzero_exit(self):
+        ok, detail = self._run(stdout="", returncode=1)
+        self.assertFalse(ok)
+        self.assertIn("gh auth login", detail)
+
+
+class PrintSetupChecksTests(unittest.TestCase):
+    def test_uses_check_and_cross_markers(self):
+        checks = [(True, "linear auth", "LINEAR_API_KEY"), (False, "gh command", "not found")]
+        out = StringIO()
+        with redirect_stdout(out):
+            print_setup_checks("Environment scan", checks)
+        rendered = out.getvalue()
+        self.assertIn("✓", rendered)
+        self.assertIn("✗", rendered)
+        self.assertIn("linear auth", rendered)
+        self.assertIn("gh command", rendered)
+
+    def test_title_is_present(self):
+        out = StringIO()
+        with redirect_stdout(out):
+            print_setup_checks("My Title", [])
+        self.assertIn("My Title", out.getvalue())
+
+
+class OnboardAutoDetectTests(unittest.TestCase):
+    def test_onboard_auto_fills_github_from_remote(self):
+        """onboard pre-populates --github-org/repo from git remote when absent."""
+        fake_remote = type("R", (), {"returncode": 0, "stdout": "git@github.com:myorg/myrepo.git\n"})()
+        fake_gh_auth = type("R", (), {"returncode": 0, "stdout": "", "stderr": "Logged in to github.com account myorg (keyring)\n"})()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path = Path(tmp) / "WORKFLOW.md"
+            credentials_path = str(Path(tmp) / "credentials.json")
+
+            def fake_run(cmd, **_kw):
+                if "get-url" in cmd:
+                    return fake_remote
+                if cmd[0] == "gh":
+                    return fake_gh_auth
+                return fake_remote
+
+            with patch("subprocess.run", side_effect=fake_run), \
+                 patch("shutil.which", return_value="/usr/bin/claude"), \
+                 patch("sys.stdin.isatty", return_value=False):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = main([
+                        "onboard",
+                        "--workflow-path", str(workflow_path),
+                        "--project-slug", "my-project",
+                        "--mode", "automated",
+                        "--linear-api-key", "lin_api_test",
+                        "--credentials-path", credentials_path,
+                    ])
+            self.assertEqual(0, result)
+            content = workflow_path.read_text()
+            self.assertIn("my-project", content)
 
 
 if __name__ == "__main__":
