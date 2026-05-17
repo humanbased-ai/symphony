@@ -1073,6 +1073,13 @@ be the first Phase 2 gate before desktop or productionization work expands.
 - [ ] **[CLI: Paginated init Q&A] (Linear: IN-268)** — break the orientation
   into versioned, bilingual Q&A pages with continue/skip controls and persisted
   completion only after the tutorial is actually shown.
+- [ ] **[CLI: Onboard UX redesign] (Linear: IN-283)** — redesign `sy onboard`
+  with an env-first flow: run environment scan first (derive GitHub org/repo
+  from `git remote`, runner presence from PATH, Linear auth from env), show a
+  compact status table with color-coded pass/warn/fail icons, ask only for
+  the gaps, and move the tutorial to an optional post-setup step. Use
+  consistent color semantics (green=ok, yellow=warn, red=missing, cyan=commands)
+  throughout scan, config, and tutorial phases.
 - [ ] **[Auth: Interactive/automated setup modes] (Linear: IN-268)** — make
   `symphony init` support guided interactive setup and non-prompting automated
   setup while detecting and validating Linear CLI/MCP auth, GitHub access
