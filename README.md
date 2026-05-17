@@ -105,6 +105,12 @@ Upgrade an existing `uv tool` install:
 uv tool install --force git+https://github.com/codatta/symphony.git
 ```
 
+Uninstall:
+
+```bash
+uv tool uninstall symphony
+```
+
 ## Get Started
 
 ### Local Development
