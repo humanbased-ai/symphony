@@ -11,8 +11,10 @@ from unittest.mock import patch
 from symphony.cli import (
     RuntimeWorkflowReloader,
     StartupError,
+    _auto_select_runner,
     _detect_github_from_remote,
     _check_gh_auth,
+    _runner_explicitly_set,
     create_runtime,
     create_status_api,
     create_status_http_server,
@@ -453,6 +455,34 @@ Invalid prompt.
 
         self.assertEqual("tick-result", result)
         self.assertEqual(1, runtime.ticks)
+
+
+class AutoSelectRunnerTests(unittest.TestCase):
+    def test_selects_claude_code_when_claude_is_installed(self):
+        with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None):
+            self.assertEqual("claude_code", _auto_select_runner())
+
+    def test_selects_codex_when_only_codex_is_installed(self):
+        with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/codex" if cmd == "codex" else None):
+            self.assertEqual("codex", _auto_select_runner())
+
+    def test_prefers_claude_code_when_both_installed(self):
+        with patch("shutil.which", return_value="/usr/bin/tool"):
+            self.assertEqual("claude_code", _auto_select_runner())
+
+    def test_falls_back_to_default_when_neither_installed(self):
+        with patch("shutil.which", return_value=None):
+            result = _auto_select_runner()
+            self.assertIn(result, ("claude_code", "codex"))  # whatever DEFAULT_RUNNER is
+
+    def test_runner_explicitly_set_detects_flag(self):
+        self.assertTrue(_runner_explicitly_set(["onboard", "--runner", "codex"]))
+
+    def test_runner_explicitly_set_returns_false_when_absent(self):
+        self.assertFalse(_runner_explicitly_set(["onboard", "--project-slug", "my-project"]))
+
+    def test_runner_explicitly_set_returns_false_for_none(self):
+        self.assertFalse(_runner_explicitly_set(None))
 
 
 class DetectGithubFromRemoteTests(unittest.TestCase):

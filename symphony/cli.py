@@ -660,6 +660,10 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         if detected_repo and not args.github_repo:
             args.github_repo = detected_repo
 
+    # Auto-select runner based on installed CLIs when the user didn't pass --runner
+    if not _runner_explicitly_set(argv):
+        args.runner = _auto_select_runner()
+
     _env_checks = setup_environment_checks(args)
     print_setup_checks("Environment scan", _env_checks)
 
@@ -1140,6 +1144,26 @@ def _check_gh_auth() -> tuple[bool, str]:
         return False, "gh CLI not found — install from cli.github.com"
     except Exception as exc:
         return False, str(exc)
+
+
+def _runner_explicitly_set(argv: Sequence[str] | None) -> bool:
+    """Return True if --runner was passed on the command line."""
+    return argv is not None and "--runner" in argv
+
+
+def _auto_select_runner() -> str:
+    """Return the best available runner based on installed CLIs.
+
+    Preference order: claude_code → codex → claude_code (fallback, let the
+    scan surface the missing dependency rather than silently defaulting).
+    """
+    claude_ok, _ = _check_command("claude")
+    if claude_ok:
+        return "claude_code"
+    codex_ok, _ = _check_command("codex")
+    if codex_ok:
+        return "codex"
+    return DEFAULT_RUNNER  # neither found; scan will show the failure
 
 
 def _detect_github_from_remote() -> tuple[str, str] | tuple[None, None]:
