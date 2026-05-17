@@ -16,12 +16,17 @@ implementation changes. Do not silently choose one contract over another.
 - If the current branch is `main`, create a feature branch before editing code.
 - Keep branch scope tied to one product or implementation change whenever practical.
 - Do not rewrite, reset, or discard user changes unless explicitly requested.
+- Never commit directly to `main` unless the user explicitly asks for a direct
+  `main` commit.
 
 ## Product And Tracker Traceability
 
 For behavior, architecture, workflow, configuration, or user-facing changes:
 
+- Read `prd.md` before implementation starts.
 - Update `prd.md` with the intended solution and relevant product context.
+- After implementation, sync `prd.md` again so it reflects the actual shipped
+  approach, validation, and any follow-up work.
 - Update any corresponding Linear issue with:
   - the selected solution,
   - the decision-making context,
@@ -37,6 +42,8 @@ change product intent, behavior, workflow, or release expectations.
 ## Implementation Process
 
 - Read the existing code and documents before proposing architecture.
+- Read `prd.md` before making implementation changes and confirm the intended
+  change is consistent with `prd.md`, `SPEC.md`, and `ARCHITECTURE.md`.
 - Prefer small, behavior-preserving changes over broad rewrites.
 - Keep orchestration, workspace safety, retry, reconciliation, and cleanup behavior
   explicit and testable.
@@ -45,6 +52,9 @@ change product intent, behavior, workflow, or release expectations.
   corresponding Linear issue.
 - Update docs in the same change when behavior, configuration, or workflow
   contracts change.
+- Create a pull request for completed changes. Do not treat local commits or a
+  pushed branch as the finished handoff unless the user explicitly asks to stop
+  before PR creation.
 
 ## Python Environment
 

@@ -492,22 +492,31 @@ change, Linear ticket updates, a PR, and review evidence.
 
 1. **No direct work on `main`.** Every implementation change starts on a feature
    branch named after the Linear issue or milestone, for example
-   `feat/linear-auth-token-store`.
+   `feat/linear-auth-token-store`. Agents must never commit directly to `main`
+   unless the user explicitly asks for a direct `main` commit.
 2. **One PR per independently reviewable outcome.** Keep PRs small enough that a
    reviewer can validate behavior, tests, and product intent without reading the
    entire system at once.
-3. **Linear is the implementation ledger.** Every phase and substantial task must
+3. **Read and sync the PRD.** Agents must read `prd.md` before implementation,
+   update it with the intended solution when behavior, architecture, workflow,
+   configuration, or user-facing expectations change, and sync it after
+   implementation so the shipped behavior, validation, and follow-up work are
+   accurate.
+4. **Linear is the implementation ledger.** Every phase and substantial task must
    have a corresponding Linear issue. The issue must record the selected
    solution, decision context, rejected alternatives, validation plan, and PR
    links.
-4. **Review loop is mandatory for code changes.** After opening a PR, request
+5. **PR creation is part of implementation.** Completed changes must be pushed
+   and opened as a pull request using the repository template unless the user
+   explicitly asks to stop before PR creation.
+6. **Review loop is mandatory for code changes.** After opening a PR, request
    review from another agent instance where available. Iterate through comments,
    fixes, and follow-up reviews until there are no blocking comments.
-5. **UI-impact evidence is required.** For UI-impacted PRs, run the app locally
+7. **UI-impact evidence is required.** For UI-impacted PRs, run the app locally
    and attach `.png` captures of changed screens. Committed screenshot
    artifacts must use Git LFS or another configured storage-saving large-file
    mechanism.
-6. **Validation must be written down.** Each PR must list targeted checks, full
+8. **Validation must be written down.** Each PR must list targeted checks, full
    gates that were run, skipped checks with reasons, and any manual verification.
 
 ### 6.2 Phase 0: Repository And Delivery Guardrails
@@ -517,6 +526,8 @@ change, Linear ticket updates, a PR, and review evidence.
 **Scope:**
 
 - Root `AGENTS.md` with branch, PR, Linear, review, and UI screenshot policy.
+- Root `CLAUDE.md` mirroring contribution-agent behavior for Claude Code
+  sessions.
 - PR template updates if the current template does not request Linear links,
   validation evidence, and UI screenshots.
 - Git LFS configuration for recurring binary review artifacts such as committed
@@ -526,6 +537,7 @@ change, Linear ticket updates, a PR, and review evidence.
 **Exit criteria:**
 
 - `AGENTS.md` is tracked.
+- `CLAUDE.md` is tracked for Claude Code contributors.
 - PR template captures solution, decision context, validation, and screenshots.
 - Git LFS or an equivalent storage-saving artifact policy is documented.
 - Linear contains implementation tickets for the MVP phase at minimum.
