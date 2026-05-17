@@ -107,10 +107,6 @@ uv tool install --force git+https://github.com/codatta/symphony.git
 
 ## Get Started
 
-```bash
-uv tool uninstall symphony
-```
-
 ### Local Development
 
 Use this path when you are changing Symphony itself rather than operating it:
