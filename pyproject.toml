@@ -17,6 +17,7 @@ Issues = "https://github.com/codatta/symphony/issues"
 
 [project.scripts]
 symphony = "symphony.cli:main"
+sy = "symphony.cli:main"
 
 [build-system]
 requires = ["setuptools>=69"]

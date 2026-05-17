@@ -92,6 +92,8 @@ Verify the command:
 
 ```bash
 symphony --help
+symphony --version
+symphony onboard --help
 symphony init --help
 symphony doctor --help
 symphony run --help
@@ -103,18 +105,75 @@ Upgrade an existing `uv tool` install:
 uv tool install --force git+https://github.com/codatta/symphony.git
 ```
 
+Uninstall:
+
+```bash
+uv tool uninstall symphony
+```
+
 ## Get Started
 
-Run onboarding from the repository where you want Symphony to create
+### Local Development
+
+Use this path when you are changing Symphony itself rather than operating it:
+
+```bash
+git clone https://github.com/codatta/symphony.git
+cd symphony
+uv sync
+uv run symphony --help
+```
+
+In the rest of this README, `symphony ...` means the installed CLI. From a
+development checkout, replace it with `uv run symphony ...`.
+
+Build release artifacts before tagging or attaching a release:
+
+```bash
+uv build
+ls dist/
+```
+
+This release-prep command should be verified in a network-enabled environment
+before cutting a release tag, because build isolation may need to download the
+configured build backend. Expected artifacts are a source distribution and wheel
+under `dist/`, for example `symphony-<version>.tar.gz` and
+`symphony-<version>-py3-none-any.whl`. Smoke test the wheel in an isolated CLI
+install from a clean `dist/` directory:
+
+```bash
+uv tool install --force ./dist/symphony-*.whl
+symphony --help
+```
+
+Native single-file binaries and Homebrew formulae are not part of this packaging
+slice. They remain follow-on distribution channels once the CLI command surface
+has stabilized.
+
+Release automation is defined in `.github/workflows/release.yml`. Use the
+manual `workflow_dispatch` path with `channel=dry-run` or `channel=staging` to
+build artifacts and smoke-test the installed wheel before cutting a stable
+`vX.Y.Z` tag for the main release channel. User-facing CLI changes should be
+recorded in `CHANGELOG.md` before a release tag is created.
+
+### First Run Setup
+
+Run onboarding from the repository where you want to keep the generated
 `WORKFLOW.md`:
 
 ```bash
-cd /path/to/your/repo
-symphony init --project-slug your-linear-project-slug
+symphony onboard --project-slug your-linear-project-slug
 ```
 
-In an interactive terminal, `symphony init` starts with a short orientation and
-then asks for:
+`symphony onboard` is the recommended first-run command. It scans the local
+environment first, reports detected Linear/GitHub auth and Claude/Codex tooling,
+and skips the init step when an existing `WORKFLOW.md` and local prerequisites
+already validate. Use `--overwrite` when you intentionally want to regenerate an
+existing workflow.
+
+In an interactive terminal, onboarding starts with a short paginated orientation
+when it has not been shown for the current tutorial version, then guides you
+through:
 
 - the Linear project slug;
 - active and terminal Linear state names;
@@ -129,7 +188,7 @@ config path. Keep raw tokens out of committed workflow files.
 For scripted setup, use automated mode:
 
 ```bash
-symphony init \
+symphony onboard \
   --mode automated \
   --project-slug your-linear-project-slug \
   --linear-api-key lin_api_... \
@@ -141,6 +200,11 @@ symphony init \
 `--yes` remains available as an alias for `--mode automated`. Automated setup
 never prompts; if required input or local auth is missing, it exits with
 remediation steps before writing `WORKFLOW.md`.
+
+`symphony init` remains available as the lower-level workflow generation command
+for scripted setups that do not need skip/resume behavior.
+
+Available presets are `codex-safe`, `codex-autonomous`, and `review-only`.
 
 ## Validate Setup
 
