@@ -132,9 +132,9 @@ def build_run_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_init_parser() -> argparse.ArgumentParser:
+def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog=f"{_cli_name()} init",
+        prog=prog or f"{_cli_name()} init",
         description="Generate a starter WORKFLOW.md and optionally store local credentials.",
     )
     _add_version_argument(parser)
@@ -209,8 +209,7 @@ def build_init_parser() -> argparse.ArgumentParser:
 
 
 def build_onboard_parser() -> argparse.ArgumentParser:
-    parser = build_init_parser()
-    parser.prog = f"{_cli_name()} onboard"
+    parser = build_init_parser(prog=f"{_cli_name()} onboard")
     parser.description = (
         "Run first-time setup, skipping init when an existing WORKFLOW.md "
         "and local prerequisites already validate."
@@ -877,6 +876,8 @@ def setup_environment_checks(
     if runner == "claude_code":
         command_ok, command_detail = _check_command("claude")
         checks.append((command_ok, "claude command", command_detail))
+        gh_ok, gh_detail = _check_command("gh")
+        checks.append((gh_ok, "gh command", gh_detail if gh_ok else f"{gh_detail} — install from cli.github.com"))
         github_source = _github_auth_source(
             getattr(args, "github_token", None),
             credentials_path=getattr(args, "credentials_path", None),
@@ -1007,6 +1008,8 @@ def doctor_checks(
     if context.config.agent.runner == "claude_code":
         command_ok, command_check = _check_command(context.config.claude_code.command)
         checks.append((command_ok, "claude command", command_check))
+        gh_ok, gh_check = _check_command("gh")
+        checks.append((gh_ok, "gh command", gh_check if gh_ok else f"{gh_check} — install from cli.github.com"))
         github_source = _github_auth_source(None, credentials_path=None, environ=environ)
         if github_source:
             checks.append((True, "github auth", github_source))
