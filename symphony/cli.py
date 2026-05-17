@@ -6,7 +6,6 @@ import getpass
 import logging
 import logging.handlers
 import os
-import signal
 import shlex
 import shutil
 import subprocess
@@ -339,14 +338,9 @@ async def run_once(runtime: SymphonyRuntime) -> RuntimeTickResult:
     return await runtime.run_tick()
 
 
-async def run_poll_loop(
-    runtime: SymphonyRuntime,
-    *,
-    before_tick: TickHook | None = None,
-    shutdown_event: asyncio.Event | None = None,
-) -> None:
+async def run_poll_loop(runtime: SymphonyRuntime, *, before_tick: TickHook | None = None) -> None:
     await runtime.record_startup_issues()
-    while shutdown_event is None or not shutdown_event.is_set():
+    while True:
         try:
             if before_tick is not None:
                 result = before_tick()
@@ -355,11 +349,11 @@ async def run_poll_loop(
             result = await runtime.run_tick()
         except LinearClientError as exc:
             LOGGER.warning("Linear API error during poll tick, will retry next interval: %s", exc)
-            await _sleep_until_next_tick(runtime, shutdown_event)
+            await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
             continue
         except Exception as exc:
             LOGGER.error("Unexpected error during poll tick, will retry next interval: %s", exc, exc_info=True)
-            await _sleep_until_next_tick(runtime, shutdown_event)
+            await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
             continue
         LOGGER.info(
             "Tick completed: fetched=%s dispatched=%s completed=%s failed=%s released=%s",
@@ -369,18 +363,7 @@ async def run_poll_loop(
             ",".join(result.failed) or "-",
             ",".join(result.released) or "-",
         )
-        await _sleep_until_next_tick(runtime, shutdown_event)
-
-
-async def _sleep_until_next_tick(runtime: SymphonyRuntime, shutdown_event: asyncio.Event | None) -> None:
-    interval_seconds = runtime.state.poll_interval_ms / 1000
-    if shutdown_event is None:
-        await asyncio.sleep(interval_seconds)
-        return
-    try:
-        await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
-    except TimeoutError:
-        pass
+        await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
 
 
 async def serve_status_api(status_api: StatusAPI, port: int) -> None:
@@ -447,64 +430,28 @@ async def run_daemon(
     *,
     workflow_reloader: "RuntimeWorkflowReloader | None" = None,
     status_server: StatusServer = serve_status_api,
-    shutdown_event: asyncio.Event | None = None,
 ) -> None:
-    loop = asyncio.get_running_loop()
-    active_shutdown_event = shutdown_event or asyncio.Event()
-    installed_signals = _install_shutdown_signal_handlers(loop, active_shutdown_event)
     status_api = create_status_api(runtime)
     status_task = asyncio.create_task(status_server(status_api, context.port))
     poll_task = asyncio.create_task(
         run_poll_loop(
             runtime,
             before_tick=workflow_reloader.reload_if_changed if workflow_reloader is not None else None,
-            shutdown_event=active_shutdown_event,
         )
     )
     tasks = {status_task, poll_task}
 
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in done:
             task.result()
         for task in pending:
             task.cancel()
     finally:
-        _remove_shutdown_signal_handlers(loop, installed_signals)
         for task in tasks:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-
-
-def _install_shutdown_signal_handlers(
-    loop: asyncio.AbstractEventLoop,
-    shutdown_event: asyncio.Event,
-) -> tuple[signal.Signals, ...]:
-    installed: list[signal.Signals] = []
-
-    def request_shutdown(signum: signal.Signals) -> None:
-        LOGGER.info("Received %s, shutting down after current tick", signum.name)
-        shutdown_event.set()
-
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(signum, request_shutdown, signum)
-        except (NotImplementedError, RuntimeError, ValueError):
-            continue
-        installed.append(signum)
-    return tuple(installed)
-
-
-def _remove_shutdown_signal_handlers(
-    loop: asyncio.AbstractEventLoop,
-    installed_signals: tuple[signal.Signals, ...],
-) -> None:
-    for signum in installed_signals:
-        try:
-            loop.remove_signal_handler(signum)
-        except (NotImplementedError, RuntimeError, ValueError):
-            continue
 
 
 @dataclass
@@ -809,13 +756,10 @@ def _automated_setup_failures(
         command_ok, command_detail = _check_command("claude")
         if not command_ok:
             failures.append(f"claude command: {command_detail}; install Claude Code and run: claude login")
-        gh_ok, gh_detail = _check_gh_auth()
-        if not gh_ok:
-            failures.append(f"gh auth: {gh_detail}")
-        if not _has_github_setup_token(github_token, credentials_path=args.credentials_path):
+        if not _has_github_setup_auth(github_token, credentials_path=args.credentials_path):
             failures.append(
-                "github token: pass --github-token, set GITHUB_TOKEN, "
-                "or run interactive setup"
+                "github auth: run: gh auth login, pass --github-token, "
+                "set GITHUB_TOKEN, or run interactive setup"
             )
     else:
         command_ok, command_detail = _check_command(args.codex_command)
@@ -841,12 +785,15 @@ def _has_linear_setup_auth(token: str | None, *, credentials_path: str | Path | 
     return load_local_linear_token(path=credentials_path) is not None
 
 
-def _has_github_setup_token(token: str | None, *, credentials_path: str | Path | None) -> bool:
+def _has_github_setup_auth(token: str | None, *, credentials_path: str | Path | None) -> bool:
     if token and token.strip():
         return True
     if os.environ.get("GITHUB_TOKEN", "").strip():
         return True
-    return load_local_github_token(path=credentials_path) is not None
+    if load_local_github_token(path=credentials_path) is not None:
+        return True
+    ok, _detail = _check_gh_auth()
+    return ok
 
 
 def doctor_main(argv: Sequence[str] | None = None) -> int:

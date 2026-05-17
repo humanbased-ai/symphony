@@ -5,7 +5,6 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
 
 from symphony.cli import (
     RuntimeWorkflowReloader,
@@ -16,11 +15,9 @@ from symphony.cli import (
     doctor_checks,
     load_startup_context,
     main,
-    run_daemon,
     run_once,
 )
 from symphony.orchestrator import OrchestratorState
-from symphony.runtime import RuntimeTickResult
 
 
 class CLITests(unittest.TestCase):
@@ -176,39 +173,6 @@ Body
             self.assertIn("automated setup failed", message)
             self.assertIn("--project-slug", message)
             self.assertIn("linear auth", message)
-            self.assertFalse(workflow_path.exists())
-
-    def test_init_automated_checks_gh_cli_even_with_github_token(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            workflow_path = Path(temp_dir) / "WORKFLOW.md"
-            stderr = StringIO()
-
-            with patch("symphony.cli._check_command", return_value=(True, "/usr/bin/claude")):
-                with patch("symphony.cli._check_gh_auth", return_value=(False, "gh CLI not found — install from cli.github.com")):
-                    with redirect_stderr(stderr):
-                        with self.assertRaises(SystemExit) as raised:
-                            main(
-                                [
-                                    "init",
-                                    "--mode",
-                                    "automated",
-                                    "--workflow-path",
-                                    str(workflow_path),
-                                    "--project-slug",
-                                    "symphony-ai-agent-orchestration",
-                                    "--linear-api-key",
-                                    "lin_secret",
-                                    "--github-token",
-                                    "ghp_secret",
-                                    "--github-org",
-                                    "codatta",
-                                    "--github-repo",
-                                    "symphony",
-                                ]
-                            )
-
-            self.assertEqual(2, raised.exception.code)
-            self.assertIn("gh CLI not found", stderr.getvalue())
             self.assertFalse(workflow_path.exists())
 
     def test_doctor_checks_validate_command_and_workspace(self):
@@ -388,58 +352,6 @@ Invalid prompt.
             self.assertEqual("First prompt.", runtime.prompt_template)
             self.assertEqual(5000, runtime.state.poll_interval_ms)
             self.assertIsNotNone(reloader.reloader.last_error)
-
-    def test_run_daemon_shutdown_waits_for_current_tick(self):
-        async def exercise():
-            shutdown_event = asyncio.Event()
-            tick_entered = asyncio.Event()
-            release_tick = asyncio.Event()
-
-            class FakeRuntime:
-                def __init__(self):
-                    self.state = OrchestratorState(
-                        poll_interval_ms=10,
-                        max_concurrent_agents=1,
-                        active_states=("Todo",),
-                        terminal_states=("Done",),
-                    )
-                    self.completed = False
-
-                def snapshot(self):
-                    return self.state
-
-                async def record_startup_issues(self):
-                    return None
-
-                async def run_tick(self):
-                    tick_entered.set()
-                    shutdown_event.set()
-                    await release_tick.wait()
-                    self.completed = True
-                    return RuntimeTickResult(fetched=0)
-
-            async def status_server(_api, _port):
-                await asyncio.Event().wait()
-
-            runtime = FakeRuntime()
-            context = type("Context", (), {"port": 7337})()
-            task = asyncio.create_task(
-                run_daemon(
-                    runtime,
-                    context,
-                    status_server=status_server,
-                    shutdown_event=shutdown_event,
-                )
-            )
-            await asyncio.wait_for(tick_entered.wait(), timeout=1)
-            await asyncio.sleep(0)
-            self.assertFalse(task.done())
-
-            release_tick.set()
-            await asyncio.wait_for(task, timeout=1)
-            self.assertTrue(runtime.completed)
-
-        asyncio.run(exercise())
 
     def test_run_once_delegates_to_runtime_tick(self):
         class FakeRuntime:
