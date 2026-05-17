@@ -660,7 +660,15 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         if detected_repo and not args.github_repo:
             args.github_repo = detected_repo
 
-    print_setup_checks("Environment scan", setup_environment_checks(args))
+    _env_checks = setup_environment_checks(args)
+    print_setup_checks("Environment scan", _env_checks)
+
+    # Propagate env-detected credentials into args so _run_init_with_args
+    # does not re-prompt for auth the scan already validated.
+    if not getattr(args, "linear_api_key", None) and os.environ.get("LINEAR_API_KEY"):
+        args.linear_api_key = os.environ["LINEAR_API_KEY"]
+    if not getattr(args, "github_token", None) and os.environ.get("GITHUB_TOKEN"):
+        args.github_token = os.environ["GITHUB_TOKEN"]
 
     workflow_path = Path(args.workflow_path).expanduser()
     if workflow_path.exists() and not args.overwrite:
@@ -1148,6 +1156,10 @@ def _detect_github_from_remote() -> tuple[str, str] | tuple[None, None]:
         url = result.stdout.strip()
         # SSH: git@github.com:org/repo.git
         m = re.match(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$", url)
+        if m:
+            return m.group(1), m.group(2)
+        # ssh:// URL: ssh://git@github.com/org/repo.git
+        m = re.match(r"ssh://git@github\.com/([^/]+)/([^/]+?)(?:\.git)?$", url)
         if m:
             return m.group(1), m.group(2)
         # HTTPS: https://github.com/org/repo.git
