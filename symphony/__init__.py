@@ -1,5 +1,13 @@
 """Symphony Python implementation."""
 
+import tomllib
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
 __all__ = ["__version__"]
 
-__version__ = "0.1.0"
+try:
+    __version__ = version("symphony")
+except PackageNotFoundError:
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    __version__ = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]

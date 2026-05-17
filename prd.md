@@ -783,6 +783,91 @@ local checkout installs, wheel/sdist generation with `uv build`, and isolated
 wheel smoke testing. Native single-file binaries and Homebrew remain explicit
 follow-on distribution channels instead of Phase 2A blockers.
 
+### 6.4.1 Phase 2A Follow-Up: Production CLI Release And Onboarding UX
+
+**Linear issue:** IN-280 — Productionize Symphony CLI release and onboarding UX.
+
+**Goal:** Turn the packaged CLI slice into an operator-ready product surface:
+versioned commands, release automation, staging/main release channels, and an
+onboarding flow that detects existing local tools and auth before asking users
+for secrets or configuration.
+
+**Selected solution:**
+
+- Keep `symphony init` as the low-level workflow generator and add
+  `symphony onboard` as the recommended first-run entrypoint. `onboard` runs the
+  same init/tutorial flow when setup is missing, but first checks whether a
+  valid `WORKFLOW.md` and local prerequisites already exist. If setup is already
+  valid, it reports the completed checks and skips regeneration by default.
+- Add `symphony --version` using the Python package version as the single source
+  of truth. The value must match the installable artifact version and should not
+  be copied into multiple runtime constants.
+- Show an environment readiness summary before interactive setup writes any
+  files. The summary covers detected Linear auth source, GitHub auth source,
+  runner command availability, configured repository inputs, existing workflow
+  state, and exact next commands for missing prerequisites.
+- Prefer existing authenticated developer tooling over token prompts: `gh` for
+  GitHub, environment variables or the local Symphony credentials file for
+  Linear/GitHub tokens, and installed `claude` / `codex` commands for runners.
+  Linear CLI/MCP auth remains part of the longer-term target, but the CLI must
+  keep personal API keys as a headless fallback.
+- Establish release discipline around `CHANGELOG.md`, tagged versions, and a
+  GitHub Actions release workflow. The workflow builds wheel/sdist artifacts,
+  installs the wheel in a clean environment, and runs CLI smoke checks before
+  allowing a publish job to target the `staging` or `main` environment.
+- Keep publishing guarded. Staging release validation may run from manual
+  dispatch or prerelease tags; main publishing should run only for stable tags
+  and protected GitHub environments.
+
+**Decision context:**
+
+- IN-205 proved the basic packaged CLI and guided setup. IN-280 is not a
+  replacement for that work; it closes the productization gap between an
+  installable command and a releaseable operator tool.
+- `init` should remain scriptable and deterministic. A separate `onboard`
+  command lets first-time users ask Symphony to decide whether setup can be
+  skipped, resumed, or rerun without weakening `init` as a config-generation
+  primitive.
+- A release workflow without an immediate public PyPI publish is still useful:
+  it proves artifact integrity, exercises installed CLI behavior, and gives the
+  team a staging gate before enabling production credentials.
+- Detecting local auth must not become a fragile network dependency. Setup
+  should run fast local probes first and reserve network-backed identity or repo
+  access checks for tools that already expose a stable CLI status command.
+
+**Scope:**
+
+- `symphony --version` and stable help for production command discovery.
+- `symphony onboard` as the first-run wrapper around tutorial, environment
+  scan, init generation, and skip/resume behavior.
+- Shared setup preflight checks for init/onboard/doctor covering workflow
+  presence, Linear token source, GitHub auth source, runner command presence,
+  workspace writability, logs/status settings where a workflow exists, and
+  remediation commands.
+- Release notes in `CHANGELOG.md` and README updates for version, onboarding,
+  and release workflow usage.
+- GitHub Actions release workflow with dry-run/staging/main controls, artifact
+  build, wheel install smoke test, and protected environment hooks.
+
+**Exit criteria:**
+
+- `symphony --version` works from both `uv run symphony` and an installed wheel.
+- `symphony onboard --mode automated` never prompts; if setup is already valid
+  it skips init and reports the checks, otherwise it fails before writing files
+  with exact missing inputs.
+- `symphony onboard` in an interactive terminal shows local readiness before
+  prompting and can reuse the existing init flow when setup must be generated.
+- Existing valid setup is not overwritten unless the user explicitly passes
+  `--overwrite`.
+- `symphony doctor` and onboarding reports use consistent labels for auth/tool
+  sources.
+- Release automation can build artifacts, install the wheel, and verify
+  `symphony --help`, `symphony --version`, `symphony init --help`,
+  `symphony onboard --help`, `symphony doctor --help`, and
+  `symphony run --help`.
+- PR validation includes focused CLI tests and any release workflow syntax checks
+  that can run locally.
+
 ### 6.5 Phase 2B: Standalone App And Linear Productionization
 
 **Goal:** Make Symphony approachable and secure after the CLI MVP loop works.

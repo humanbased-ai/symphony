@@ -16,7 +16,9 @@ from symphony.cli import (
     load_startup_context,
     main,
     run_once,
+    setup_environment_checks,
 )
+from symphony import __version__
 from symphony.orchestrator import OrchestratorState
 
 
@@ -27,6 +29,15 @@ class CLITests(unittest.TestCase):
                 main(["--help"])
 
         self.assertEqual(0, raised.exception.code)
+
+    def test_version_exits_successfully_without_workflow_file(self):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as raised:
+                main(["--version"])
+
+        self.assertEqual(0, raised.exception.code)
+        self.assertIn(__version__, stdout.getvalue())
 
     def test_load_startup_context_validates_workflow_and_resolves_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -122,6 +133,45 @@ Body
 
             self.assertEqual(0, result)
 
+    def test_onboard_skips_existing_valid_workflow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: symphony-ai-agent-orchestration
+workspace:
+  root: workspaces
+agent:
+  runner: codex
+codex:
+  command: python --version
+---
+Body
+""",
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                result = main(
+                    [
+                        "onboard",
+                        "--mode",
+                        "automated",
+                        "--workflow-path",
+                        str(workflow_path),
+                        "--runner",
+                        "codex",
+                    ]
+                )
+
+            self.assertEqual(0, result)
+            self.assertIn("Onboarding already complete", stdout.getvalue())
+            self.assertIn("Skipped init", stdout.getvalue())
+
     def test_init_subcommand_writes_workflow_and_local_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -174,6 +224,29 @@ Body
             self.assertIn("--project-slug", message)
             self.assertIn("linear auth", message)
             self.assertFalse(workflow_path.exists())
+
+    def test_setup_environment_checks_reports_configured_auth_sources(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = Path(temp_dir) / "credentials.json"
+            args = type(
+                "Args",
+                (),
+                {
+                    "workflow_path": str(Path(temp_dir) / "WORKFLOW.md"),
+                    "linear_api_key": "lin_secret",
+                    "github_token": None,
+                    "credentials_path": str(credentials_path),
+                    "runner": "codex",
+                    "codex_command": "python --version",
+                    "github_org": None,
+                    "github_repo": None,
+                },
+            )()
+
+            checks = setup_environment_checks(args, environ={})
+
+            self.assertIn((True, "linear auth", "--linear-api-key"), checks)
+            self.assertTrue(any(label == "codex command" and ok for ok, label, _ in checks))
 
     def test_doctor_checks_validate_command_and_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:

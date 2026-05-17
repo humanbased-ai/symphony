@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
+from symphony import __version__
 from symphony.agents.claude_code import ClaudeCodeRunner
 from symphony.agents.codex import CodexRunner
 from symphony.auth import (
@@ -56,6 +57,14 @@ TickHook = Callable[[], Any]
 StatusServer = Callable[[StatusAPI, int], Awaitable[None]]
 
 
+def _cli_name() -> str:
+    """Return the name used to invoke this CLI (e.g. 'symphony' or 'sy')."""
+    if not sys.argv:
+        return "symphony"
+    name = Path(sys.argv[0]).name
+    return name[:-3] if name.endswith(".py") else name
+
+
 @dataclass(frozen=True)
 class StartupContext:
     workflow_path: Path
@@ -70,11 +79,16 @@ class StartupError(RuntimeError):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    cli = _cli_name()
     parser = argparse.ArgumentParser(
-        prog="symphony",
+        prog=cli,
         description="Run the Symphony CLI MVP orchestrator for a repository WORKFLOW.md.",
-        epilog="Common commands: symphony init, symphony doctor WORKFLOW.md, symphony run WORKFLOW.md",
+        epilog=(
+            f"Common commands: {cli} onboard, {cli} init, "
+            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md"
+        ),
     )
+    _add_version_argument(parser)
     parser.add_argument(
         "workflow_path",
         nargs="?",
@@ -113,16 +127,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def build_run_parser() -> argparse.ArgumentParser:
     parser = build_parser()
-    parser.prog = "symphony run"
+    parser.prog = f"{_cli_name()} run"
     parser.description = "Run the Symphony orchestrator for a repository WORKFLOW.md."
     return parser
 
 
 def build_init_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="symphony init",
-        description="Generate a starter WORKFLOW.md and optionally store Linear CLI credentials.",
+        prog=f"{_cli_name()} init",
+        description="Generate a starter WORKFLOW.md and optionally store local credentials.",
     )
+    _add_version_argument(parser)
     parser.add_argument(
         "--workflow-path",
         default=DEFAULT_WORKFLOW_PATH,
@@ -193,11 +208,22 @@ def build_init_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_onboard_parser() -> argparse.ArgumentParser:
+    parser = build_init_parser()
+    parser.prog = f"{_cli_name()} onboard"
+    parser.description = (
+        "Run first-time setup, skipping init when an existing WORKFLOW.md "
+        "and local prerequisites already validate."
+    )
+    return parser
+
+
 def build_doctor_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="symphony doctor",
+        prog=f"{_cli_name()} doctor",
         description="Check workflow, Linear auth, Codex command, and workspace readiness.",
     )
+    _add_version_argument(parser)
     parser.add_argument(
         "workflow_path",
         nargs="?",
@@ -222,6 +248,14 @@ def build_doctor_parser() -> argparse.ArgumentParser:
         help="Console log level. Defaults to WARNING.",
     )
     return parser
+
+
+def _add_version_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"{parser.prog} {__version__}",
+    )
 
 
 def load_startup_context(
@@ -528,6 +562,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = raw_args[0]
         if command == "init":
             return init_main(raw_args[1:])
+        if command == "onboard":
+            return onboard_main(raw_args[1:])
         if command == "doctor":
             return doctor_main(raw_args[1:])
         if command == "run":
@@ -585,10 +621,46 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
 def init_main(argv: Sequence[str] | None = None) -> int:
     parser = build_init_parser()
     args = parser.parse_args(argv)
+    return _run_init_with_args(args, parser, command_name="init")
 
+
+def onboard_main(argv: Sequence[str] | None = None) -> int:
+    parser = build_onboard_parser()
+    args = parser.parse_args(argv)
+
+    print_setup_checks("Environment scan", setup_environment_checks(args))
+
+    workflow_path = Path(args.workflow_path).expanduser()
+    if workflow_path.exists() and not args.overwrite:
+        checks = doctor_checks(workflow_path, logs_root="./log", port=DEFAULT_PORT)
+        print_setup_checks("Existing setup", checks)
+        if all(ok for ok, _, _ in checks):
+            print(f"Onboarding already complete: {workflow_path}")
+            print("Skipped init because WORKFLOW.md and local prerequisites validated.")
+            return 0
+
+        message = (
+            "existing workflow needs attention; run `symphony doctor "
+            f"{workflow_path}` or rerun onboarding with --overwrite"
+        )
+        parser.exit(2, f"symphony onboard: {message}\n")
+
+    return _run_init_with_args(args, parser, command_name="onboard", show_environment_scan=False)
+
+
+def _run_init_with_args(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    *,
+    command_name: str,
+    show_environment_scan: bool = True,
+) -> int:
     try:
         mode = _resolve_init_mode(args)
         automated = mode == "automated"
+
+        if show_environment_scan:
+            print_setup_checks("Environment scan", setup_environment_checks(args))
 
         if not automated:
             run_init_tutorial_once()
@@ -690,7 +762,7 @@ def init_main(argv: Sequence[str] | None = None) -> int:
         )
         workflow_path = write_workflow(args.workflow_path, workflow, overwrite=args.overwrite)
     except OnboardingError as exc:
-        parser.exit(2, f"symphony init: {exc}\n")
+        parser.exit(2, f"symphony {command_name}: {exc}\n")
 
     if linear_token:
         credentials_path = save_local_linear_token(linear_token, path=args.credentials_path)
@@ -777,23 +849,130 @@ def _format_setup_failures(failures: Sequence[str]) -> str:
     return "\n".join(lines)
 
 
-def _has_linear_setup_auth(token: str | None, *, credentials_path: str | Path | None) -> bool:
+def setup_environment_checks(
+    args: argparse.Namespace,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> list[tuple[bool, str, str]]:
+    env = environ if environ is not None else os.environ
+    workflow_path = Path(args.workflow_path).expanduser()
+    workflow_detail = str(workflow_path) if workflow_path.exists() else f"will create {workflow_path}"
+    checks: list[tuple[bool, str, str]] = [(True, "workflow", workflow_detail)]
+
+    linear_source = _linear_setup_auth_source(
+        getattr(args, "linear_api_key", None),
+        credentials_path=getattr(args, "credentials_path", None),
+        environ=env,
+    )
+    checks.append(
+        (
+            linear_source is not None,
+            "linear auth",
+            linear_source
+            or "not found — pass --linear-api-key, set LINEAR_API_KEY, or run interactive setup",
+        )
+    )
+
+    runner = getattr(args, "runner", DEFAULT_RUNNER)
+    if runner == "claude_code":
+        command_ok, command_detail = _check_command("claude")
+        checks.append((command_ok, "claude command", command_detail))
+        github_source = _github_auth_source(
+            getattr(args, "github_token", None),
+            credentials_path=getattr(args, "credentials_path", None),
+            environ=env,
+        )
+        checks.append(
+            (
+                github_source is not None,
+                "github auth",
+                github_source
+                or "not found — run: gh auth login, pass --github-token, or set GITHUB_TOKEN",
+            )
+        )
+        github_org = getattr(args, "github_org", None) or ""
+        github_repo = getattr(args, "github_repo", None) or ""
+        repo_detail = f"{github_org}/{github_repo}" if github_org and github_repo else "not configured yet"
+        checks.append((bool(github_org and github_repo), "github repo", repo_detail))
+    else:
+        command_ok, command_detail = _check_command(getattr(args, "codex_command", "codex app-server"))
+        checks.append((command_ok, "codex command", command_detail))
+
+    return checks
+
+
+def print_setup_checks(title: str, checks: Sequence[tuple[bool, str, str]]) -> None:
+    print(f"\n{title}:")
+    for ok, label, detail in checks:
+        marker = "ok" if ok else "needs setup"
+        print(f"[{marker}] {label}: {detail}")
+
+
+def _linear_setup_auth_source(
+    token: str | None,
+    *,
+    credentials_path: str | Path | None,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    env = environ if environ is not None else os.environ
     if token and token.strip():
-        return True
-    if os.environ.get("LINEAR_API_KEY", "").strip():
-        return True
-    return load_local_linear_token(path=credentials_path) is not None
+        return "--linear-api-key"
+    if env.get("LINEAR_API_KEY", "").strip():
+        return "LINEAR_API_KEY"
+    if load_local_linear_token(path=credentials_path, environ=env) is not None:
+        path = Path(credentials_path).expanduser() if credentials_path else default_credentials_path(env)
+        return f"local credentials file ({path})"
+    return None
+
+
+def _github_auth_source(
+    token: str | None,
+    *,
+    credentials_path: str | Path | None,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    env = environ if environ is not None else os.environ
+    if token and token.strip():
+        return "--github-token"
+    if env.get("GITHUB_TOKEN", "").strip():
+        return "GITHUB_TOKEN"
+    if load_local_github_token(path=credentials_path, environ=env) is not None:
+        path = Path(credentials_path).expanduser() if credentials_path else default_credentials_path(env)
+        return f"local credentials file ({path})"
+    gh_ok, gh_detail = _check_gh_auth()
+    return f"gh ({gh_detail})" if gh_ok else None
+
+
+def _linear_runtime_auth_source(
+    config: WorkflowConfig,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    env = environ if environ is not None else os.environ
+    if env.get("LINEAR_API_KEY", "").strip():
+        return "LINEAR_API_KEY"
+
+    configured = config.tracker.api_key
+    if configured:
+        if configured.startswith("$"):
+            env_name = configured[1:]
+            if env.get(env_name, "").strip():
+                return f"WORKFLOW.md env var {configured}"
+        else:
+            return "WORKFLOW.md tracker.api_key"
+
+    if load_local_linear_token(environ=env) is not None:
+        return f"local credentials file ({default_credentials_path(env)})"
+
+    return "token resolved"
+
+
+def _has_linear_setup_auth(token: str | None, *, credentials_path: str | Path | None) -> bool:
+    return _linear_setup_auth_source(token, credentials_path=credentials_path) is not None
 
 
 def _has_github_setup_auth(token: str | None, *, credentials_path: str | Path | None) -> bool:
-    if token and token.strip():
-        return True
-    if os.environ.get("GITHUB_TOKEN", "").strip():
-        return True
-    if load_local_github_token(path=credentials_path) is not None:
-        return True
-    ok, _detail = _check_gh_auth()
-    return ok
+    return _github_auth_source(token, credentials_path=credentials_path) is not None
 
 
 def doctor_main(argv: Sequence[str] | None = None) -> int:
@@ -823,18 +1002,22 @@ def doctor_checks(
         return checks
 
     checks.append((True, "workflow", str(context.workflow_path)))
-    checks.append((True, "linear auth", "token resolved"))
+    checks.append((True, "linear auth", _linear_runtime_auth_source(context.config, environ=environ)))
 
     if context.config.agent.runner == "claude_code":
         command_ok, command_check = _check_command(context.config.claude_code.command)
         checks.append((command_ok, "claude command", command_check))
-        gh_ok, gh_check = _check_gh_auth()
-        checks.append((gh_ok, "gh auth", gh_check))
-        github_token = _resolve_github_token()
-        if github_token:
-            checks.append((True, "github token", "resolved"))
+        github_source = _github_auth_source(None, credentials_path=None, environ=environ)
+        if github_source:
+            checks.append((True, "github auth", github_source))
         else:
-            checks.append((False, "github token", "not found — run symphony init --github-token or set GITHUB_TOKEN"))
+            checks.append(
+                (
+                    False,
+                    "github auth",
+                    "not found — run: gh auth login, run symphony init --github-token, or set GITHUB_TOKEN",
+                )
+            )
     else:
         command_ok, command_check = _check_command(context.config.codex.command)
         checks.append((command_ok, "codex command", command_check))
@@ -887,12 +1070,16 @@ def _resolve_linear_token(config: WorkflowConfig) -> str | None:
         return None
 
 
-def _resolve_github_token(credentials_path: Path | None = None) -> str | None:
-    import os
-    token = os.environ.get("GITHUB_TOKEN")
+def _resolve_github_token(
+    credentials_path: Path | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    env = environ if environ is not None else os.environ
+    token = env.get("GITHUB_TOKEN")
     if token:
         return token
-    return load_local_github_token(path=credentials_path)
+    return load_local_github_token(path=credentials_path, environ=env)
 
 
 def _validate_github_token(token: str) -> str | None:

@@ -1,0 +1,134 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel to validate or publish
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - staging
+          - main
+      publish:
+        description: Upload artifacts to the configured package repository
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-artifacts:
+    name: Build and smoke-test artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
+      - name: Capture package version
+        id: version
+        run: |
+          VERSION="$(python - <<'PY'
+import tomllib
+from pathlib import Path
+
+payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+print(payload["project"]["version"])
+PY
+)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel and source distribution
+        run: uv build
+
+      - name: Smoke-test installed CLI
+        run: |
+          python -m venv /tmp/symphony-release-smoke
+          /tmp/symphony-release-smoke/bin/python -m pip install --upgrade pip
+          /tmp/symphony-release-smoke/bin/python -m pip install dist/*.whl
+          /tmp/symphony-release-smoke/bin/symphony --help
+          /tmp/symphony-release-smoke/bin/symphony --version
+          /tmp/symphony-release-smoke/bin/symphony init --help
+          /tmp/symphony-release-smoke/bin/symphony onboard --help
+          /tmp/symphony-release-smoke/bin/symphony doctor --help
+          /tmp/symphony-release-smoke/bin/symphony run --help
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: symphony-${{ steps.version.outputs.version }}-dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish-staging:
+    name: Publish staging
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    environment: staging
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.channel == 'staging' &&
+      inputs.publish
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: symphony-${{ needs.build-artifacts.outputs.version }}-dist
+          path: dist
+
+      - name: Publish staging artifacts
+        env:
+          TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.TWINE_PASSWORD }}
+          TWINE_REPOSITORY_URL: ${{ secrets.TWINE_REPOSITORY_URL }}
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload --repository-url "$TWINE_REPOSITORY_URL" dist/*
+
+  publish-main:
+    name: Publish main
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    environment: main
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.channel == 'main' && inputs.publish)
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: symphony-${{ needs.build-artifacts.outputs.version }}-dist
+          path: dist
+
+      - name: Publish main artifacts
+        env:
+          TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.TWINE_PASSWORD }}
+          TWINE_REPOSITORY_URL: ${{ secrets.TWINE_REPOSITORY_URL }}
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload --repository-url "$TWINE_REPOSITORY_URL" dist/*
