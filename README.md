@@ -155,7 +155,8 @@ Expected checks:
 - `WORKFLOW.md` parses successfully;
 - Linear auth resolves;
 - the configured workspace root is writable;
-- `gh` is authenticated or a GitHub token resolves;
+- `gh auth` resolves;
+- a GitHub token resolves;
 - the selected agent command is available;
 - logs and status API paths are printable.
 
