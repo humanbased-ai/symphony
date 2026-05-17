@@ -1048,6 +1048,27 @@ PRD in the same branch so the routine remains discoverable for future agents.
   `/api/v1/refresh`, and `/api/v1/health`, plus a FastAPI factory for
   environments where FastAPI is installed.
 
+**SPEC gap refinements (decided 2026-05-18, isolation-first):**
+
+- [ ] **[Core: Per-run workspace isolation] (Linear: IN-286)** — Symphony owns
+  workspace setup per the isolation matrix in §8.1. Bare clone + `git worktree`
+  per dispatch (working tree and branch isolated; object store shared for monorepo
+  efficiency). Per-session env var credential injection. Per-issue log file.
+  Stale worktree pruning on startup. See §8.1 for the full isolation matrix.
+- [ ] **[Core: Blocker eligibility gate] (Linear: IN-287)** — Before dispatching
+  any issue, check Linear for unresolved blocking relationships. Skip (log
+  `blocker_skip`) without modifying tracker state. Reconsider on the next tick.
+- [ ] **[Core: Fail-closed approval gate] (Linear: IN-288)** — When
+  `approval_policy: on-request` is set but no approval resolution path exists,
+  treat it as a fatal misconfiguration at startup (`symphony doctor` reports it).
+  At runtime, an unresolvable approval request aborts the run and moves the issue
+  to the failure state.
+- [ ] **[Core: Failure-state transition, no auto-retry] (Linear: IN-289)** —
+  On non-recoverable failure, move the issue to the configured `failure_state`,
+  log the structured failure event, and clean up the workspace (unless
+  `keep_on_failure: true`). Do not auto-retry. The persistent retry queue (SPEC
+  §18.2) stays in Phase 6 backlog; any future retry must use a fresh clone.
+
 **Milestone status:** Closed with caveat. Live Linear auth and polling are
 verified; live Codex dispatch awaits a disposable active Linear issue and should
 be the first Phase 2 gate before desktop or productionization work expands.
@@ -1070,9 +1091,10 @@ be the first Phase 2 gate before desktop or productionization work expands.
   terminal tutorial with an English / Simplified Chinese picker, versioned read
   history, reusable tutorial module, expected setup deliverables, productivity
   context, and the next steps in the init flow.
-- [ ] **[CLI: Paginated init Q&A] (Linear: IN-268)** — break the orientation
+- [x] **[CLI: Paginated init Q&A] (Linear: IN-268)** — break the orientation
   into versioned, bilingual Q&A pages with continue/skip controls and persisted
   completion only after the tutorial is actually shown.
+  - Shipped in PR #18. `onboarding_tutorial.py` — versioned pages, continue/skip, bilingual language picker.
 - [ ] **[CLI: Onboard UX redesign] (Linear: IN-283)** — redesign `sy onboard`
   with an env-first flow: run environment scan first (derive GitHub org/repo
   from `git remote`, runner presence from PATH, Linear auth from env), show a
@@ -1173,13 +1195,113 @@ be the first Phase 2 gate before desktop or productionization work expands.
 - [ ] **[Config: Multi-runner per workflow]** — dispatch different labels or
   states to different agent runners.
 - [ ] **[Retry: Persistent queue]** — survive process restarts without losing
-  retry state.
+  retry state. Each retry entry must use a fresh workspace clone; reusing a
+  failed workspace is explicitly prohibited (see §8.4).
 - [ ] **[Multimodal: Vision input]** — pass screenshots/images from the workspace
   into agent prompts.
 
 ---
 
-## 8. Open Questions
+## 8. SPEC Alignment Decisions
+
+> Resolved design decisions from comparing this PRD against the original OpenAI Symphony SPEC.
+> Guiding principle: **isolation over efficiency** — no code contamination between concurrent agents.
+
+### 8.1 Workspace population and multi-agent isolation (SPEC §9.2–9.3)
+
+**Decision: Symphony owns workspace setup. Each dispatch gets an isolated working tree and a unique branch before the agent is launched.**
+
+#### Isolation matrix
+
+| Dimension | Threat | Codex | Claude Code | Owner |
+|-----------|--------|-------|-------------|-------|
+| **Working tree (local)** | Agent A overwrites Agent B's files mid-run | OS container per session — walls prevent cross-agent filesystem access | Separate `git worktree` directory per dispatch | Symphony (`workspace.py`) |
+| **Branch (remote)** | Two agents push to `main`; second push fails or force-clobbers | Branch-per-issue checkout (container walls end at network; remote collision risk is identical) | Branch-per-issue checkout | Symphony — derives name from Linear `gitBranchName` |
+| **Process** | Agent kills or starves another agent's subprocess | Container process namespace isolation | OS process group — Symphony tracks PIDs and kills only its own subprocess | Symphony (`orchestrator.py`) |
+| **Credentials** | Agent reads another agent's Linear or GitHub token | Container env isolation | Symphony passes resolved tokens as subprocess env vars; no shared credential files between sessions | Symphony (`workspace.py` + runner env injection) |
+| **Logs** | Output from concurrent agents interleaved in one file | Container stdout isolation | Per-issue log file at `<logs_root>/<issue-id>/<run-id>.log` | Symphony (`log_file.py`) |
+| **Concurrency** | Too many agents starve host resources | `max_workers` cap in WORKFLOW.md | `max_workers` cap in WORKFLOW.md | Symphony (`orchestrator.py`) |
+| **Network sandbox** | Agent makes unauthorized outbound calls | Codex container enforces network policy (configurable) | **Not sandboxed** — Claude Code has full host network access | Operator responsibility; Docker/cgroup sandboxing is a Phase 6 backlog item |
+
+Key observations:
+- **Remote branch collision** is the same risk for both runners — container walls end at the network boundary. Branch-per-issue is load-bearing for both, not just Claude Code.
+- **Network sandbox** is the one dimension where Codex is stronger than Claude Code by default. Teams running Claude Code against sensitive infrastructure should plan for the Phase 6 Docker/cgroup sandboxing item.
+- **Credentials** are injected per-session as env vars and never written to shared files, so a compromised agent session cannot read another session's tokens from disk.
+
+#### Workspace strategy: `git worktree` from a shared bare clone
+
+A fresh `git clone` per dispatch is prohibitively expensive for monorepos — gigabytes of files multiplied by concurrent agents. The correct approach shares the object store via a bare clone and materializes only the working tree per dispatch.
+
+```bash
+# Once — on first dispatch or when absent:
+git clone --bare <repo_url> <workspace_root>/.repo.git
+
+# Before each dispatch — keep the object store current (one fetch per tick):
+git -C <workspace_root>/.repo.git fetch --prune origin
+
+# Per dispatch — fast, disk-efficient, branch-isolated:
+git -C <workspace_root>/.repo.git worktree add \
+  <workspace_root>/<issue-id>/<run-id> -b <branch-name>
+
+# After dispatch — cleanup:
+git -C <workspace_root>/.repo.git worktree remove \
+  <workspace_root>/<issue-id>/<run-id>
+```
+
+Branch name: Linear issue `gitBranchName` field (e.g., `feat/in-42-add-login`), falling back to `issue/<identifier>`.
+
+| Approach | Network cost | Disk cost per agent | Monorepo safe |
+|----------|-------------|---------------------|---------------|
+| `git clone --depth 1` per dispatch | Full working tree × N agents | Full working tree × N | No |
+| Bare clone + `git worktree` | One fetch per tick, shared | Working tree only; object store shared | Yes |
+
+Additional constraints:
+- The object store is shared — no per-dispatch network transfer.
+- Worktree add/remove failure aborts the dispatch without changing issue state (retryable on next tick).
+- Stale worktrees from crashed dispatches are pruned via `git worktree prune` on startup and periodically.
+- Agents may not create their own worktrees or branches; Symphony owns the workspace lifecycle.
+
+### 8.2 Blocker eligibility (SPEC §8.2)
+
+**Decision: Check blocker eligibility before dispatch in Phase 1 (not deferred).**
+
+Before dispatching any issue, the orchestrator checks whether that issue has unresolved blocking relationships in Linear. If blockers exist, the issue is skipped and a structured warning is logged (`blocker_skip` event). The issue remains in its current state and will be reconsidered on the next poll tick.
+
+- No blocker state is written to Linear (Symphony does not modify tracker state for the skip).
+- Unresolvable blocker loops (A blocks B, B blocks A) are treated as permanent skips until operator intervention.
+
+**Rationale:** Dispatching a blocked issue wastes agent compute and can produce PRs that cannot be merged until the upstream work lands.
+
+### 8.3 Approval gate (SPEC §10.5)
+
+**Decision: Fail-closed — Symphony will not dispatch if no approval state is configured and an approval gate fires.**
+
+When the WORKFLOW.md `approval_policy` is `on-request` but no `approval_state` is defined, Symphony treats it as a configuration error at startup (`symphony doctor` reports it as a fatal misconfiguration). At runtime, if an agent requests approval and no approval resolution path exists, the run is aborted and the issue is moved to the failure state.
+
+Auto-approve (`never`) remains the Phase 1 default preset behavior. Fail-closed only activates when `approval_policy: on-request` is explicitly set.
+
+**Rationale:** Silent approval (fail-open) in a multi-agent environment risks unreviewed actions landing in production. A misconfigured approval gate should surface as a hard error, not silently proceed.
+
+### 8.4 Run failure handling (SPEC §18.2)
+
+**Decision: On run failure, move the issue to the configured failure state and stop. No auto-retry into the same workspace.**
+
+When a run exits with a non-recoverable error (agent crash, stall timeout exhausted, approval rejected), Symphony:
+
+1. Moves the Linear issue to the workflow-defined `failure_state` (e.g., `Cancelled`).
+2. Logs the structured failure event with reason and last turn output.
+3. Deletes the workspace unless `keep_on_failure: true` is set.
+4. Does **not** re-queue or retry automatically.
+
+The operator decides whether to re-queue by moving the issue back to an active state in Linear.
+
+A persistent retry queue (SPEC §18.2) remains in the Phase 6 backlog, but it must never reuse the same workspace as the failed run — each retry gets a fresh clone.
+
+**Rationale:** Auto-retry into a dirty workspace risks compounding the original failure. The operator is better positioned than Symphony to judge whether a retry is safe after reading the failure logs.
+
+---
+
+## 9. Open Questions
 
 1. **Linear OAuth app registration:** Should Symphony ship with a shared OAuth client_id (users install the Symphony Linear app from Linear's marketplace), or does each team register their own Linear application with their own client_id/secret?
 2. **Hermes deployment:** Is the target Ollama on localhost, a remote vLLM cluster, or a hosted inference endpoint?
