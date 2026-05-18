@@ -404,7 +404,14 @@ async def run_poll_loop(
     before_tick: TickHook | None = None,
     tick_lock: asyncio.Lock | None = None,
 ) -> None:
-    await runtime.record_startup_issues()
+    # Guard the startup snapshot with the shared lock so that a webhook-triggered
+    # tick cannot fire while _prev_candidate_ids is still empty and pre-existing
+    # issues have not yet been excluded.
+    if tick_lock is not None:
+        async with tick_lock:
+            await runtime.record_startup_issues()
+    else:
+        await runtime.record_startup_issues()
     while True:
         try:
             if before_tick is not None:
@@ -531,6 +538,18 @@ async def run_daemon(
     elif webhook_api is not None:
         # Re-inject on_event with the shared lock regardless of how the API was built.
         webhook_api.on_event = _make_webhook_event_handler(runtime, tick_lock=tick_lock)
+    # Auto-register the webhook with Linear when url + team_id + secret are all configured.
+    wh = context.config.webhook
+    if wh.url and wh.team_id and wh.secret:
+        from symphony.tracker.webhooks import WebhookRegistrar, WebhookRegistrarError  # noqa: PLC0415
+        try:
+            api_key = TokenStore(context.config.tracker).resolve_linear_token()
+            registrar = WebhookRegistrar(api_token=api_key)
+            webhook_id = await registrar.register(wh.url, wh.team_id, wh.secret)
+            LOGGER.info("Webhook registered: id=%s url=%s", webhook_id, wh.url)
+        except (MissingLinearTokenError, WebhookRegistrarError) as exc:
+            LOGGER.warning("Webhook auto-registration failed (falling back to polling): %s", exc)
+
     # serve_status_api signature accepts webhook_api as keyword arg when present.
     import functools as _functools  # noqa: PLC0415
     _status_server = _functools.partial(status_server, webhook_api=webhook_api) if webhook_api is not None else status_server
