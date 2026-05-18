@@ -30,3 +30,8 @@ exclude = ["elixir*"]
 [tool.unittest]
 start-dir = "tests"
 pattern = "test_*.py"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

@@ -1080,18 +1080,31 @@ be the first Phase 2 gate before desktop or productionization work expands.
   the gaps, and move the tutorial to an optional post-setup step. Use
   consistent color semantics (green=ok, yellow=warn, red=missing, cyan=commands)
   throughout scan, config, and tutorial phases.
-- [ ] **[Auth: Interactive/automated setup modes] (Linear: IN-268)** — make
+- [ ] **[CLI: Auto-detect repo shape in onboard] (Linear: IN-284)** — detect
+  repo shape automatically (no remote → new project; monorepo signals such as
+  `pnpm-workspace.yaml`, `nx.json`, `go.work`, npm `workspaces`, `packages/`
+  dir → monorepo; otherwise single repo), then show the result with a
+  `github.com/org/______` fill-in for confirmation or correction. No manual
+  picker. Monorepo mode adds a self-scoping preamble to the agent prompt;
+  new-project mode runs `gh repo create`. Adds `repo_mode` to `InitConfig`.
+- [ ] **[CLI: Primary runner picker + cross-vendor CR] (Linear: IN-285)** — when
+  both `claude` and `codex` are installed, show an interactive runner picker
+  instead of silently auto-selecting. Follow with a code review strategy
+  question: cross-vendor (primary implements, other reviews via crosscheck
+  pipeline), single-vendor, or skip. Cross-vendor selection writes a `review`
+  block to WORKFLOW.md and wires up the crosscheck project. Automated mode
+  defaults to claude_code + no review.
+- [x] **[Auth: Interactive/automated setup modes] (Linear: IN-268)** — make
   `symphony init` support guided interactive setup and non-prompting automated
   setup while detecting and validating Linear CLI/MCP auth, GitHub access
   through `gh`, Codex CLI auth, and Claude Code CLI auth before writing the
   final workflow.
-- [ ] **[CLI: Setup status preflight] (Linear: IN-268)** — expand
+  - Shipped in PR #18. `cli.py` — `--mode interactive/automated`, TTY auto-detection, `_automated_setup_failures`.
+- [x] **[CLI: Setup status preflight] (Linear: IN-268)** — expand
   `symphony doctor` or add a status-style view that reports auth source,
   account identity, repo access, CLI versions, config paths, and exact fix
   commands for each missing dependency.
-- [ ] **[Auth: Guided OAuth setup] (Linear: IN-205)** — add a CLI OAuth / PKCE
-  flow with status and revoke commands after the API-key onboarding path is
-  proven.
+  - Shipped in PR #23. `doctor_checks` in `cli.py` — Linear auth source, command availability, GitHub auth, exact fix commands.
 
 ### 7.4 Phase 2B: Standalone App And Linear Productionization
 
@@ -1102,13 +1115,20 @@ be the first Phase 2 gate before desktop or productionization work expands.
   concurrency, and `WORKFLOW.md` generation.
 - [ ] **[UI: App status view]** — setup status, idle/running/completed/failed
   states, issue list, and recent logs inside the app.
-- [ ] **[Linear: OAuth 2.0 / PKCE]** — full OAuth flow, token refresh,
-  status/revoke commands, Keychain or credentials-file storage, and auth API
-  endpoints.
-- [ ] **[Linear: Webhooks]** — webhook registration, HMAC verification, async
-  event routing, optional tunnels, and polling fallback.
-- [ ] **[Desktop: Signed distribution]** — signed and notarized `.dmg`,
-  drag-to-Applications install, app preferences hardening, and update feed.
+- [ ] **[Linear: Credential storage adapters] (Linear: IN-201)** — credential
+  store interface; credentials-file adapter with owner-only permissions; macOS
+  Keychain adapter via `keyring`; OAuth token fields (access, refresh, expiry);
+  redaction utilities; status metadata without exposing token material.
+- [ ] **[Linear: OAuth 2.0 / PKCE] (Linear: IN-165)** — PKCE authorization code
+  flow, token exchange and refresh, `symphony auth login/status/revoke` commands,
+  HTTP endpoints (`/api/v1/linear/auth/start|callback|status|revoke`), and
+  personal API-key fallback for headless/CI use.
+- [ ] **[Linear: Webhooks] (Linear: IN-166)** — webhook registration, HMAC-SHA256
+  verification, async event routing as immediate orchestrator trigger, idempotent
+  re-registration on startup, and polling fallback when webhooks are disabled.
+- [ ] **[Distribution: Homebrew tap]** — `brew install codatta/symphony/symphony`
+  via a `codatta/homebrew-symphony` tap; release workflow job computes SHA256 of
+  the published wheel/sdist and bumps the formula on each tagged release.
 
 ### 7.5 Phase 3: Operator Visibility And Approval
 
