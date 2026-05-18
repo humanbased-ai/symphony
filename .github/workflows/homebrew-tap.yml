@@ -10,7 +10,7 @@ jobs:
   update-tap:
     name: Bump Homebrew formula
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v') }}
     steps:
       - name: Extract version from triggering tag
         id: version
@@ -32,6 +32,12 @@ jobs:
           echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
           echo "url=${URL}" >> "$GITHUB_OUTPUT"
 
+      - name: Generate resource stanzas
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          pip install homebrew-pypi-poet
+          poet --resources "symphony==${VERSION}" | sed 's/^/            /' > /tmp/symphony-resources.rb
+
       - name: Checkout tap repo
         uses: actions/checkout@v4
         with:
@@ -47,6 +53,8 @@ jobs:
           mkdir -p tap/Formula
           cat > tap/Formula/symphony.rb << FORMULA
           class Symphony < Formula
+            include Language::Python::Virtualenv
+
             desc "AI agent orchestration service — turn Linear issues into isolated agent runs"
             homepage "https://github.com/codatta/symphony"
             url "${URL}"
@@ -56,9 +64,10 @@ jobs:
 
             depends_on "python@3.12"
 
+$(cat /tmp/symphony-resources.rb)
+
             def install
-              venv = virtualenv_create(libexec, "python3.12")
-              venv.pip_install_and_link_scripts(buildpath)
+              virtualenv_install_with_resources
             end
 
             test do
