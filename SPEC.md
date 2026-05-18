@@ -760,11 +760,6 @@ Backoff formula:
 - Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
 
-Workspace constraint:
-
-- **Failure-driven retries MUST provision a fresh workspace for the new attempt.** The workspace from the failed run MUST NOT be reused or resumed — its state is unknown and reuse risks compounding the original failure.
-- Continuation retries after a clean worker exit MAY reuse the existing workspace (the agent left it in a known-good state).
-
 Retry handling behavior:
 
 1. Fetch active candidate issues (not all issues).
@@ -832,8 +827,7 @@ Per-issue workspace path:
 
 Workspace persistence:
 
-- Workspaces are reused across continuation retries (clean worker exit) for the same issue.
-- **Failure-driven retries (abnormal exit, stall, or error) MUST provision a fresh workspace.** The failed workspace MUST NOT be resumed.
+- Workspaces are reused across runs for the same issue.
 - Successful runs do not delete workspaces immediately. The continuation retry remains claimed long
   enough to observe the tracker's next state; if that issue has become terminal and is no longer an
   active candidate, the runtime cleans the terminal workspace before releasing the claim.
@@ -1134,7 +1128,7 @@ The `Agent Runner` wraps workspace + prompt + app-server client.
 
 Behavior:
 
-1. Create or reuse workspace for the attempt. Continuation retries (clean prior exit) MAY reuse the existing workspace. Failure-driven retries MUST provision a fresh workspace — never resume a failed workspace.
+1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
 3. Start app-server session.
 4. Forward app-server events to orchestrator.
