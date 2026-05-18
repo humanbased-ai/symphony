@@ -28,14 +28,16 @@ class OnboardingTutorialTests(unittest.TestCase):
         text = "\n".join(lines)
 
         self.assertTrue(completed)
-        self.assertIn("[1/5] What is Symphony?", text)
-        self.assertIn("[5/5] What should I expect next?", text)
+        self.assertIn("[1/6] What is Symphony?", text)
+        self.assertIn("[5/6] What should I expect next?", text)
+        self.assertIn("[6/6] One project per WORKFLOW.md", text)
         self.assertIn("WORKFLOW.md", text)
         self.assertIn("3-5 Codex sessions", text)
         self.assertIn("500% in the first three weeks", text)
         self.assertIn("https://openai.com/index/open-source-codex-orchestration-symphony/", text)
         self.assertIn("symphony doctor WORKFLOW.md", text)
         self.assertIn("symphony run WORKFLOW.md --once", text)
+        self.assertIn("pkill -f 'symphony run'", text)
 
     def test_print_init_tutorial_supports_simplified_chinese(self):
         lines: list[str] = []
@@ -44,13 +46,15 @@ class OnboardingTutorialTests(unittest.TestCase):
 
         self.assertTrue(completed)
         self.assertIn("欢迎使用 Symphony", text)
-        self.assertIn("[1/5] Symphony 是什么?", text)
+        self.assertIn("[1/6] Symphony 是什么?", text)
+        self.assertIn("[6/6] 一个 WORKFLOW.md 对应一个项目", text)
         self.assertIn("WORKFLOW.md", text)
         self.assertIn("3-5 个 Codex session", text)
         self.assertIn("提升了 500%", text)
         self.assertIn("https://openai.com/index/open-source-codex-orchestration-symphony/", text)
         self.assertIn("symphony doctor WORKFLOW.md", text)
         self.assertIn("symphony run WORKFLOW.md --once", text)
+        self.assertIn("pkill -f 'symphony run'", text)
 
     def test_print_init_tutorial_skip_does_not_complete(self):
         lines: list[str] = []

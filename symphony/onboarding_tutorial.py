@@ -212,6 +212,17 @@ def _english_pages() -> tuple[TutorialPage, ...]:
                 "`symphony run WORKFLOW.md --once`.",
             ),
         ),
+        TutorialPage(
+            "One project per WORKFLOW.md",
+            (
+                "Each WORKFLOW.md targets one Linear project. To run multiple projects",
+                "in parallel, start one process per project with a unique --port:",
+                "  symphony run project-a/WORKFLOW.md --port 7337",
+                "  symphony run project-b/WORKFLOW.md --port 7338",
+                "To stop a specific process: kill <PID>  (find it with: ps aux | grep 'symphony run')",
+                "To stop all at once: pkill -f 'symphony run'",
+            ),
+        ),
     )
 
 
@@ -255,6 +266,17 @@ def _simplified_chinese_pages() -> tuple[TutorialPage, ...]:
                 "仓库和本地认证。完成 init 后，先运行 `symphony doctor WORKFLOW.md`",
                 "检查配置，再用一个临时 Linear ticket 跑一次:",
                 "`symphony run WORKFLOW.md --once`。",
+            ),
+        ),
+        TutorialPage(
+            "一个 WORKFLOW.md 对应一个项目",
+            (
+                "每个 WORKFLOW.md 只监听一个 Linear project。如果需要同时运行多个",
+                "项目，为每个项目单独启动一个进程，并用 --port 分配不同端口：",
+                "  symphony run project-a/WORKFLOW.md --port 7337",
+                "  symphony run project-b/WORKFLOW.md --port 7338",
+                "停止某个进程: kill <PID>  (用 ps aux | grep 'symphony run' 查找)",
+                "停止全部进程: pkill -f 'symphony run'",
             ),
         ),
     )

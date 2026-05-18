@@ -311,6 +311,37 @@ Avoid using the current CLI loop for secret rotation, broad refactors,
 high-risk production changes, or repositories where an agent-created PR is not
 safe to review.
 
+### Running Multiple Projects
+
+Each `WORKFLOW.md` targets one Linear project. To run Symphony across multiple
+projects, start one process per project, each pointing at its own file:
+
+```bash
+symphony run project-a/WORKFLOW.md --port 7337 --logs-root ./log/a
+symphony run project-b/WORKFLOW.md --port 7338 --logs-root ./log/b
+```
+
+To stop a specific process, find its PID and send SIGTERM:
+
+```bash
+# list running symphony processes
+ps aux | grep "symphony run"
+
+# stop a specific process
+kill <PID>
+```
+
+Or stop all symphony processes at once:
+
+```bash
+pkill -f "symphony run"
+```
+
+To switch a running process to a different project, update `tracker.project_slug`
+in the watched `WORKFLOW.md`; the daemon hot-reloads it automatically. To point
+at a completely different `WORKFLOW.md` file, stop the process and restart with
+the new path.
+
 ## WORKFLOW.md Basics
 
 `WORKFLOW.md` is the team-owned runtime contract. It contains YAML front matter

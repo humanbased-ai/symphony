@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -637,6 +638,30 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         )
         return 0
 
+    port_ok, port_detail = _check_port_available(context.port)
+    if not port_ok:
+        parser.exit(
+            1,
+            f"{_fail('Error')}: {port_detail}\n"
+            f"{_dim('Tip: each symphony process needs its own port. '
+                    'Run multiple projects with different --port values:')}\n"
+            f"  symphony run project-a/WORKFLOW.md --port {context.port + 1}\n"
+            f"  symphony run project-b/WORKFLOW.md --port {context.port + 2}\n",
+        )
+
+    project_slug = context.config.tracker.project_slug or "unknown"
+    poll_interval_s = context.config.polling.interval_ms // 1000
+    print(
+        f"{_bold('Symphony')} {_dim(__version__)}  |  "
+        f"project: {_cyan(project_slug)}  |  "
+        f"poll every {poll_interval_s}s  |  "
+        f"status: {_dim(f'http://127.0.0.1:{context.port}')}"
+    )
+    print(_dim(f"Workflow: {context.workflow_path}"))
+    print(_dim(f"Logs:     {context.logs_root}"))
+    print(_dim("Stop: Ctrl-C  |  Running multiple projects? Use a separate process per WORKFLOW.md with a unique --port"))
+    print()
+
     workflow_reloader = RuntimeWorkflowReloader.from_context(runtime, context)
     asyncio.run(run_daemon(runtime, context, workflow_reloader=workflow_reloader))
     return 0
@@ -831,6 +856,12 @@ def _run_init_with_args(
 
     print(f"\nWrote workflow: {workflow_path}")
     print(f"Next: {_cyan(_cli_name() + ' doctor ' + str(workflow_path))}")
+    print(_dim(
+        "Tip: each WORKFLOW.md targets one Linear project. "
+        "To run multiple projects in parallel, start one process per WORKFLOW.md "
+        "and assign each a unique port (--port). "
+        "Stop a process with Ctrl-C, or find its PID with: ps aux | grep 'symphony run'"
+    ))
 
     if not automated and not show_tutorial_before:
         _offer_tutorial(args)
@@ -1100,7 +1131,8 @@ def doctor_checks(
 
     logs_root = context.logs_root
     checks.append((True, "logs root", str(logs_root)))
-    checks.append((True, "status api", f"http://127.0.0.1:{context.port}"))
+    port_ok, port_detail = _check_port_available(context.port)
+    checks.append((port_ok, "status api port", port_detail))
     return checks
 
 
@@ -1119,6 +1151,21 @@ def _port_value(raw: str) -> int:
     if port <= 0 or port > 65_535:
         raise argparse.ArgumentTypeError("port_must_be_1_to_65535")
     return port
+
+
+def _check_port_available(port: int) -> tuple[bool, str]:
+    """Return (available, message). Tries to bind the port to detect conflicts."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+        return True, f"http://127.0.0.1:{port}"
+    except OSError:
+        return (
+            False,
+            f"port {port} already in use — another symphony process may be running. "
+            f"Use --port to pick a different port (e.g. --port {port + 1}).",
+        )
 
 
 def _check_gh_auth() -> tuple[bool, str]:
