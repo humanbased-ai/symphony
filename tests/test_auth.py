@@ -374,7 +374,7 @@ class TestTokenStoreResolveLinearToken:
             # Then the OAuth step kicks in
             result = store.resolve_linear_token()
 
-        assert result == "oauth_tok"
+        assert result == "Bearer oauth_tok"
 
     def test_raises_oauth_token_expired_with_refresh(self, tmp_path: Path) -> None:
         """Raises MissingLinearTokenError('oauth_token_expired') when token is expired and has refresh."""

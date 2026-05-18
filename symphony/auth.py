@@ -268,7 +268,7 @@ class TokenStore:
                 oauth = keychain.load_oauth_token()
                 if oauth is not None:
                     if not oauth.is_expired():
-                        return oauth.access_token
+                        return f"{oauth.token_type} {oauth.access_token}"
                     if oauth.refresh_token is not None:
                         raise MissingLinearTokenError("oauth_token_expired")
             except CredentialStoreError:
@@ -279,7 +279,7 @@ class TokenStore:
             oauth = file_store.load_oauth_token()
             if oauth is not None:
                 if not oauth.is_expired():
-                    return oauth.access_token
+                    return f"{oauth.token_type} {oauth.access_token}"
                 if oauth.refresh_token is not None:
                     raise MissingLinearTokenError("oauth_token_expired")
         except CredentialStoreError:
