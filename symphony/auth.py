@@ -297,11 +297,11 @@ class TokenStore:
             try:
                 keychain = KeychainCredentialStore()
                 oauth = keychain.load_oauth_token()
-                if oauth is not None:
-                    if not oauth.is_expired():
-                        return f"{oauth.token_type} {oauth.access_token}"
-                    if oauth.refresh_token is not None:
-                        raise MissingLinearTokenError("oauth_token_expired")
+                if oauth is not None and not oauth.is_expired():
+                    return f"{oauth.token_type} {oauth.access_token}"
+                # Expired Keychain OAuth: fall through to file/api_key lookup.
+                # This patch does not refresh tokens, so an expired record must
+                # not permanently block other valid credentials.
             except CredentialStoreError:
                 pass
 
