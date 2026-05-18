@@ -337,8 +337,10 @@ Or stop all symphony processes at once:
 pkill -f "symphony run"
 ```
 
-To switch a running process to a different project, stop it and restart with the
-new `WORKFLOW.md`. There is no hot-swap; the project slug is read at startup.
+To switch a running process to a different project, update `tracker.project_slug`
+in the watched `WORKFLOW.md`; the daemon hot-reloads it automatically. To point
+at a completely different `WORKFLOW.md` file, stop the process and restart with
+the new path.
 
 ## WORKFLOW.md Basics
 
