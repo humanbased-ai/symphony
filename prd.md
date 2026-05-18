@@ -1048,13 +1048,22 @@ PRD in the same branch so the routine remains discoverable for future agents.
   `/api/v1/refresh`, and `/api/v1/health`, plus a FastAPI factory for
   environments where FastAPI is installed.
 
-**SPEC gap refinements (decided 2026-05-18, isolation-first):**
+**Milestone status:** Closed with caveat. Live Linear auth and polling are
+verified; live Codex dispatch awaits a disposable active Linear issue and should
+be the first Phase 2 gate before desktop or productionization work expands.
+
+### 7.2.1 Phase 1 SPEC Compliance Follow-Up
+
+> These items correct gaps found when comparing the implementation against the
+> original OpenAI Symphony SPEC (decided 2026-05-18, isolation-first). They are
+> **post-MVP follow-up work**, not Phase 1 blockers — Phase 1 closure stands.
+> Full design rationale in §8.1–§8.5.
 
 - [ ] **[Core: Per-run workspace isolation] (Linear: IN-286)** — Symphony owns
   workspace setup per the isolation matrix in §8.1. Bare clone + `git worktree`
   per dispatch (working tree and branch isolated; object store shared for monorepo
   efficiency). Per-session env var credential injection. Per-issue log file.
-  Stale worktree pruning on startup. See §8.1 for the full isolation matrix.
+  Application-level crash sweep at startup. See §8.1 for the full isolation matrix.
 - [ ] **[Core: Blocker eligibility gate] (Linear: IN-287)** — Before dispatching
   any issue, check Linear for unresolved blocking relationships. Skip (log
   `blocker_skip`) without modifying tracker state. Reconsider on the next tick.
@@ -1066,21 +1075,16 @@ PRD in the same branch so the routine remains discoverable for future agents.
 - [ ] **[Core: Failure-state transition, no auto-retry] (Linear: IN-289)** —
   On non-recoverable failure, move the issue to the configured `failure_state`,
   log the structured failure event, and clean up the workspace (unless
-  `keep_on_failure: true`). Do not auto-retry. The persistent retry queue (SPEC
-  §18.2) stays in Phase 6 backlog; any future retry must use a fresh clone.
+  `keep_on_failure: true`). No Symphony-initiated auto-retry; operator re-queues
+  via Linear. Any future retry (SPEC §18.2 persistent queue, Phase 6 backlog)
+  must use a fresh worktree. **Prerequisite:** SPEC.md §8.4/§10.7 and
+  ARCHITECTURE.md retry flows must be updated before this is implemented — see §8.4.
 - [ ] **[Core: Claim race prevention — state-transition as distributed lock] (Linear: IN-290)** —
   Move ticket to `in_progress_state` in Linear before launching the agent.
   Linear state is the distributed claim; a second Symphony instance polling
   the same ticket will see it is no longer in `queued_states` and skip it.
   Log `claim_succeeded` with instance identity. `symphony doctor` warns if
   `states.in_progress` is not configured. See §8.5 for the full design.
-  **Prerequisite:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md retry flows (which
-  currently require failure-driven retries to be scheduled) must be updated to
-  align with this no-auto-retry decision before IN-289 is implemented.
-
-**Milestone status:** Closed with caveat. Live Linear auth and polling are
-verified; live Codex dispatch awaits a disposable active Linear issue and should
-be the first Phase 2 gate before desktop or productionization work expands.
 
 ### 7.3 Phase 2A: Standalone CLI Onboarding And Packaging
 
@@ -1252,13 +1256,13 @@ git -C <workspace_root>/.repo.git fetch --prune origin
 git -C <workspace_root>/.repo.git worktree add \
   <workspace_root>/<issue-id>/<run-id> -b <branch-name>
 
-# After dispatch — cleanup (remove worktree, then delete branch):
+# After dispatch — cleanup (remove worktree, then force-delete branch):
 git -C <workspace_root>/.repo.git worktree remove \
   <workspace_root>/<issue-id>/<run-id>
-git -C <workspace_root>/.repo.git branch -d <branch-name>
+git -C <workspace_root>/.repo.git branch -D <branch-name>
 ```
 
-Branch name: `<gitBranchName>-<run-id>` (e.g., `feat/in-42-add-login-a1b2c3d`), falling back to `issue/<identifier>-<run-id>`. A per-run suffix is required because `git worktree remove` leaves the local branch behind in the bare repo; a subsequent dispatch on the same issue would fail `worktree add -b` if a same-named branch already exists.
+Branch name: `<gitBranchName>-<run-id>` (e.g., `feat/in-42-add-login-a1b2c3d`), falling back to `issue/<identifier>-<run-id>`. A per-run suffix is required because `git worktree remove` leaves the local branch behind in the bare repo; a subsequent dispatch on the same issue would fail `worktree add -b` if a same-named branch already exists. `branch -D` (force delete) is required because the feature branch contains unmerged commits relative to the bare repo's HEAD — `branch -d` would always refuse.
 
 | Approach | Network cost | Disk cost per agent | Monorepo safe |
 |----------|-------------|---------------------|---------------|
@@ -1305,11 +1309,11 @@ When a run exits with a non-recoverable error (agent crash, stall timeout exhaus
 
 The operator decides whether to re-queue by moving the issue back to an active state in Linear.
 
-A persistent retry queue (SPEC §18.2) remains in the Phase 6 backlog, but it must never reuse the same workspace as the failed run — each retry gets a fresh clone.
+A persistent retry queue (SPEC §18.2) remains in the Phase 6 backlog. When implemented, it must never reuse the same workspace — each retry provisions a fresh worktree.
 
-**Prerequisite:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md currently require failure-driven retries to be scheduled. Those documents must be updated to align with this no-auto-retry contract before IN-289 is implemented; until then AGENTS.md instructs implementers to treat the conflict as a blocker.
+**Cross-doc conflict and resolution:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md require failure-driven retries to be scheduled automatically. This PRD's decision narrows, not contradicts, that contract: the constraint is **no auto-retry into the same workspace**, not no retry at all. Retries are permitted provided they use a fresh worktree. SPEC.md and ARCHITECTURE.md must be updated before IN-289 is implemented to reflect this narrowing — specifically, any retry scheduling must provision a new workspace rather than resuming the failed one. Until those documents are updated, AGENTS.md instructs implementers to treat the cross-doc conflict as a blocker on IN-289.
 
-**Rationale:** Auto-retry into a dirty workspace risks compounding the original failure. The operator is better positioned than Symphony to judge whether a retry is safe after reading the failure logs.
+**Rationale:** Auto-retry into a dirty workspace risks compounding the original failure. The operator is better positioned to judge whether a retry is warranted after reading the failure log.
 
 ### 8.5 Multi-instance claim race prevention (IN-290)
 
