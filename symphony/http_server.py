@@ -466,3 +466,136 @@ def _error_response(status_code: int, code: str, message: str) -> HTTPResponse:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# OAuth API — /api/v1/linear/auth/* endpoints (desktop/setup integration)
+# ---------------------------------------------------------------------------
+
+_OAUTH_PREFIX = f"{API_PREFIX}/linear/auth"
+_CALLBACK_HTML_OK = b"<!doctype html><html><body><h1>Authenticated!</h1><p>You may close this window.</p></body></html>"
+_CALLBACK_HTML_ERR = b"<!doctype html><html><body><h1>Authentication failed.</h1><p>You may close this window.</p></body></html>"
+
+
+@dataclass
+class OAuthAPI:
+    """Handles Linear OAuth endpoints for desktop/setup integration.
+
+    Pending PKCE challenges are stored in-memory and expire after
+    CALLBACK_TIMEOUT_SECONDS from the /start call.
+    """
+
+    credential_store: Any | None = None  # CredentialStore, optional
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_pending", {})  # state -> PKCEChallenge
+
+    def handle_request(self, method: str, path: str, body: bytes | str | None = None) -> HTTPResponse | None:
+        """Return a response if the path is an OAuth route, else None."""
+        method = method.upper()
+        route = _normalized_path(path)
+
+        if route == f"{_OAUTH_PREFIX}/status":
+            if method != "GET":
+                return _error_response(405, "method_not_allowed", "GET required")
+            return self._handle_status()
+
+        if route == f"{_OAUTH_PREFIX}/start":
+            if method != "POST":
+                return _error_response(405, "method_not_allowed", "POST required")
+            return self._handle_start(body)
+
+        if route == f"{_OAUTH_PREFIX}/callback":
+            if method != "GET":
+                return _error_response(405, "method_not_allowed", "GET required")
+            return self._handle_callback(path)
+
+        if route == f"{_OAUTH_PREFIX}/revoke":
+            if method != "POST":
+                return _error_response(405, "method_not_allowed", "POST required")
+            return self._handle_revoke()
+
+        return None
+
+    def _handle_status(self) -> HTTPResponse:
+        if self.credential_store is None:
+            return _json_response(200, {"authenticated": False, "source": "none", "expires_at": None})
+        try:
+            status = self.credential_store.status()
+        except Exception as exc:
+            return _json_response(200, {"authenticated": False, "source": "error", "error": str(exc)})
+        return _json_response(200, {k: status.get(k) for k in ("authenticated", "source", "expires_at")})
+
+    def _handle_start(self, body: bytes | str | None) -> HTTPResponse:
+        try:
+            from symphony.tracker.linear_oauth import PKCEChallenge, build_authorization_url, CALLBACK_PORT, CALLBACK_PATH
+        except ImportError as exc:
+            return _error_response(500, "oauth_unavailable", str(exc))
+
+        raw: dict[str, object] = {}
+        if body:
+            try:
+                raw = json.loads(body if isinstance(body, str) else body.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _error_response(400, "invalid_json", "request body must be JSON")
+
+        client_id = raw.get("client_id") or ""
+        if not isinstance(client_id, str) or not client_id.strip():
+            return _error_response(400, "missing_client_id", "client_id is required")
+        port = int(raw.get("port") or CALLBACK_PORT)
+        redirect_uri = f"http://localhost:{port}{CALLBACK_PATH}"
+
+        pkce = PKCEChallenge.generate()
+        pending: dict[str, object] = object.__getattribute__(self, "_pending")
+        pending[pkce.state] = (pkce, client_id, raw.get("client_secret") or None)
+
+        auth_url = build_authorization_url(client_id.strip(), redirect_uri, pkce)
+        return _json_response(200, {"authorization_url": auth_url, "state": pkce.state, "redirect_uri": redirect_uri})
+
+    def _handle_callback(self, raw_path: str) -> HTTPResponse:
+        from urllib.parse import parse_qs, urlsplit
+        try:
+            from symphony.tracker.linear_oauth import exchange_code, parse_token_response, CALLBACK_PORT, CALLBACK_PATH
+        except ImportError as exc:
+            return _error_response(500, "oauth_unavailable", str(exc))
+
+        params = parse_qs(urlsplit(raw_path).query)
+        code = (params.get("code") or [None])[0]
+        state = (params.get("state") or [None])[0]
+        error = (params.get("error") or [None])[0]
+
+        if error:
+            return HTTPResponse(
+                status_code=400,
+                body={"error": {"code": "oauth_denied", "message": error}},
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+
+        pending: dict[str, object] = object.__getattribute__(self, "_pending")
+        entry = pending.pop(state, None) if state else None
+        if entry is None or not code:
+            return _error_response(400, "invalid_callback", "unknown state or missing code")
+
+        pkce, client_id, client_secret = entry
+        try:
+            redirect_uri = f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}"
+            token_data = exchange_code(str(client_id), client_secret, code, redirect_uri, pkce.code_verifier)
+            token = parse_token_response(token_data)
+            if self.credential_store is not None:
+                self.credential_store.save_oauth_token(token)
+        except Exception as exc:
+            return _error_response(500, "token_exchange_failed", str(exc))
+
+        return HTTPResponse(status_code=200, body={}, headers={"content-type": "text/html; charset=utf-8"})
+
+    def _handle_revoke(self) -> HTTPResponse:
+        if self.credential_store is None:
+            return _json_response(200, {"revoked": False, "reason": "no_credential_store"})
+        try:
+            token = self.credential_store.load_oauth_token()
+            if token is None:
+                return _json_response(200, {"revoked": False, "reason": "not_authenticated"})
+            self.credential_store.delete_oauth_token()
+        except Exception as exc:
+            return _error_response(500, "revoke_failed", str(exc))
+        return _json_response(200, {"revoked": True})
