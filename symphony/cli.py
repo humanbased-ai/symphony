@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import os
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -30,7 +31,7 @@ from symphony.auth import (
     save_local_linear_token,
 )
 from symphony.config import ConfigError, WorkflowConfig
-from symphony.http_server import StatusAPI
+from symphony.http_server import StatusAPI, WebhookAPI
 from symphony.onboarding import (
     DEFAULT_ACTIVE_STATES,
     DEFAULT_PRESET,
@@ -397,15 +398,31 @@ async def run_once(runtime: SymphonyRuntime) -> RuntimeTickResult:
     return await runtime.run_tick()
 
 
-async def run_poll_loop(runtime: SymphonyRuntime, *, before_tick: TickHook | None = None) -> None:
-    await runtime.record_startup_issues()
+async def run_poll_loop(
+    runtime: SymphonyRuntime,
+    *,
+    before_tick: TickHook | None = None,
+    tick_lock: asyncio.Lock | None = None,
+) -> None:
+    # Guard the startup snapshot with the shared lock so that a webhook-triggered
+    # tick cannot fire while _prev_candidate_ids is still empty and pre-existing
+    # issues have not yet been excluded.
+    if tick_lock is not None:
+        async with tick_lock:
+            await runtime.record_startup_issues()
+    else:
+        await runtime.record_startup_issues()
     while True:
         try:
             if before_tick is not None:
                 result = before_tick()
                 if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
                     await result
-            result = await runtime.run_tick()
+            if tick_lock is not None:
+                async with tick_lock:
+                    result = await runtime.run_tick()
+            else:
+                result = await runtime.run_tick()
         except LinearClientError as exc:
             LOGGER.warning("Linear API error during poll tick, will retry next interval: %s", exc)
             await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
@@ -425,9 +442,14 @@ async def run_poll_loop(runtime: SymphonyRuntime, *, before_tick: TickHook | Non
         await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
 
 
-async def serve_status_api(status_api: StatusAPI, port: int) -> None:
+async def serve_status_api(
+    status_api: StatusAPI,
+    port: int,
+    *,
+    webhook_api: WebhookAPI | None = None,
+) -> None:
     loop = asyncio.get_running_loop()
-    server = create_status_http_server(status_api, port, loop=loop)
+    server = create_status_http_server(status_api, port, loop=loop, webhook_api=webhook_api)
     LOGGER.info("Status API listening on http://127.0.0.1:%s", port)
     serve_task = asyncio.create_task(asyncio.to_thread(server.serve_forever, 0.25))
     try:
@@ -444,7 +466,10 @@ def create_status_http_server(
     *,
     loop: asyncio.AbstractEventLoop,
     host: str = "127.0.0.1",
+    webhook_api: WebhookAPI | None = None,
 ) -> ThreadingHTTPServer:
+    _webhook_route = "/api/v1/webhooks/linear"
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
             self._send_status_response("GET")
@@ -463,7 +488,16 @@ def create_status_http_server(
 
         def _send_status_response(self, method: str) -> None:
             body = self.rfile.read(_content_length(self.headers.get("content-length")))
-            if method == "POST" and self.path.split("?", 1)[0] == "/api/v1/refresh":
+            route = self.path.split("?", 1)[0]
+
+            if method == "POST" and route == _webhook_route and webhook_api is not None:
+                header_map = {k.lower(): v for k, v in self.headers.items()}
+                future = asyncio.run_coroutine_threadsafe(
+                    webhook_api.async_handle_request(method, self.path, body, header_map),
+                    loop,
+                )
+                response = future.result()
+            elif method == "POST" and route == "/api/v1/refresh":
                 future = asyncio.run_coroutine_threadsafe(
                     status_api.async_handle_request(method, self.path, body),
                     loop,
@@ -489,13 +523,42 @@ async def run_daemon(
     *,
     workflow_reloader: "RuntimeWorkflowReloader | None" = None,
     status_server: StatusServer = serve_status_api,
+    webhook_api: WebhookAPI | None = None,
 ) -> None:
     status_api = create_status_api(runtime)
-    status_task = asyncio.create_task(status_server(status_api, context.port))
+    # Single lock shared by the poll loop and every webhook-triggered tick so
+    # they cannot execute concurrently against the same runtime state.
+    tick_lock = asyncio.Lock()
+    # Build a WebhookAPI from config when not explicitly provided.
+    if webhook_api is None and context.config.webhook.secret:
+        webhook_api = WebhookAPI(
+            webhook_secret=context.config.webhook.secret,
+            on_event=_make_webhook_event_handler(runtime, tick_lock=tick_lock),
+        )
+    elif webhook_api is not None:
+        # Re-inject on_event with the shared lock regardless of how the API was built.
+        webhook_api.on_event = _make_webhook_event_handler(runtime, tick_lock=tick_lock)
+    # Auto-register the webhook with Linear when url + team_id + secret are all configured.
+    wh = context.config.webhook
+    if wh.url and wh.team_id and wh.secret:
+        from symphony.tracker.webhooks import WebhookRegistrar, WebhookRegistrarError  # noqa: PLC0415
+        try:
+            api_key = TokenStore(context.config.tracker).resolve_linear_token()
+            registrar = WebhookRegistrar(api_token=api_key)
+            webhook_id = await registrar.register(wh.url, wh.team_id, wh.secret)
+            LOGGER.info("Webhook registered: id=%s url=%s", webhook_id, wh.url)
+        except (MissingLinearTokenError, WebhookRegistrarError) as exc:
+            LOGGER.warning("Webhook auto-registration failed (falling back to polling): %s", exc)
+
+    # serve_status_api signature accepts webhook_api as keyword arg when present.
+    import functools as _functools  # noqa: PLC0415
+    _status_server = _functools.partial(status_server, webhook_api=webhook_api) if webhook_api is not None else status_server
+    status_task = asyncio.create_task(_status_server(status_api, context.port))
     poll_task = asyncio.create_task(
         run_poll_loop(
             runtime,
             before_tick=workflow_reloader.reload_if_changed if workflow_reloader is not None else None,
+            tick_lock=tick_lock,
         )
     )
     tasks = {status_task, poll_task}
@@ -513,6 +576,41 @@ async def run_daemon(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _make_webhook_event_handler(
+    runtime: SymphonyRuntime,
+    *,
+    tick_lock: asyncio.Lock | None = None,
+) -> "Callable[[Any], Awaitable[None]]":
+    """Return an async callback that triggers an immediate run_tick on issue state-change events.
+
+    tick_lock — shared with run_poll_loop so webhook ticks cannot race with the
+    polling tick.  When locked (poll in progress), incoming webhook events are
+    silently dropped rather than queued.
+    """
+
+    async def on_webhook_event(event: Any) -> None:
+        # Only dispatch on Issue events — state changes are the primary trigger.
+        if not hasattr(event, "type") or event.type != "Issue":
+            return
+        LOGGER.info(
+            "Webhook event received: action=%s type=%s — triggering immediate tick",
+            getattr(event, "action", "?"),
+            getattr(event, "type", "?"),
+        )
+        # Coalesce: drop the webhook tick when polling is already running.
+        if tick_lock is not None and tick_lock.locked():
+            LOGGER.debug("Webhook tick skipped — tick already in progress")
+            return
+        lock_ctx: asyncio.Lock = tick_lock if tick_lock is not None else asyncio.Lock()
+        async with lock_ctx:
+            try:
+                await runtime.run_tick()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Webhook-triggered tick failed: %s", exc)
+
+    return on_webhook_event
+
+
 @dataclass
 class RuntimeWorkflowReloader:
     runtime: SymphonyRuntime
@@ -520,6 +618,7 @@ class RuntimeWorkflowReloader:
     environ: Mapping[str, str] | None = None
     reloader: WorkflowReloader | None = None
     last_observed_mtime_ns: int | None = None
+    webhook_api: "WebhookAPI | None" = None
 
     @classmethod
     def from_context(
@@ -528,6 +627,7 @@ class RuntimeWorkflowReloader:
         context: StartupContext,
         *,
         environ: Mapping[str, str] | None = None,
+        webhook_api: "WebhookAPI | None" = None,
     ) -> "RuntimeWorkflowReloader":
         reloader = WorkflowReloader.for_path(context.workflow_path)
         effective = EffectiveWorkflow(definition=context.workflow, config=context.config)
@@ -539,6 +639,7 @@ class RuntimeWorkflowReloader:
             environ=environ,
             reloader=reloader,
             last_observed_mtime_ns=_workflow_mtime_ns(context.workflow_path),
+            webhook_api=webhook_api,
         )
 
     def reload_if_changed(self) -> bool:
@@ -565,6 +666,13 @@ class RuntimeWorkflowReloader:
         active_reloader.last_error = None
         self.reloader = active_reloader
         apply_runtime_workflow(self.runtime, effective)
+        if self.webhook_api is not None:
+            if config.webhook.secret is not None:
+                self.webhook_api.webhook_secret = config.webhook.secret
+            else:
+                # Fail closed: secret removed from config — reject all incoming
+                # requests rather than silently accepting unsigned POSTs.
+                self.webhook_api.webhook_secret = secrets.token_hex(32)
         LOGGER.info("Reloaded WORKFLOW.md from %s", self.workflow_path)
         return True
 
@@ -593,6 +701,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return doctor_main(raw_args[1:])
         if command == "run":
             return run_main(raw_args[1:])
+        if command == "webhooks":
+            return webhooks_main(raw_args[1:])
 
     parser = build_parser()
     args = parser.parse_args(raw_args)
@@ -662,8 +772,18 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     print(_dim("Stop: Ctrl-C  |  Running multiple projects? Use a separate process per WORKFLOW.md with a unique --port"))
     print()
 
-    workflow_reloader = RuntimeWorkflowReloader.from_context(runtime, context)
-    asyncio.run(run_daemon(runtime, context, workflow_reloader=workflow_reloader))
+    # Always mount the webhook route so that adding webhook.secret to WORKFLOW.md
+    # via a hot reload activates it without restarting the daemon.  When no secret
+    # is configured at startup the route is fail-closed (random secret rejects all
+    # unsigned requests); reload_now() installs the real secret when one appears.
+    _webhook_api = WebhookAPI(
+        webhook_secret=context.config.webhook.secret if context.config.webhook.secret else secrets.token_hex(32),
+        on_event=_make_webhook_event_handler(runtime),
+    )
+    workflow_reloader = RuntimeWorkflowReloader.from_context(
+        runtime, context, webhook_api=_webhook_api
+    )
+    asyncio.run(run_daemon(runtime, context, workflow_reloader=workflow_reloader, webhook_api=_webhook_api))
     return 0
 
 
@@ -1134,6 +1254,73 @@ def doctor_checks(
     port_ok, port_detail = _check_port_available(context.port)
     checks.append((port_ok, "status api port", port_detail))
     return checks
+
+
+def build_webhooks_parser() -> argparse.ArgumentParser:
+    cli = _cli_name()
+    parser = argparse.ArgumentParser(
+        prog=f"{cli} webhooks",
+        description="Manage Linear webhooks registered against a team.",
+    )
+    _add_version_argument(parser)
+    sub = parser.add_subparsers(dest="webhooks_command", required=True)
+
+    # register sub-command
+    reg = sub.add_parser("register", help="Register a webhook URL with a Linear team.")
+    reg.add_argument("--url", required=True, help="Public HTTPS URL Linear will POST events to.")
+    reg.add_argument("--team-id", required=True, help="Linear team ID.")
+    reg.add_argument(
+        "--secret",
+        default="",
+        help="HMAC secret for signature verification. Defaults to LINEAR_WEBHOOK_SECRET env var.",
+    )
+    reg.add_argument("--api-key", default="", help="Linear API key. Defaults to LINEAR_API_KEY env var.")
+
+    # list sub-command
+    lst = sub.add_parser("list", help="List webhooks registered for a Linear team.")
+    lst.add_argument("--team-id", required=True, help="Linear team ID.")
+    lst.add_argument("--api-key", default="", help="Linear API key. Defaults to LINEAR_API_KEY env var.")
+
+    return parser
+
+
+def webhooks_main(argv: Sequence[str] | None = None) -> int:
+    parser = build_webhooks_parser()
+    args = parser.parse_args(argv)
+
+    api_key = args.api_key or os.environ.get("LINEAR_API_KEY", "")
+    if not api_key:
+        parser.exit(2, "symphony webhooks: LINEAR_API_KEY not set and --api-key not provided\n")
+
+    from symphony.tracker.webhooks import WebhookRegistrar, WebhookRegistrarError  # noqa: PLC0415
+
+    registrar = WebhookRegistrar(api_token=api_key)
+
+    if args.webhooks_command == "register":
+        secret = args.secret or os.environ.get("LINEAR_WEBHOOK_SECRET", "")
+        if not secret:
+            parser.exit(2, "symphony webhooks register: --secret or LINEAR_WEBHOOK_SECRET required\n")
+        try:
+            webhook_id = asyncio.run(registrar.register(args.url, args.team_id, secret))
+            print(f"Registered webhook: {webhook_id}")
+        except WebhookRegistrarError as exc:
+            parser.exit(2, f"symphony webhooks register: {exc}\n")
+        return 0
+
+    if args.webhooks_command == "list":
+        try:
+            webhooks = asyncio.run(registrar.list_webhooks(args.team_id))
+            if not webhooks:
+                print("No webhooks registered for this team.")
+            else:
+                for wh in webhooks:
+                    enabled = "enabled" if wh.get("enabled") else "disabled"
+                    print(f"  {wh.get('id')} [{enabled}] {wh.get('url')}")
+        except WebhookRegistrarError as exc:
+            parser.exit(2, f"symphony webhooks list: {exc}\n")
+        return 0
+
+    return 0
 
 
 def _resolve_logs_root(logs_root: str | Path, workflow_file: Path) -> Path:

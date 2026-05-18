@@ -203,6 +203,47 @@ class ClaudeCodeConfig:
 
 
 @dataclass(frozen=True)
+class WebhookConfig:
+    """Optional webhook configuration for receiving Linear events via HTTP push.
+
+    Supports $VAR syntax for environment variable resolution.
+
+    Example WORKFLOW.md / config section::
+
+        webhook:
+          secret: $LINEAR_WEBHOOK_SECRET
+          url: https://example.com/api/v1/webhooks/linear   # optional, enables auto-register
+          team_id: abc123                                    # required for auto-register
+    """
+
+    secret: str | None = None
+    url: str | None = None
+    team_id: str | None = None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> "WebhookConfig":
+        webhook = _mapping(config.get("webhook"), "webhook_config_must_be_map")
+        raw_secret = _string_value(webhook.get("secret"))
+        secret: str | None = None
+        if raw_secret is not None:
+            # Let ConfigError propagate — a missing env var for webhook.secret is a
+            # misconfiguration, not a soft fallback. Silently setting secret=None
+            # would disable the webhook route while startup succeeds, leaving
+            # operators on polling without any error surfaced.
+            secret = resolve_env_reference(raw_secret, environ)
+        return cls(
+            secret=secret,
+            url=_string_value(webhook.get("url")),
+            team_id=_string_value(webhook.get("team_id")),
+        )
+
+
+@dataclass(frozen=True)
 class WorkflowConfig:
     tracker: TrackerConfig
     polling: PollingConfig = field(default_factory=PollingConfig)
@@ -213,6 +254,7 @@ class WorkflowConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
     claude_code: ClaudeCodeConfig = field(default_factory=ClaudeCodeConfig)
+    webhook: WebhookConfig = field(default_factory=WebhookConfig)
 
     @classmethod
     def from_mapping(
@@ -231,6 +273,7 @@ class WorkflowConfig:
             agent=AgentConfig.from_mapping(config),
             codex=CodexConfig.from_mapping(config),
             claude_code=ClaudeCodeConfig.from_mapping(config),
+            webhook=WebhookConfig.from_mapping(config, environ=environ),
         )
 
 
