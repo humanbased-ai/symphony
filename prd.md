@@ -1381,12 +1381,12 @@ states:
 
 For teams running multiple Symphony instances with short poll intervals, a claim-comment tie-breaker can eliminate the remaining race:
 
-1. Before the state transition, record the issue's current `updatedAt` timestamp (call it `queued_since`) — this is the timestamp of when the ticket last entered `queued_states`.
+1. Before the state transition, fetch the issue's state-transition history and find the `createdAt` timestamp of the `IssueHistory` entry where the issue was last moved into a `queued_states` value (call it `queued_since`). This is a stable, per-requeue marker: it only changes when an operator explicitly moves the ticket back to a queued state, not when other fields are edited. Do **not** use `issue.updatedAt` — that timestamp changes on any field edit and will diverge between two instances that read the issue at slightly different times, causing each to filter out the other's claim comment and both believe they won.
 2. Post a claim comment: `{"claim": "symphony", "instance_id": "<host>:<pid>", "run_id": "<run-id>", "queued_since": "<iso8601>"}`.
 3. Call `updateIssue → in_progress_state`.
-4. Re-fetch the issue's comments ordered by `createdAt`. Consider only claim comments whose `queued_since` matches the current `queued_since` value — this scopes the tie-breaker to the current dispatch attempt and excludes stale comments from prior crashed or aborted instances. If the earliest matching claim comment's `instance_id` does not match this instance, abort and do not launch.
+4. Re-fetch the issue's comments ordered by `createdAt`. Consider only claim comments whose `queued_since` matches the value read in step 1 — this scopes the tie-breaker to the current dispatch attempt and excludes stale comments from prior crashed or aborted instances. If the earliest matching claim comment's `instance_id` does not match this instance, abort and do not launch.
 
-Stale claim comments (from a crashed instance on a prior attempt) will have an older `queued_since` and are therefore ignored after the operator re-queues the ticket. This prevents a zombie comment from permanently blocking future dispatches.
+Stale claim comments (from a crashed instance on a prior attempt) have an older `queued_since` (the state-transition history timestamp from before the operator re-queued) and are therefore ignored after the operator re-queues the ticket. This prevents a zombie comment from permanently blocking future dispatches.
 
 This reduces the race to the Linear write ordering of two near-simultaneous comment mutations — a much smaller window than polling. Full elimination requires Linear webhook push (replaces polling entirely and removes the window).
 
