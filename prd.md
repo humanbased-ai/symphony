@@ -1079,12 +1079,14 @@ be the first Phase 2 gate before desktop or productionization work expands.
   via Linear. Any future retry (SPEC §18.2 persistent queue, Phase 6 backlog)
   must use a fresh worktree. **Prerequisite:** SPEC.md §8.4/§10.7 and
   ARCHITECTURE.md retry flows must be updated before this is implemented — see §8.4.
-- [ ] **[Core: Claim race prevention — state-transition as distributed lock] (Linear: IN-290)** —
-  Move ticket to `in_progress_state` in Linear before launching the agent.
-  Linear state is the distributed claim; a second Symphony instance polling
-  the same ticket will see it is no longer in `queued_states` and skip it.
-  Log `claim_succeeded` with instance identity. `symphony doctor` warns if
-  `states.in_progress` is not configured. See §8.5 for the full design.
+- [ ] **[Core: Claim race prevention — best-effort state-transition claim] (Linear: IN-290)** —
+  Move ticket to `in_progress_state` in Linear before launching the agent as
+  a best-effort claim. Linear `updateIssue` is not a compare-and-swap — two
+  concurrent instances can both succeed — so this is fully protective only for
+  single-instance deployments. Multi-instance strict safety requires the
+  Phase 2B claim-comment tie-breaker (see §8.5). Log `claim_succeeded` with
+  instance identity. `symphony doctor` warns if `states.in_progress` is not
+  configured. See §8.5 for the full design.
 
 ### 7.3 Phase 2A: Standalone CLI Onboarding And Packaging
 
@@ -1351,7 +1353,10 @@ e.g. "Todo"                "In Progress"            "In Review" / "Cancelled"
 1. Orchestrator polls Linear for issues in `queued_states` (e.g., `Todo`).
 2. Before launching any agent, Symphony immediately moves the issue to `in_progress_state` (e.g., `In Progress`) via `linear_graphql`.
 3. After the state move, Symphony re-fetches the issue to verify the current state is `in_progress_state`. If verification fails (e.g., the issue was moved again by a concurrent instance), Symphony aborts the dispatch and does not launch the agent.
-4. **If workspace setup fails after the claim** (e.g., `git worktree add` errors), Symphony immediately moves the issue back to `queued_states[0]` and logs a `claim_rollback` event before exiting the dispatch. This ensures the ticket does not get stuck in `in_progress_state` with no agent working on it.
+4. **If workspace setup fails after the claim** (e.g., `git worktree add` errors), Symphony must determine whether it is safe to roll back before touching Linear state:
+   - **If the re-fetch in step 3 confirmed this instance is the verified owner** (i.e., single-instance deployment, or claim-comment tie-breaker confirmed first-place): move the issue back to `queued_states[0]` and log a `claim_rollback` event.
+   - **If ownership cannot be confirmed** (multi-instance deployment without claim-comment tie-breaker): do NOT roll back — another instance may have already launched an agent against this ticket. Log a `claim_abandoned` event and alert the operator to inspect and manually re-queue if needed.
+   Never roll back unconditionally: if a second instance claims the ticket due to the non-CAS race and then hits a setup failure, an unconditional rollback would re-queue a ticket that the first (winning) instance is actively running.
 5. Agent runs. On completion, agent (or Symphony on handoff) moves to `handoff_state`.
 6. On failure, Symphony moves to `failure_state` (per §8.4). Not back to `queued_states` — operator re-queues manually.
 
