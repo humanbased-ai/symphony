@@ -1258,8 +1258,10 @@ git -C <workspace_root>/.repo.git fetch --prune origin
 git -C <workspace_root>/.repo.git worktree add \
   <workspace_root>/<issue-id>/<run-id> -b <branch-name>
 
-# After dispatch — cleanup (remove worktree, then force-delete branch):
-git -C <workspace_root>/.repo.git worktree remove \
+# After dispatch — cleanup (force-remove worktree, then force-delete branch):
+# --force is required: agents may leave uncommitted/untracked files,
+# and git worktree remove refuses dirty worktrees without it.
+git -C <workspace_root>/.repo.git worktree remove --force \
   <workspace_root>/<issue-id>/<run-id>
 git -C <workspace_root>/.repo.git branch -D <branch-name>
 ```
@@ -1379,9 +1381,12 @@ states:
 
 For teams running multiple Symphony instances with short poll intervals, a claim-comment tie-breaker can eliminate the remaining race:
 
-1. Before the state transition, post a claim comment: `{"claim": "symphony", "instance_id": "<host>:<pid>", "at": "<iso8601>"}`.
-2. Call `updateIssue → in_progress_state`.
-3. Re-fetch the issue's comments ordered by `createdAt`. If the earliest claim comment's `instance_id` does not match this instance, abort and do not launch.
+1. Before the state transition, record the issue's current `updatedAt` timestamp (call it `queued_since`) — this is the timestamp of when the ticket last entered `queued_states`.
+2. Post a claim comment: `{"claim": "symphony", "instance_id": "<host>:<pid>", "run_id": "<run-id>", "queued_since": "<iso8601>"}`.
+3. Call `updateIssue → in_progress_state`.
+4. Re-fetch the issue's comments ordered by `createdAt`. Consider only claim comments whose `queued_since` matches the current `queued_since` value — this scopes the tie-breaker to the current dispatch attempt and excludes stale comments from prior crashed or aborted instances. If the earliest matching claim comment's `instance_id` does not match this instance, abort and do not launch.
+
+Stale claim comments (from a crashed instance on a prior attempt) will have an older `queued_since` and are therefore ignored after the operator re-queues the ticket. This prevents a zombie comment from permanently blocking future dispatches.
 
 This reduces the race to the Linear write ordering of two near-simultaneous comment mutations — a much smaller window than polling. Full elimination requires Linear webhook push (replaces polling entirely and removes the window).
 
