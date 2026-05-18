@@ -262,7 +262,11 @@ class TokenStore:
 
         # Check OAuth token from credential store
         try:
-            store = default_credential_store(env)
+            store: CredentialStore = (
+                FileCredentialStore(path=self.credentials_path, environ=env)
+                if self.credentials_path is not None
+                else default_credential_store(env)
+            )
             oauth = store.load_oauth_token()
             if oauth is not None:
                 if not oauth.is_expired():
