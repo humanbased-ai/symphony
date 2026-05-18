@@ -163,7 +163,7 @@ class TestFileCredentialStore:
         store.save_oauth_token(OAuthToken(access_token="tok"))
         raw = json.loads(creds_file.read_text())
         assert raw["linear"]["api_key"] == "existing_key"
-        assert "linear_oauth" in raw
+        assert raw["linear"]["access_token"] == "tok"
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +360,7 @@ class TestTokenStoreResolveLinearToken:
         oauth_token = OAuthToken(access_token="oauth_tok", expires_at=_future())
         creds_file.parent.mkdir(parents=True, exist_ok=True)
         creds_file.write_text(
-            json.dumps({"linear_oauth": oauth_token.to_dict()}, indent=2) + "\n"
+            json.dumps({"linear": oauth_token.to_dict()}, indent=2) + "\n"
         )
 
         tracker = _make_tracker()
@@ -370,14 +370,17 @@ class TestTokenStoreResolveLinearToken:
             return_value=FileCredentialStore(path=creds_file),
         ):
             store = TokenStore(tracker=tracker, environ={}, credentials_path=creds_file)
-            # credentials_path has no "linear" key, so file-based API key lookup returns None
-            # Then the OAuth step kicks in
+            # credentials_path has a `linear` object with OAuth fields but no api_key
             result = store.resolve_linear_token()
 
         assert result == "Bearer oauth_tok"
 
     def test_raises_oauth_token_expired_with_refresh(self, tmp_path: Path) -> None:
-        """Raises MissingLinearTokenError('oauth_token_expired') when token is expired and has refresh."""
+        """Expired file OAuth with a refresh token falls through to api_key lookup (not raises).
+
+        Unlike Keychain, the credentials file may also carry a valid api_key, so a
+        stale OAuth record must not block resolution of a still-valid api_key.
+        """
         creds_file = tmp_path / "credentials.json"
         oauth_token = OAuthToken(
             access_token="expired_tok",
@@ -385,9 +388,10 @@ class TestTokenStoreResolveLinearToken:
             expires_at=_past(),
         )
         creds_file.parent.mkdir(parents=True, exist_ok=True)
-        creds_file.write_text(
-            json.dumps({"linear_oauth": oauth_token.to_dict()}, indent=2) + "\n"
-        )
+        # Write expired OAuth + a valid legacy api_key in the same `linear` object.
+        data = oauth_token.to_dict()
+        data["api_key"] = "saved_api_key"
+        creds_file.write_text(json.dumps({"linear": data}, indent=2) + "\n")
 
         tracker = _make_tracker()
         with patch(
@@ -395,10 +399,10 @@ class TestTokenStoreResolveLinearToken:
             return_value=FileCredentialStore(path=creds_file),
         ):
             store = TokenStore(tracker=tracker, environ={}, credentials_path=creds_file)
-            with pytest.raises(MissingLinearTokenError) as exc_info:
-                store.resolve_linear_token()
+            # Expired OAuth is skipped; the stored api_key is returned instead.
+            result = store.resolve_linear_token()
 
-        assert str(exc_info.value) == "oauth_token_expired"
+        assert result == "saved_api_key"
 
     def test_skips_expired_oauth_without_refresh(self, tmp_path: Path) -> None:
         """Falls through to MissingLinearTokenError when expired token has no refresh_token."""
@@ -410,7 +414,7 @@ class TestTokenStoreResolveLinearToken:
         )
         creds_file.parent.mkdir(parents=True, exist_ok=True)
         creds_file.write_text(
-            json.dumps({"linear_oauth": oauth_token.to_dict()}, indent=2) + "\n"
+            json.dumps({"linear": oauth_token.to_dict()}, indent=2) + "\n"
         )
 
         tracker = _make_tracker()

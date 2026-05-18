@@ -121,15 +121,43 @@ class FileCredentialStore(CredentialStore):
     # ------------------------------------------------------------------
 
     def save_oauth_token(self, token: OAuthToken) -> None:
-        _save_credentials({"linear_oauth": token.to_dict()}, path=self._path, environ=self._environ)
+        # Merge OAuth fields into the `linear` sub-object so they coexist with
+        # any stored api_key without clobbering it.
+        creds_path = self._credentials_path()
+        creds_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            creds_path.parent.chmod(0o700)
+        except OSError:
+            pass
+        try:
+            existing: dict[str, object] = json.loads(creds_path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            existing = {}
+        linear = existing.get("linear")
+        if not isinstance(linear, dict):
+            linear = {}
+        linear.update(token.to_dict())
+        existing["linear"] = linear
+        creds_path.write_text(
+            json.dumps(existing, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            creds_path.chmod(0o600)
+        except OSError:
+            pass
 
     def load_oauth_token(self) -> OAuthToken | None:
         raw = self._load_raw()
-        oauth_data = raw.get("linear_oauth")
-        if not isinstance(oauth_data, dict):
+        linear = raw.get("linear")
+        if not isinstance(linear, dict):
+            return None
+        if not isinstance(linear.get("access_token"), str):
             return None
         try:
-            return OAuthToken.from_dict(oauth_data)
+            return OAuthToken.from_dict(linear)
         except (KeyError, ValueError):
             return None
 
@@ -141,7 +169,10 @@ class FileCredentialStore(CredentialStore):
                 return
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return
-        payload.pop("linear_oauth", None)
+        linear = payload.get("linear")
+        if isinstance(linear, dict):
+            for key in ("access_token", "token_type", "refresh_token", "expires_at"):
+                linear.pop(key, None)
         creds_path.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -277,11 +308,11 @@ class TokenStore:
         try:
             file_store = FileCredentialStore(path=self.credentials_path, environ=env)
             oauth = file_store.load_oauth_token()
-            if oauth is not None:
-                if not oauth.is_expired():
-                    return f"{oauth.token_type} {oauth.access_token}"
-                if oauth.refresh_token is not None:
-                    raise MissingLinearTokenError("oauth_token_expired")
+            if oauth is not None and not oauth.is_expired():
+                return f"{oauth.token_type} {oauth.access_token}"
+            # Expired or absent file OAuth: fall through to legacy api_key lookup.
+            # Unlike Keychain, the credentials file may also carry a valid api_key
+            # that should not be blocked by a stale OAuth record.
         except CredentialStoreError:
             pass
 
