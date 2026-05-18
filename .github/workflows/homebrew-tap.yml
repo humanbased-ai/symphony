@@ -50,6 +50,9 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           SHA="${{ steps.sha256.outputs.sha256 }}"
           URL="${{ steps.sha256.outputs.url }}"
+          # Capture resources into a variable before the heredoc so the
+          # command substitution stays at valid YAML block indentation.
+          RESOURCES="$(cat /tmp/symphony-resources.rb)"
           mkdir -p tap/Formula
           cat > tap/Formula/symphony.rb << FORMULA
           class Symphony < Formula
@@ -64,7 +67,7 @@ jobs:
 
             depends_on "python@3.12"
 
-$(cat /tmp/symphony-resources.rb)
+          ${RESOURCES}
 
             def install
               virtualenv_install_with_resources
