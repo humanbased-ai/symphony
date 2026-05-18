@@ -398,7 +398,12 @@ async def run_once(runtime: SymphonyRuntime) -> RuntimeTickResult:
     return await runtime.run_tick()
 
 
-async def run_poll_loop(runtime: SymphonyRuntime, *, before_tick: TickHook | None = None) -> None:
+async def run_poll_loop(
+    runtime: SymphonyRuntime,
+    *,
+    before_tick: TickHook | None = None,
+    tick_lock: asyncio.Lock | None = None,
+) -> None:
     await runtime.record_startup_issues()
     while True:
         try:
@@ -406,7 +411,11 @@ async def run_poll_loop(runtime: SymphonyRuntime, *, before_tick: TickHook | Non
                 result = before_tick()
                 if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
                     await result
-            result = await runtime.run_tick()
+            if tick_lock is not None:
+                async with tick_lock:
+                    result = await runtime.run_tick()
+            else:
+                result = await runtime.run_tick()
         except LinearClientError as exc:
             LOGGER.warning("Linear API error during poll tick, will retry next interval: %s", exc)
             await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
@@ -510,12 +519,18 @@ async def run_daemon(
     webhook_api: WebhookAPI | None = None,
 ) -> None:
     status_api = create_status_api(runtime)
+    # Single lock shared by the poll loop and every webhook-triggered tick so
+    # they cannot execute concurrently against the same runtime state.
+    tick_lock = asyncio.Lock()
     # Build a WebhookAPI from config when not explicitly provided.
     if webhook_api is None and context.config.webhook.secret:
         webhook_api = WebhookAPI(
             webhook_secret=context.config.webhook.secret,
-            on_event=_make_webhook_event_handler(runtime),
+            on_event=_make_webhook_event_handler(runtime, tick_lock=tick_lock),
         )
+    elif webhook_api is not None:
+        # Re-inject on_event with the shared lock regardless of how the API was built.
+        webhook_api.on_event = _make_webhook_event_handler(runtime, tick_lock=tick_lock)
     # serve_status_api signature accepts webhook_api as keyword arg when present.
     import functools as _functools  # noqa: PLC0415
     _status_server = _functools.partial(status_server, webhook_api=webhook_api) if webhook_api is not None else status_server
@@ -524,6 +539,7 @@ async def run_daemon(
         run_poll_loop(
             runtime,
             before_tick=workflow_reloader.reload_if_changed if workflow_reloader is not None else None,
+            tick_lock=tick_lock,
         )
     )
     tasks = {status_task, poll_task}
@@ -541,9 +557,17 @@ async def run_daemon(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _make_webhook_event_handler(runtime: SymphonyRuntime) -> "Callable[[Any], Awaitable[None]]":
-    """Return an async callback that triggers an immediate run_tick on issue state-change events."""
-    _tick_lock = asyncio.Lock()
+def _make_webhook_event_handler(
+    runtime: SymphonyRuntime,
+    *,
+    tick_lock: asyncio.Lock | None = None,
+) -> "Callable[[Any], Awaitable[None]]":
+    """Return an async callback that triggers an immediate run_tick on issue state-change events.
+
+    tick_lock — shared with run_poll_loop so webhook ticks cannot race with the
+    polling tick.  When locked (poll in progress), incoming webhook events are
+    silently dropped rather than queued.
+    """
 
     async def on_webhook_event(event: Any) -> None:
         # Only dispatch on Issue events — state changes are the primary trigger.
@@ -554,12 +578,12 @@ def _make_webhook_event_handler(runtime: SymphonyRuntime) -> "Callable[[Any], Aw
             getattr(event, "action", "?"),
             getattr(event, "type", "?"),
         )
-        # Coalesce concurrent webhook-triggered ticks: if one is already running,
-        # drop the new one rather than racing on shared runtime state.
-        if _tick_lock.locked():
+        # Coalesce: drop the webhook tick when polling is already running.
+        if tick_lock is not None and tick_lock.locked():
             LOGGER.debug("Webhook tick skipped — tick already in progress")
             return
-        async with _tick_lock:
+        lock_ctx: asyncio.Lock = tick_lock if tick_lock is not None else asyncio.Lock()
+        async with lock_ctx:
             try:
                 await runtime.run_tick()
             except Exception as exc:  # noqa: BLE001
@@ -729,13 +753,13 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     print(_dim("Stop: Ctrl-C  |  Running multiple projects? Use a separate process per WORKFLOW.md with a unique --port"))
     print()
 
-    _webhook_api: WebhookAPI | None = (
-        WebhookAPI(
-            webhook_secret=context.config.webhook.secret,
-            on_event=_make_webhook_event_handler(runtime),
-        )
-        if context.config.webhook.secret
-        else None
+    # Always mount the webhook route so that adding webhook.secret to WORKFLOW.md
+    # via a hot reload activates it without restarting the daemon.  When no secret
+    # is configured at startup the route is fail-closed (random secret rejects all
+    # unsigned requests); reload_now() installs the real secret when one appears.
+    _webhook_api = WebhookAPI(
+        webhook_secret=context.config.webhook.secret if context.config.webhook.secret else secrets.token_hex(32),
+        on_event=_make_webhook_event_handler(runtime),
     )
     workflow_reloader = RuntimeWorkflowReloader.from_context(
         runtime, context, webhook_api=_webhook_api

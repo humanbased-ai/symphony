@@ -107,13 +107,15 @@ class WebhookRegistrar:
         self.graphql_url = f"{base_url.rstrip('/')}/graphql"
 
     async def register(self, url: str, team_id: str, secret: str) -> str:
-        """Register webhook; return webhook ID. Idempotent — skip if URL already registered and enabled."""
+        """Register webhook; return webhook ID.
+
+        Any existing webhook for *url* is deleted before creating a fresh one.
+        Linear does not expose stored secrets via the API, so the only way to
+        guarantee the secret is current (e.g. after rotation) is to recreate.
+        """
         existing = await self.list_webhooks(team_id)
         for webhook in existing:
             if isinstance(webhook, dict) and webhook.get("url") == url:
-                if webhook.get("enabled", False):
-                    return webhook["id"]
-                # Disabled webhook at this URL — delete and recreate so Linear delivers events.
                 await self.unregister(webhook["id"])
                 break
 
