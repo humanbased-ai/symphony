@@ -1273,7 +1273,7 @@ Branch name: `<gitBranchName>-<run-id>` (e.g., `feat/in-42-add-login-a1b2c3d`), 
 
 Additional constraints:
 - The object store is shared — no per-dispatch network transfer.
-- Worktree add/remove failure aborts the dispatch without changing issue state (retryable on next tick).
+- Worktree add/remove failure aborts the dispatch. Because the §8.5 dispatch sequence claims the issue (moves it to `in_progress_state`) **before** workspace setup, a workspace failure at this point occurs after Linear state has already changed — the rollback and abandon rules in §8.5 step 4 apply. Only if workspace setup is attempted before any claim step does the failure leave issue state unchanged and the dispatch retryable on the next tick.
 - Stale worktrees from crashed dispatches must be cleaned up at startup via an application-level sweep using `git worktree remove --force`; `git worktree prune` only removes stale metadata for worktrees whose paths are already gone — directories that survive a crash remain registered and will not be pruned automatically.
 - Agents may not create their own worktrees or branches; Symphony owns the workspace lifecycle.
 
