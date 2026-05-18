@@ -1068,6 +1068,9 @@ PRD in the same branch so the routine remains discoverable for future agents.
   log the structured failure event, and clean up the workspace (unless
   `keep_on_failure: true`). Do not auto-retry. The persistent retry queue (SPEC
   §18.2) stays in Phase 6 backlog; any future retry must use a fresh clone.
+  **Prerequisite:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md retry flows (which
+  currently require failure-driven retries to be scheduled) must be updated to
+  align with this no-auto-retry decision before IN-289 is implemented.
 
 **Milestone status:** Closed with caveat. Live Linear auth and polling are
 verified; live Codex dispatch awaits a disposable active Linear issue and should
@@ -1243,12 +1246,13 @@ git -C <workspace_root>/.repo.git fetch --prune origin
 git -C <workspace_root>/.repo.git worktree add \
   <workspace_root>/<issue-id>/<run-id> -b <branch-name>
 
-# After dispatch — cleanup:
+# After dispatch — cleanup (remove worktree, then delete branch):
 git -C <workspace_root>/.repo.git worktree remove \
   <workspace_root>/<issue-id>/<run-id>
+git -C <workspace_root>/.repo.git branch -d <branch-name>
 ```
 
-Branch name: Linear issue `gitBranchName` field (e.g., `feat/in-42-add-login`), falling back to `issue/<identifier>`.
+Branch name: `<gitBranchName>-<run-id>` (e.g., `feat/in-42-add-login-a1b2c3d`), falling back to `issue/<identifier>-<run-id>`. A per-run suffix is required because `git worktree remove` leaves the local branch behind in the bare repo; a subsequent dispatch on the same issue would fail `worktree add -b` if a same-named branch already exists.
 
 | Approach | Network cost | Disk cost per agent | Monorepo safe |
 |----------|-------------|---------------------|---------------|
@@ -1258,7 +1262,7 @@ Branch name: Linear issue `gitBranchName` field (e.g., `feat/in-42-add-login`), 
 Additional constraints:
 - The object store is shared — no per-dispatch network transfer.
 - Worktree add/remove failure aborts the dispatch without changing issue state (retryable on next tick).
-- Stale worktrees from crashed dispatches are pruned via `git worktree prune` on startup and periodically.
+- Stale worktrees from crashed dispatches must be cleaned up at startup via an application-level sweep using `git worktree remove --force`; `git worktree prune` only removes stale metadata for worktrees whose paths are already gone — directories that survive a crash remain registered and will not be pruned automatically.
 - Agents may not create their own worktrees or branches; Symphony owns the workspace lifecycle.
 
 ### 8.2 Blocker eligibility (SPEC §8.2)
@@ -1296,6 +1300,8 @@ When a run exits with a non-recoverable error (agent crash, stall timeout exhaus
 The operator decides whether to re-queue by moving the issue back to an active state in Linear.
 
 A persistent retry queue (SPEC §18.2) remains in the Phase 6 backlog, but it must never reuse the same workspace as the failed run — each retry gets a fresh clone.
+
+**Prerequisite:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md currently require failure-driven retries to be scheduled. Those documents must be updated to align with this no-auto-retry contract before IN-289 is implemented; until then AGENTS.md instructs implementers to treat the conflict as a blocker.
 
 **Rationale:** Auto-retry into a dirty workspace risks compounding the original failure. The operator is better positioned than Symphony to judge whether a retry is safe after reading the failure logs.
 
