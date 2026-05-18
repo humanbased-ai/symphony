@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +105,72 @@ class StatusAPI:
         if inspect.isawaitable(result):
             result = await result
         return _json_response(202, _refresh_response(result, now=now))
+
+
+WEBHOOK_LINEAR_ROUTE = f"{API_PREFIX}/webhooks/linear"
+
+# Imported lazily to avoid circular imports at module load time.
+_LinearWebhookEvent = None
+
+
+def _get_webhook_types() -> tuple[Any, Any]:
+    """Lazy-import webhook helpers to avoid a hard dependency at import time."""
+    from symphony.tracker.webhooks import LinearWebhookEvent, parse_webhook_payload, verify_signature  # noqa: PLC0415
+    return LinearWebhookEvent, parse_webhook_payload, verify_signature
+
+
+EventCallback = Callable[["Any"], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class WebhookAPI:
+    """Handles POST /api/v1/webhooks/linear.
+
+    webhook_secret — when set, every request must carry a valid X-Linear-Signature.
+    on_event — async callable invoked for each valid LinearWebhookEvent.
+    """
+
+    webhook_secret: str | None = None
+    on_event: EventCallback | None = None
+
+    async def async_handle_request(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        headers: Mapping[str, str] | None = None,
+    ) -> HTTPResponse:
+        method = method.upper()
+        route = _normalized_path(path)
+
+        if route != WEBHOOK_LINEAR_ROUTE:
+            return _error_response(404, "route_not_found", f"unknown API route: {route}")
+
+        if method != "POST":
+            return _error_response(405, "method_not_allowed", "POST is required for this endpoint")
+
+        raw_body = body if body is not None else b""
+        headers = headers or {}
+        signature = _header_value(headers, "x-linear-signature")
+
+        if self.webhook_secret is not None:
+            if not signature:
+                return _error_response(401, "missing_signature", "X-Linear-Signature header is required")
+            _, _, verify_sig = _get_webhook_types()
+            if not verify_sig(raw_body, signature, self.webhook_secret):
+                return _error_response(401, "invalid_signature", "HMAC-SHA256 signature mismatch")
+
+        _, parse_payload, _ = _get_webhook_types()
+        event = parse_payload(raw_body)
+        if event is None:
+            return _error_response(400, "malformed_payload", "could not parse webhook payload")
+
+        if self.on_event is not None:
+            result = self.on_event(event)
+            if inspect.isawaitable(result):
+                await result
+
+        return _json_response(200, {"ok": True})
 
 
 def build_state_snapshot(state: Any, *, now: datetime | None = None) -> dict[str, Any]:
@@ -466,3 +532,12 @@ def _error_response(status_code: int, code: str, message: str) -> HTTPResponse:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str:
+    """Case-insensitive header lookup. Returns empty string if not found."""
+    lower = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lower:
+            return value
+    return ""
