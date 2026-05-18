@@ -567,6 +567,7 @@ class RuntimeWorkflowReloader:
     environ: Mapping[str, str] | None = None
     reloader: WorkflowReloader | None = None
     last_observed_mtime_ns: int | None = None
+    webhook_api: "WebhookAPI | None" = None
 
     @classmethod
     def from_context(
@@ -575,6 +576,7 @@ class RuntimeWorkflowReloader:
         context: StartupContext,
         *,
         environ: Mapping[str, str] | None = None,
+        webhook_api: "WebhookAPI | None" = None,
     ) -> "RuntimeWorkflowReloader":
         reloader = WorkflowReloader.for_path(context.workflow_path)
         effective = EffectiveWorkflow(definition=context.workflow, config=context.config)
@@ -586,6 +588,7 @@ class RuntimeWorkflowReloader:
             environ=environ,
             reloader=reloader,
             last_observed_mtime_ns=_workflow_mtime_ns(context.workflow_path),
+            webhook_api=webhook_api,
         )
 
     def reload_if_changed(self) -> bool:
@@ -612,6 +615,8 @@ class RuntimeWorkflowReloader:
         active_reloader.last_error = None
         self.reloader = active_reloader
         apply_runtime_workflow(self.runtime, effective)
+        if self.webhook_api is not None:
+            self.webhook_api.webhook_secret = config.webhook.secret
         LOGGER.info("Reloaded WORKFLOW.md from %s", self.workflow_path)
         return True
 
@@ -711,8 +716,18 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     print(_dim("Stop: Ctrl-C  |  Running multiple projects? Use a separate process per WORKFLOW.md with a unique --port"))
     print()
 
-    workflow_reloader = RuntimeWorkflowReloader.from_context(runtime, context)
-    asyncio.run(run_daemon(runtime, context, workflow_reloader=workflow_reloader))
+    _webhook_api: WebhookAPI | None = (
+        WebhookAPI(
+            webhook_secret=context.config.webhook.secret,
+            on_event=_make_webhook_event_handler(runtime),
+        )
+        if context.config.webhook.secret
+        else None
+    )
+    workflow_reloader = RuntimeWorkflowReloader.from_context(
+        runtime, context, webhook_api=_webhook_api
+    )
+    asyncio.run(run_daemon(runtime, context, workflow_reloader=workflow_reloader, webhook_api=_webhook_api))
     return 0
 
 

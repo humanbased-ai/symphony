@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -122,16 +123,18 @@ def _get_webhook_types() -> tuple[Any, Any]:
 EventCallback = Callable[["Any"], Awaitable[None]]
 
 
-@dataclass(frozen=True)
+@dataclass
 class WebhookAPI:
     """Handles POST /api/v1/webhooks/linear.
 
     webhook_secret — when set, every request must carry a valid X-Linear-Signature.
+      Mutable so RuntimeWorkflowReloader can rotate it on WORKFLOW.md reload without
+      restarting the HTTP server.
     on_event — async callable invoked for each valid LinearWebhookEvent.
     """
 
     webhook_secret: str | None = None
-    on_event: EventCallback | None = None
+    on_event: EventCallback | None = field(default=None, compare=False)
 
     async def async_handle_request(
         self,
@@ -168,7 +171,10 @@ class WebhookAPI:
         if self.on_event is not None:
             result = self.on_event(event)
             if inspect.isawaitable(result):
-                await result
+                # Schedule the tick in the background so Linear's POST receives
+                # 200 immediately. Awaiting run_tick() here would keep the
+                # connection open for the full agent turn timeout.
+                asyncio.create_task(result)
 
         return _json_response(200, {"ok": True})
 

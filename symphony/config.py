@@ -231,11 +231,11 @@ class WebhookConfig:
         raw_secret = _string_value(webhook.get("secret"))
         secret: str | None = None
         if raw_secret is not None:
-            try:
-                secret = resolve_env_reference(raw_secret, environ)
-            except ConfigError:
-                # secret env var not set — webhook verification will be disabled
-                secret = None
+            # Let ConfigError propagate — a missing env var for webhook.secret is a
+            # misconfiguration, not a soft fallback. Silently setting secret=None
+            # would disable the webhook route while startup succeeds, leaving
+            # operators on polling without any error surfaced.
+            secret = resolve_env_reference(raw_secret, environ)
         return cls(
             secret=secret,
             url=_string_value(webhook.get("url")),

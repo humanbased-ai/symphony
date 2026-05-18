@@ -252,8 +252,9 @@ class TestPollingFallback(unittest.TestCase):
         body = _valid_body()
 
         async def run() -> None:
-            # Simulate a webhook delivery followed by continued polling.
+            # Handler returns 200 immediately; on_event runs as a background task.
             await api.async_handle_request("POST", "/api/v1/webhooks/linear", body, {})
+            await asyncio.sleep(0)  # yield so the background task can execute
             calls.append("poll-tick")
 
         asyncio.run(run())
