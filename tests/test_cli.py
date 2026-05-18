@@ -280,7 +280,11 @@ Body
                 encoding="utf-8",
             )
 
-            checks = doctor_checks(workflow_path, logs_root="log", port=7337)
+            import socket as _socket
+            with _socket.socket() as _s:
+                _s.bind(("127.0.0.1", 0))
+                free_port = _s.getsockname()[1]
+            checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
 
             self.assertTrue(all(ok for ok, _, _ in checks))
 
