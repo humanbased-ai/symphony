@@ -1052,6 +1052,42 @@ PRD in the same branch so the routine remains discoverable for future agents.
 verified; live Codex dispatch awaits a disposable active Linear issue and should
 be the first Phase 2 gate before desktop or productionization work expands.
 
+### 7.2.1 Phase 1 SPEC Compliance Follow-Up
+
+> These items correct gaps found when comparing the implementation against the
+> original OpenAI Symphony SPEC (decided 2026-05-18, isolation-first). They are
+> **post-MVP follow-up work**, not Phase 1 blockers — Phase 1 closure stands.
+> Full design rationale in §8.1–§8.5.
+
+- [ ] **[Core: Per-run workspace isolation] (Linear: IN-286)** — Symphony owns
+  workspace setup per the isolation matrix in §8.1. Bare clone + `git worktree`
+  per dispatch (working tree and branch isolated; object store shared for monorepo
+  efficiency). Per-session env var credential injection. Per-issue log file.
+  Application-level crash sweep at startup. See §8.1 for the full isolation matrix.
+- [ ] **[Core: Blocker eligibility gate] (Linear: IN-287)** — Before dispatching
+  any issue, check Linear for unresolved blocking relationships. Skip (log
+  `blocker_skip`) without modifying tracker state. Reconsider on the next tick.
+- [ ] **[Core: Fail-closed approval gate] (Linear: IN-288)** — When
+  `approval_policy: on-request` is set but no approval resolution path exists,
+  treat it as a fatal misconfiguration at startup (`symphony doctor` reports it).
+  At runtime, an unresolvable approval request aborts the run and moves the issue
+  to the failure state.
+- [ ] **[Core: Failure-state transition, no auto-retry] (Linear: IN-289)** —
+  On non-recoverable failure, move the issue to the configured `failure_state`,
+  log the structured failure event, and clean up the workspace (unless
+  `keep_on_failure: true`). No Symphony-initiated auto-retry; operator re-queues
+  via Linear. Any future retry (SPEC §18.2 persistent queue, Phase 6 backlog)
+  must use a fresh worktree. **Prerequisite:** SPEC.md §8.4/§10.7 and
+  ARCHITECTURE.md retry flows must be updated before this is implemented — see §8.4.
+- [ ] **[Core: Claim race prevention — best-effort state-transition claim] (Linear: IN-290)** —
+  Move ticket to `in_progress_state` in Linear before launching the agent as
+  a best-effort claim. Linear `updateIssue` is not a compare-and-swap — two
+  concurrent instances can both succeed — so this is fully protective only for
+  single-instance deployments. Multi-instance strict safety requires the
+  Phase 2B claim-comment tie-breaker (see §8.5). Log `claim_succeeded` with
+  instance identity. `symphony doctor` warns if `states.in_progress` is not
+  configured. See §8.5 for the full design.
+
 ### 7.3 Phase 2A: Standalone CLI Onboarding And Packaging
 
 - [x] **[CLI: Onboarding commands] (Linear: IN-205)** — add `symphony init`,
@@ -1070,9 +1106,10 @@ be the first Phase 2 gate before desktop or productionization work expands.
   terminal tutorial with an English / Simplified Chinese picker, versioned read
   history, reusable tutorial module, expected setup deliverables, productivity
   context, and the next steps in the init flow.
-- [ ] **[CLI: Paginated init Q&A] (Linear: IN-268)** — break the orientation
+- [x] **[CLI: Paginated init Q&A] (Linear: IN-268)** — break the orientation
   into versioned, bilingual Q&A pages with continue/skip controls and persisted
   completion only after the tutorial is actually shown.
+  - Shipped in PR #18. `onboarding_tutorial.py` — versioned pages, continue/skip, bilingual language picker.
 - [ ] **[CLI: Onboard UX redesign] (Linear: IN-283)** — redesign `sy onboard`
   with an env-first flow: run environment scan first (derive GitHub org/repo
   from `git remote`, runner presence from PATH, Linear auth from env), show a
@@ -1173,13 +1210,197 @@ be the first Phase 2 gate before desktop or productionization work expands.
 - [ ] **[Config: Multi-runner per workflow]** — dispatch different labels or
   states to different agent runners.
 - [ ] **[Retry: Persistent queue]** — survive process restarts without losing
-  retry state.
+  retry state. Each retry entry must use a fresh workspace clone; reusing a
+  failed workspace is explicitly prohibited (see §8.4).
 - [ ] **[Multimodal: Vision input]** — pass screenshots/images from the workspace
   into agent prompts.
 
 ---
 
-## 8. Open Questions
+## 8. SPEC Alignment Decisions
+
+> Resolved design decisions from comparing this PRD against the original OpenAI Symphony SPEC.
+> Guiding principle: **isolation over efficiency** — no code contamination between concurrent agents.
+
+### 8.1 Workspace population and multi-agent isolation (SPEC §9.2–9.3)
+
+**Decision: Symphony owns workspace setup. Each dispatch gets an isolated working tree and a unique branch before the agent is launched.**
+
+#### Isolation matrix
+
+| Dimension | Threat | Codex | Claude Code | Owner |
+|-----------|--------|-------|-------------|-------|
+| **Working tree (local)** | Agent A overwrites Agent B's files mid-run | OS container per session — walls prevent cross-agent filesystem access | Separate `git worktree` directory per dispatch | Symphony (`workspace.py`) |
+| **Branch (remote)** | Two agents push to `main`; second push fails or force-clobbers | Branch-per-issue checkout (container walls end at network; remote collision risk is identical) | Branch-per-issue checkout | Symphony — derives name from Linear `gitBranchName` |
+| **Process** | Agent kills or starves another agent's subprocess | Container process namespace isolation | OS process group — Symphony tracks PIDs and kills only its own subprocess | Symphony (`orchestrator.py`) |
+| **Credentials** | Agent reads another agent's Linear or GitHub token | Container env isolation | Symphony passes resolved tokens as subprocess env vars; no shared credential files between sessions | Symphony (`workspace.py` + runner env injection) |
+| **Logs** | Output from concurrent agents interleaved in one file | Container stdout isolation | Per-issue log file at `<logs_root>/<issue-id>/<run-id>.log` | Symphony (`log_file.py`) |
+| **Concurrency** | Too many agents starve host resources | `max_workers` cap in WORKFLOW.md | `max_workers` cap in WORKFLOW.md | Symphony (`orchestrator.py`) |
+| **Network sandbox** | Agent makes unauthorized outbound calls | Codex container enforces network policy (configurable) | **Not sandboxed** — Claude Code has full host network access | Operator responsibility; Docker/cgroup sandboxing is a Phase 6 backlog item |
+
+Key observations:
+- **Remote branch collision** is the same risk for both runners — container walls end at the network boundary. Branch-per-issue is load-bearing for both, not just Claude Code.
+- **Network sandbox** is the one dimension where Codex is stronger than Claude Code by default. Teams running Claude Code against sensitive infrastructure should plan for the Phase 6 Docker/cgroup sandboxing item.
+- **Credentials** are injected per-session as env vars and never written to shared files, so a compromised agent session cannot read another session's tokens from disk.
+
+#### Workspace strategy: `git worktree` from a shared bare clone
+
+A fresh `git clone` per dispatch is prohibitively expensive for monorepos — gigabytes of files multiplied by concurrent agents. The correct approach shares the object store via a bare clone and materializes only the working tree per dispatch.
+
+```bash
+# Once — on first dispatch or when absent:
+git clone --bare <repo_url> <workspace_root>/.repo.git
+
+# Before each dispatch — keep the object store current (one fetch per tick):
+git -C <workspace_root>/.repo.git fetch --prune origin
+
+# Per dispatch — fast, disk-efficient, branch-isolated:
+git -C <workspace_root>/.repo.git worktree add \
+  <workspace_root>/<issue-id>/<run-id> -b <branch-name>
+
+# After dispatch — cleanup (force-remove worktree, then force-delete branch):
+# --force is required: agents may leave uncommitted/untracked files,
+# and git worktree remove refuses dirty worktrees without it.
+git -C <workspace_root>/.repo.git worktree remove --force \
+  <workspace_root>/<issue-id>/<run-id>
+git -C <workspace_root>/.repo.git branch -D <branch-name>
+```
+
+Branch name: `<gitBranchName>-<run-id>` (e.g., `feat/in-42-add-login-a1b2c3d`), falling back to `issue/<identifier>-<run-id>`. A per-run suffix is required because `git worktree remove` leaves the local branch behind in the bare repo; a subsequent dispatch on the same issue would fail `worktree add -b` if a same-named branch already exists. `branch -D` (force delete) is required because the feature branch contains unmerged commits relative to the bare repo's HEAD — `branch -d` would always refuse.
+
+| Approach | Network cost | Disk cost per agent | Monorepo safe |
+|----------|-------------|---------------------|---------------|
+| `git clone --depth 1` per dispatch | Full working tree × N agents | Full working tree × N | No |
+| Bare clone + `git worktree` | One fetch per tick, shared | Working tree only; object store shared | Yes |
+
+Additional constraints:
+- The object store is shared — no per-dispatch network transfer.
+- Worktree add/remove failure aborts the dispatch. Because the §8.5 dispatch sequence claims the issue (moves it to `in_progress_state`) **before** workspace setup, a workspace failure at this point occurs after Linear state has already changed — the rollback and abandon rules in §8.5 step 4 apply. Only if workspace setup is attempted before any claim step does the failure leave issue state unchanged and the dispatch retryable on the next tick.
+- Stale worktrees from crashed dispatches must be cleaned up at startup via an application-level sweep using `git worktree remove --force`; `git worktree prune` only removes stale metadata for worktrees whose paths are already gone — directories that survive a crash remain registered and will not be pruned automatically.
+- Agents may not create their own worktrees or branches; Symphony owns the workspace lifecycle.
+
+### 8.2 Blocker eligibility (SPEC §8.2)
+
+**Decision: Check blocker eligibility before dispatch in Phase 1 (not deferred).**
+
+Before dispatching any issue, the orchestrator checks whether that issue has unresolved blocking relationships in Linear. If blockers exist, the issue is skipped and a structured warning is logged (`blocker_skip` event). The issue remains in its current state and will be reconsidered on the next poll tick.
+
+- No blocker state is written to Linear (Symphony does not modify tracker state for the skip).
+- Unresolvable blocker loops (A blocks B, B blocks A) are treated as permanent skips until operator intervention.
+
+**Rationale:** Dispatching a blocked issue wastes agent compute and can produce PRs that cannot be merged until the upstream work lands.
+
+### 8.3 Approval gate (SPEC §10.5)
+
+**Decision: Fail-closed — Symphony will not dispatch if no approval state is configured and an approval gate fires.**
+
+When the WORKFLOW.md `approval_policy` is `on-request` but no `approval_state` is defined, Symphony treats it as a configuration error at startup (`symphony doctor` reports it as a fatal misconfiguration). At runtime, if an agent requests approval and no approval resolution path exists, the run is aborted and the issue is moved to the failure state.
+
+Auto-approve (`never`) remains the Phase 1 default preset behavior. Fail-closed only activates when `approval_policy: on-request` is explicitly set.
+
+**Rationale:** Silent approval (fail-open) in a multi-agent environment risks unreviewed actions landing in production. A misconfigured approval gate should surface as a hard error, not silently proceed.
+
+### 8.4 Run failure handling (SPEC §18.2)
+
+**Decision: On run failure, move the issue to the configured failure state and stop. No auto-retry into the same workspace.**
+
+When a run exits with a non-recoverable error (agent crash, stall timeout exhausted, approval rejected), Symphony:
+
+1. Moves the Linear issue to the workflow-defined `failure_state` (e.g., `Cancelled`).
+2. Logs the structured failure event with reason and last turn output.
+3. Deletes the workspace unless `keep_on_failure: true` is set.
+4. Does **not** re-queue or retry automatically.
+
+The operator decides whether to re-queue by moving the issue back to an active state in Linear.
+
+A persistent retry queue (SPEC §18.2) remains in the Phase 6 backlog. When implemented, it must never reuse the same workspace — each retry provisions a fresh worktree.
+
+**Cross-doc conflict and resolution:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md require failure-driven retries to be scheduled automatically. This PRD's decision narrows, not contradicts, that contract: the constraint is **no auto-retry into the same workspace**, not no retry at all. Retries are permitted provided they use a fresh worktree. SPEC.md and ARCHITECTURE.md must be updated before IN-289 is implemented to reflect this narrowing — specifically, any retry scheduling must provision a new workspace rather than resuming the failed one. Until those documents are updated, AGENTS.md instructs implementers to treat the cross-doc conflict as a blocker on IN-289.
+
+**Rationale:** Auto-retry into a dirty workspace risks compounding the original failure. The operator is better positioned to judge whether a retry is warranted after reading the failure log.
+
+### 8.5 Multi-instance claim race prevention (IN-290)
+
+**Decision: Linear state transition is a best-effort claim guard, not an atomic compare-and-set. Symphony moves the ticket to `in_progress_state` before launching the agent — not after, not mid-run. This eliminates the common case (sequential polls from one instance) and shrinks the race window for multi-instance deployments, but does not provide exclusive-claim guarantees. Phase 2B adds a claim-comment tie-breaker for strict multi-instance safety.**
+
+#### The problem
+
+Multiple Symphony instances (or multiple poll workers within one instance) can see the same ticket in a dispatchable state at nearly the same time. Without any claim step, both will dispatch the same issue, producing:
+
+- Duplicate agent sessions running against the same ticket
+- Duplicate PRs opened and potentially merged
+- Wasted agent compute proportional to the number of instances
+
+An in-memory lock only protects within one process. Linear must be the coordination point.
+
+#### Important: Linear `updateIssue` is not a compare-and-set
+
+Linear's `updateIssue` mutation is a plain update with no conditional semantics. If two Symphony instances poll the same `Todo` issue before either update propagates, both can call `updateIssue → In Progress` and both will receive success. Linear has no built-in mechanic to make the second caller fail.
+
+The state-transition claim therefore works as follows:
+
+- **Within one instance:** poll workers are serialized by the dispatch loop, so only one worker ever calls `updateIssue` per issue per tick. This case is fully protected.
+- **Across multiple instances:** the race window equals the API propagation delay plus the poll interval. For typical deployments (poll interval ≥ 30 s, instances in different data-centers) the practical duplicate rate approaches zero, but the guarantee does not hold under tight timing or network partition.
+
+#### Solution: state-transition as best-effort claim
+
+```
+Dispatchable states        Claimed state          Handoff / terminal
+(queued_states)      →     (in_progress_state)  →  (handoff_state / failure_state)
+e.g. "Todo"                "In Progress"            "In Review" / "Cancelled"
+```
+
+**Dispatch sequence (before agent launch):**
+
+1. Orchestrator polls Linear for issues in `queued_states` (e.g., `Todo`).
+2. Before launching any agent, Symphony immediately moves the issue to `in_progress_state` (e.g., `In Progress`) via `linear_graphql`.
+3. After the state move, Symphony re-fetches the issue to verify the current state is `in_progress_state`. If verification fails (e.g., the issue was moved again by a concurrent instance), Symphony aborts the dispatch and does not launch the agent.
+4. **If workspace setup fails after the claim** (e.g., `git worktree add` errors), Symphony must determine whether it is safe to roll back before touching Linear state:
+   - **If the re-fetch in step 3 confirmed this instance is the verified owner** (i.e., single-instance deployment, or claim-comment tie-breaker confirmed first-place): move the issue back to `queued_states[0]` and log a `claim_rollback` event.
+   - **If ownership cannot be confirmed** (multi-instance deployment without claim-comment tie-breaker): do NOT roll back — another instance may have already launched an agent against this ticket. Log a `claim_abandoned` event and alert the operator to inspect and manually re-queue if needed.
+   Never roll back unconditionally: if a second instance claims the ticket due to the non-CAS race and then hits a setup failure, an unconditional rollback would re-queue a ticket that the first (winning) instance is actively running.
+5. Agent runs. On completion, agent (or Symphony on handoff) moves to `handoff_state`.
+6. On failure, Symphony moves to `failure_state` (per §8.4). Not back to `queued_states` — operator re-queues manually.
+
+Issues already in `In Progress` when Symphony polls are skipped — they are either claimed by another instance or being worked on by a human.
+
+**WORKFLOW.md config:**
+
+```yaml
+states:
+  queued:      ["Todo"]           # Symphony polls these; tickets here are eligible for dispatch
+  in_progress: "In Progress"      # Symphony moves here immediately on claim (before agent starts)
+  handoff:     "In Review"        # Agent moves here when work is done
+  terminal:    ["Done", "Cancelled"]
+  failure:     "Cancelled"        # Symphony moves here on non-recoverable failure
+```
+
+`in_progress` replaces the old `active` catch-all.
+
+#### Phase 2B: claim-comment tie-breaker (strict multi-instance safety)
+
+For teams running multiple Symphony instances with short poll intervals, a claim-comment tie-breaker can eliminate the remaining race:
+
+1. Before the state transition, fetch the issue's state-transition history and find the `createdAt` timestamp of the `IssueHistory` entry where the issue was last moved into a `queued_states` value (call it `queued_since`). This is a stable, per-requeue marker: it only changes when an operator explicitly moves the ticket back to a queued state, not when other fields are edited. Do **not** use `issue.updatedAt` — that timestamp changes on any field edit and will diverge between two instances that read the issue at slightly different times, causing each to filter out the other's claim comment and both believe they won.
+2. Post a claim comment: `{"claim": "symphony", "instance_id": "<host>:<pid>", "run_id": "<run-id>", "queued_since": "<iso8601>"}`.
+3. Call `updateIssue → in_progress_state`.
+4. Re-fetch the issue's comments ordered by `createdAt`. Consider only claim comments whose `queued_since` matches the value read in step 1 — this scopes the tie-breaker to the current dispatch attempt and excludes stale comments from prior crashed or aborted instances. If the earliest matching claim comment's `instance_id` does not match this instance, abort and do not launch.
+
+Stale claim comments (from a crashed instance on a prior attempt) have an older `queued_since` (the state-transition history timestamp from before the operator re-queued) and are therefore ignored after the operator re-queues the ticket. This prevents a zombie comment from permanently blocking future dispatches.
+
+This reduces the race to the Linear write ordering of two near-simultaneous comment mutations — a much smaller window than polling. Full elimination requires Linear webhook push (replaces polling entirely and removes the window).
+
+#### Multi-instance observability
+
+Symphony logs a `claim_succeeded` event when it successfully claims and verifies a ticket, with fields: `issue_id`, `instance_id` (daemon hostname + PID), `claimed_at`. On workspace failure, it logs a `claim_rollback` event with `reason`. This makes duplicate dispatch visible in logs without requiring a shared database.
+
+#### `symphony doctor` check
+
+Doctor warns if `states.in_progress` is not configured in WORKFLOW.md, since omitting it disables the claim guard entirely.
+
+---
+
+## 9. Open Questions
 
 1. **Linear OAuth app registration:** Should Symphony ship with a shared OAuth client_id (users install the Symphony Linear app from Linear's marketplace), or does each team register their own Linear application with their own client_id/secret?
 2. **Hermes deployment:** Is the target Ollama on localhost, a remote vLLM cluster, or a hosted inference endpoint?

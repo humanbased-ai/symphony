@@ -620,7 +620,7 @@ Orchestrator.reconcile_running():
           "⚠️ MT-60 — Agent Stalled
            No activity for 6 minutes.
            [Cancel] [Retry Now]"
-  → schedules exponential backoff retry
+  → schedules exponential backoff retry (fresh workspace provisioned per SPEC §8.4 — failed workspace NOT reused)
 
 Operator taps [Cancel]:
   → Telegram inline callback → POST /api/v1/sessions/<id>/cancel
