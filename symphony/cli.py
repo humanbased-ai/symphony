@@ -32,7 +32,7 @@ from symphony.auth import (
     save_local_linear_token,
 )
 from symphony.config import ConfigError, WorkflowConfig
-from symphony.http_server import StatusAPI
+from symphony.http_server import OAuthAPI, StatusAPI
 from symphony.onboarding import (
     DEFAULT_ACTIVE_STATES,
     DEFAULT_PRESET,
@@ -453,7 +453,12 @@ async def run_poll_loop(runtime: SymphonyRuntime, *, before_tick: TickHook | Non
 
 async def serve_status_api(status_api: StatusAPI, port: int) -> None:
     loop = asyncio.get_running_loop()
-    server = create_status_http_server(status_api, port, loop=loop)
+    try:
+        from symphony.auth import default_credential_store
+        oauth_api: OAuthAPI | None = OAuthAPI(credential_store=default_credential_store())
+    except Exception:
+        oauth_api = None
+    server = create_status_http_server(status_api, port, loop=loop, oauth_api=oauth_api)
     LOGGER.info("Status API listening on http://127.0.0.1:%s", port)
     serve_task = asyncio.create_task(asyncio.to_thread(server.serve_forever, 0.25))
     try:
@@ -470,6 +475,7 @@ def create_status_http_server(
     *,
     loop: asyncio.AbstractEventLoop,
     host: str = "127.0.0.1",
+    oauth_api: "OAuthAPI | None" = None,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
@@ -489,6 +495,19 @@ def create_status_http_server(
 
         def _send_status_response(self, method: str) -> None:
             body = self.rfile.read(_content_length(self.headers.get("content-length")))
+
+            if oauth_api is not None:
+                oauth_response = oauth_api.handle_request(method, self.path, body)
+                if oauth_response is not None:
+                    payload = oauth_response.response_bytes()
+                    self.send_response(oauth_response.status_code)
+                    for header, value in oauth_response.headers.items():
+                        self.send_header(header, value)
+                    self.send_header("content-length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+
             if method == "POST" and self.path.split("?", 1)[0] == "/api/v1/refresh":
                 future = asyncio.run_coroutine_threadsafe(
                     status_api.async_handle_request(method, self.path, body),

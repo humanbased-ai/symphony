@@ -24,9 +24,13 @@ class HTTPResponse:
     status_code: int
     body: dict[str, Any]
     headers: dict[str, str]
+    raw_body: bytes | None = None
 
     def json_bytes(self) -> bytes:
         return json.dumps(self.body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def response_bytes(self) -> bytes:
+        return self.raw_body if self.raw_body is not None else self.json_bytes()
 
 
 @dataclass(frozen=True)
@@ -547,7 +551,7 @@ class OAuthAPI:
 
         pkce = PKCEChallenge.generate()
         pending: dict[str, object] = object.__getattribute__(self, "_pending")
-        pending[pkce.state] = (pkce, client_id, raw.get("client_secret") or None)
+        pending[pkce.state] = (pkce, client_id, raw.get("client_secret") or None, redirect_uri)
 
         auth_url = build_authorization_url(client_id.strip(), redirect_uri, pkce)
         return _json_response(200, {"authorization_url": auth_url, "state": pkce.state, "redirect_uri": redirect_uri})
@@ -555,7 +559,7 @@ class OAuthAPI:
     def _handle_callback(self, raw_path: str) -> HTTPResponse:
         from urllib.parse import parse_qs, urlsplit
         try:
-            from symphony.tracker.linear_oauth import exchange_code, parse_token_response, CALLBACK_PORT, CALLBACK_PATH
+            from symphony.tracker.linear_oauth import exchange_code, parse_token_response
         except ImportError as exc:
             return _error_response(500, "oauth_unavailable", str(exc))
 
@@ -569,24 +573,34 @@ class OAuthAPI:
                 status_code=400,
                 body={"error": {"code": "oauth_denied", "message": error}},
                 headers={"content-type": "text/html; charset=utf-8"},
+                raw_body=_CALLBACK_HTML_ERR,
             )
 
         pending: dict[str, object] = object.__getattribute__(self, "_pending")
         entry = pending.pop(state, None) if state else None
         if entry is None or not code:
-            return _error_response(400, "invalid_callback", "unknown state or missing code")
+            return HTTPResponse(
+                status_code=400,
+                body={"error": {"code": "invalid_callback", "message": "unknown state or missing code"}},
+                headers={"content-type": "text/html; charset=utf-8"},
+                raw_body=_CALLBACK_HTML_ERR,
+            )
 
-        pkce, client_id, client_secret = entry
+        pkce, client_id, client_secret, redirect_uri = entry
         try:
-            redirect_uri = f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}"
-            token_data = exchange_code(str(client_id), client_secret, code, redirect_uri, pkce.code_verifier)
+            token_data = exchange_code(str(client_id), client_secret, code, str(redirect_uri), pkce.code_verifier)
             token = parse_token_response(token_data)
             if self.credential_store is not None:
                 self.credential_store.save_oauth_token(token)
         except Exception as exc:
             return _error_response(500, "token_exchange_failed", str(exc))
 
-        return HTTPResponse(status_code=200, body={}, headers={"content-type": "text/html; charset=utf-8"})
+        return HTTPResponse(
+            status_code=200,
+            body={},
+            headers={"content-type": "text/html; charset=utf-8"},
+            raw_body=_CALLBACK_HTML_OK,
+        )
 
     def _handle_revoke(self) -> HTTPResponse:
         if self.credential_store is None:

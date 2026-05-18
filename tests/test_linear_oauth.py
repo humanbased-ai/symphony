@@ -356,3 +356,83 @@ def test_auth_revoke_removes_stored_token(monkeypatch, tmp_path):
         rc = auth_main(["revoke", "--local-only"])
     assert rc == 0
     assert store.load_oauth_token() is None
+
+
+# ---------------------------------------------------------------------------
+# OAuthAPI callback uses stored redirect_uri (P2 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_oauth_callback_uses_stored_redirect_uri():
+    """Callback must use the redirect_uri from /start, not a hard-coded port."""
+    from symphony.http_server import OAuthAPI
+
+    api = OAuthAPI(credential_store=None)
+
+    custom_port = 19999
+    body = json.dumps({"client_id": "cid", "port": custom_port}).encode()
+    start_resp = api.handle_request("POST", "/api/v1/linear/auth/start", body)
+    assert start_resp is not None
+    assert start_resp.status_code == 200
+
+    state = start_resp.body["state"]
+    redirect_uri = start_resp.body["redirect_uri"]
+    assert f":{custom_port}" in redirect_uri
+
+    pending = object.__getattribute__(api, "_pending")
+    assert state in pending
+    stored_redirect = pending[state][3]
+    assert stored_redirect == redirect_uri
+
+
+def test_oauth_callback_missing_state_returns_html_error():
+    from symphony.http_server import OAuthAPI, _CALLBACK_HTML_ERR
+
+    api = OAuthAPI(credential_store=None)
+    resp = api.handle_request("GET", "/api/v1/linear/auth/callback?code=abc&state=unknown")
+    assert resp is not None
+    assert resp.status_code == 400
+    assert resp.raw_body == _CALLBACK_HTML_ERR
+
+
+def test_oauth_callback_error_param_returns_html_error():
+    from symphony.http_server import OAuthAPI, _CALLBACK_HTML_ERR
+
+    api = OAuthAPI(credential_store=None)
+    resp = api.handle_request("GET", "/api/v1/linear/auth/callback?error=access_denied")
+    assert resp is not None
+    assert resp.status_code == 400
+    assert resp.raw_body == _CALLBACK_HTML_ERR
+
+
+# ---------------------------------------------------------------------------
+# create_status_http_server wires OAuthAPI (P1 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_status_http_server_routes_oauth_paths():
+    """OAuthAPI routes must be reachable through create_status_http_server."""
+    import asyncio
+    import threading
+    import urllib.request
+
+    from symphony.cli import create_status_http_server
+    from symphony.http_server import OAuthAPI, StatusAPI
+
+    oauth_api = OAuthAPI(credential_store=None)
+    status_api = StatusAPI(state_provider=lambda: None)
+    loop = asyncio.new_event_loop()
+
+    server = create_status_http_server(status_api, 0, loop=loop, host="127.0.0.1", oauth_api=oauth_api)
+    port = server.server_address[1]
+
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/linear/auth/status")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert "authenticated" in data
+    finally:
+        server.shutdown()
+        loop.close()
