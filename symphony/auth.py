@@ -205,9 +205,11 @@ class KeychainCredentialStore(CredentialStore):
             keyring.delete_password(self._SERVICE, self._USERNAME)
         except keyring.errors.NoKeyringError as exc:
             raise CredentialStoreError("no keyring backend available") from exc
-        except Exception:
-            # Key not found is fine
+        except keyring.errors.PasswordDeleteError:
+            # Credential not found — already absent, nothing to revoke.
             pass
+        except Exception as exc:
+            raise CredentialStoreError(f"keychain delete failed: {exc}") from exc
 
     def status(self) -> dict[str, object]:
         try:
@@ -256,18 +258,25 @@ class TokenStore:
                 if resolved is not None:
                     return resolved
 
-        stored = load_local_linear_token(path=self.credentials_path, environ=env)
-        if stored is not None:
-            return stored
+        # OAuth token lookup: Keychain first (when no explicit path), then file.
+        # Resolution order per PRD: env → WORKFLOW → Keychain → credentials file.
+        # When a custom credentials_path is set (e.g. tests or --credentials-path),
+        # skip Keychain and go directly to the file-backed store.
+        if self.credentials_path is None:
+            try:
+                keychain = KeychainCredentialStore()
+                oauth = keychain.load_oauth_token()
+                if oauth is not None:
+                    if not oauth.is_expired():
+                        return oauth.access_token
+                    if oauth.refresh_token is not None:
+                        raise MissingLinearTokenError("oauth_token_expired")
+            except CredentialStoreError:
+                pass
 
-        # Check OAuth token from credential store
         try:
-            store: CredentialStore = (
-                FileCredentialStore(path=self.credentials_path, environ=env)
-                if self.credentials_path is not None
-                else default_credential_store(env)
-            )
-            oauth = store.load_oauth_token()
+            file_store = FileCredentialStore(path=self.credentials_path, environ=env)
+            oauth = file_store.load_oauth_token()
             if oauth is not None:
                 if not oauth.is_expired():
                     return oauth.access_token
@@ -275,6 +284,10 @@ class TokenStore:
                     raise MissingLinearTokenError("oauth_token_expired")
         except CredentialStoreError:
             pass
+
+        stored = load_local_linear_token(path=self.credentials_path, environ=env)
+        if stored is not None:
+            return stored
 
         raise MissingLinearTokenError("missing_tracker_api_key")
 
