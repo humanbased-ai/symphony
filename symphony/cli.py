@@ -677,13 +677,19 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
     parser = build_onboard_parser()
     args = parser.parse_args(argv)
 
-    # Auto-detect GitHub org/repo from the git remote before scanning
+    # Auto-detect GitHub org/repo from the git remote before scanning.
+    # Track which values came from detection (not explicit flags) so Step 3
+    # can confirm them interactively without re-prompting explicit flags.
+    detected_github_org: str | None = None
+    detected_github_repo: str | None = None
     if not args.github_org or not args.github_repo:
         detected_org, detected_repo = _detect_github_from_remote()
         if detected_org and not args.github_org:
             args.github_org = detected_org
+            detected_github_org = detected_org
         if detected_repo and not args.github_repo:
             args.github_repo = detected_repo
+            detected_github_repo = detected_repo
 
     _env_checks = setup_environment_checks(args)
     print_setup_checks("Environment scan", _env_checks)
@@ -711,7 +717,15 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         )
         parser.exit(2, f"symphony onboard: {message}\n")
 
-    return _run_init_with_args(args, parser, command_name="onboard", show_environment_scan=False, show_tutorial_before=False)
+    return _run_init_with_args(
+        args,
+        parser,
+        command_name="onboard",
+        show_environment_scan=False,
+        show_tutorial_before=False,
+        detected_github_org=detected_github_org,
+        detected_github_repo=detected_github_repo,
+    )
 
 
 def _run_init_with_args(
@@ -721,6 +735,8 @@ def _run_init_with_args(
     command_name: str,
     show_environment_scan: bool = True,
     show_tutorial_before: bool = True,
+    detected_github_org: str | None = None,
+    detected_github_repo: str | None = None,
 ) -> int:
     try:
         mode = _resolve_init_mode(args)
@@ -771,11 +787,19 @@ def _run_init_with_args(
         github_org = args.github_org or ""
         github_repo = args.github_repo or ""
         if runner == "claude_code" and not automated:
-            print("\nStep 3/5 — GitHub repository for PR automation")
-            print("  Agents will clone this repo, push a branch, and open a PR.")
-            print("  Example: for github.com/acme-corp/my-backend, org = 'acme-corp', repo = 'my-backend'")
-            github_org = _prompt_default("GitHub org/user", github_org) if github_org else _prompt("GitHub org/user (blank to fill in later)").strip()
-            github_repo = _prompt_default("Repository name", github_repo) if github_repo else _prompt("Repository name (blank to fill in later)").strip()
+            # Only show Step 3 when at least one value needs input or confirmation.
+            # Explicit CLI flags are accepted as-is; only auto-detected values are
+            # shown as editable defaults so the user can correct a wrong detection.
+            org_needs_input = not github_org or github_org == detected_github_org
+            repo_needs_input = not github_repo or github_repo == detected_github_repo
+            if org_needs_input or repo_needs_input:
+                print("\nStep 3/5 — GitHub repository for PR automation")
+                print("  Agents will clone this repo, push a branch, and open a PR.")
+                print("  Example: for github.com/acme-corp/my-backend, org = 'acme-corp', repo = 'my-backend'")
+            if org_needs_input:
+                github_org = _prompt_default("GitHub org/user", github_org) if github_org else _prompt("GitHub org/user (blank to fill in later)").strip()
+            if repo_needs_input:
+                github_repo = _prompt_default("Repository name", github_repo) if github_repo else _prompt("Repository name (blank to fill in later)").strip()
 
         # --- Step 3: Linear API key ---
         linear_token = args.linear_api_key
