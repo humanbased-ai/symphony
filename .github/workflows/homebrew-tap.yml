@@ -66,6 +66,7 @@ jobs:
             license "Apache-2.0"
 
             depends_on "python@3.12"
+            depends_on "rust" => :build
 
           ${RESOURCES}
 
