@@ -192,6 +192,13 @@ def test_revoke_http_error_raises(mock_open):
         revoke_access_token("tok", "client")
 
 
+@patch("urllib.request.urlopen")
+def test_revoke_url_error_raises_oauth_error(mock_open):
+    mock_open.side_effect = urllib.error.URLError("connection refused")
+    with pytest.raises(OAuthError, match="revoke_failed"):
+        revoke_access_token("tok", "client", "secret")
+
+
 # ---------------------------------------------------------------------------
 # OAuthAPI HTTP handler
 # ---------------------------------------------------------------------------
@@ -359,15 +366,39 @@ def test_auth_revoke_removes_stored_token(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# OAuthAPI callback uses stored redirect_uri (P2 fix)
+# OAuthAPI callback uses stored redirect_uri; server_port as default
 # ---------------------------------------------------------------------------
+
+
+def test_oauth_start_uses_server_port_as_default_redirect():
+    """When no port is given, /start uses server_port, not CALLBACK_PORT."""
+    from symphony.http_server import OAuthAPI
+
+    api = OAuthAPI(credential_store=None, server_port=7337)
+    body = json.dumps({"client_id": "cid"}).encode()
+    resp = api.handle_request("POST", "/api/v1/linear/auth/start", body)
+    assert resp is not None
+    assert resp.status_code == 200
+    assert ":7337" in resp.body["redirect_uri"]
+
+
+def test_oauth_start_explicit_port_overrides_server_port():
+    """Explicit port in request body takes precedence over server_port."""
+    from symphony.http_server import OAuthAPI
+
+    api = OAuthAPI(credential_store=None, server_port=7337)
+    body = json.dumps({"client_id": "cid", "port": 19999}).encode()
+    resp = api.handle_request("POST", "/api/v1/linear/auth/start", body)
+    assert resp is not None
+    assert resp.status_code == 200
+    assert ":19999" in resp.body["redirect_uri"]
 
 
 def test_oauth_callback_uses_stored_redirect_uri():
     """Callback must use the redirect_uri from /start, not a hard-coded port."""
     from symphony.http_server import OAuthAPI
 
-    api = OAuthAPI(credential_store=None)
+    api = OAuthAPI(credential_store=None, server_port=7337)
 
     custom_port = 19999
     body = json.dumps({"client_id": "cid", "port": custom_port}).encode()

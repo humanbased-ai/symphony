@@ -487,9 +487,16 @@ class OAuthAPI:
 
     Pending PKCE challenges are stored in-memory and expire after
     CALLBACK_TIMEOUT_SECONDS from the /start call.
+
+    ``server_port`` is the port this API is served on; it is used as the
+    default redirect port when ``/start`` is called without an explicit
+    ``port`` in the request body.  Without it, the redirect URI would point
+    at CALLBACK_PORT (7338) even though the daemon listens on 7337 (or
+    whatever ``symphony run --port`` specifies).
     """
 
     credential_store: Any | None = None  # CredentialStore, optional
+    server_port: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_pending", {})  # state -> PKCEChallenge
@@ -546,7 +553,8 @@ class OAuthAPI:
         client_id = raw.get("client_id") or ""
         if not isinstance(client_id, str) or not client_id.strip():
             return _error_response(400, "missing_client_id", "client_id is required")
-        port = int(raw.get("port") or CALLBACK_PORT)
+        default_port = self.server_port if self.server_port is not None else CALLBACK_PORT
+        port = int(raw.get("port") or default_port)
         redirect_uri = f"http://localhost:{port}{CALLBACK_PATH}"
 
         pkce = PKCEChallenge.generate()

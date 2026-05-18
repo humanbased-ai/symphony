@@ -119,6 +119,8 @@ def revoke_access_token(
     except urllib.error.HTTPError as exc:
         if exc.code not in (200, 204):
             raise OAuthError(f"revoke_failed: {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise OAuthError(f"revoke_failed: {exc.reason}") from exc
 
 
 def parse_token_response(data: dict[str, object]) -> OAuthToken:

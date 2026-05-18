@@ -455,7 +455,7 @@ async def serve_status_api(status_api: StatusAPI, port: int) -> None:
     loop = asyncio.get_running_loop()
     try:
         from symphony.auth import default_credential_store
-        oauth_api: OAuthAPI | None = OAuthAPI(credential_store=default_credential_store())
+        oauth_api: OAuthAPI | None = OAuthAPI(credential_store=default_credential_store(), server_port=port)
     except Exception:
         oauth_api = None
     server = create_status_http_server(status_api, port, loop=loop, oauth_api=oauth_api)
