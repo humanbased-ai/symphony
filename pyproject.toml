@@ -33,5 +33,6 @@ pattern = "test_*.py"
 
 [dependency-groups]
 dev = [
+    "keyring>=25.7.0",
     "pytest>=9.0.3",
 ]
