@@ -10,7 +10,7 @@ jobs:
   update-tap:
     name: Bump Homebrew formula
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v') }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v') && !contains(github.event.workflow_run.head_branch, '-') }}
     steps:
       - name: Extract version from triggering tag
         id: version
