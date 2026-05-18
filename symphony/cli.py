@@ -697,7 +697,7 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
 
     workflow_path = Path(args.workflow_path).expanduser()
     if workflow_path.exists() and not args.overwrite:
-        checks = doctor_checks(workflow_path, logs_root="./log", port=DEFAULT_PORT)
+        checks = doctor_checks(workflow_path, logs_root="./log", port=DEFAULT_PORT, skip_port_check=True)
         print_setup_checks("Existing setup", checks)
         if all(ok for ok, _, _ in checks):
             print(f"\nOnboarding already complete: {workflow_path}")
@@ -771,16 +771,11 @@ def _run_init_with_args(
         github_org = args.github_org or ""
         github_repo = args.github_repo or ""
         if runner == "claude_code" and not automated:
-            if not github_org:
-                print("\nStep 3/5 — GitHub repository for PR automation")
-                print("  Agents will clone this repo, push a branch, and open a PR.")
-                print("  Enter the GitHub organisation or user name that owns your repo.")
-                print("  Example: for github.com/acme-corp/my-backend, org = 'acme-corp'")
-                github_org = _prompt("GitHub org/user (blank to fill in later)").strip()
-            if not github_repo:
-                print("  Repository name (without the org prefix).")
-                print("  Example: for github.com/acme-corp/my-backend, repo = 'my-backend'")
-                github_repo = _prompt("Repository name (blank to fill in later)").strip()
+            print("\nStep 3/5 — GitHub repository for PR automation")
+            print("  Agents will clone this repo, push a branch, and open a PR.")
+            print("  Example: for github.com/acme-corp/my-backend, org = 'acme-corp', repo = 'my-backend'")
+            github_org = _prompt_default("GitHub org/user", github_org) if github_org else _prompt("GitHub org/user (blank to fill in later)").strip()
+            github_repo = _prompt_default("Repository name", github_repo) if github_repo else _prompt("Repository name (blank to fill in later)").strip()
 
         # --- Step 3: Linear API key ---
         linear_token = args.linear_api_key
@@ -1095,6 +1090,7 @@ def doctor_checks(
     logs_root: str | Path,
     port: int,
     environ: Mapping[str, str] | None = None,
+    skip_port_check: bool = False,
 ) -> list[tuple[bool, str, str]]:
     checks: list[tuple[bool, str, str]] = []
     try:
@@ -1131,8 +1127,9 @@ def doctor_checks(
 
     logs_root = context.logs_root
     checks.append((True, "logs root", str(logs_root)))
-    port_ok, port_detail = _check_port_available(context.port)
-    checks.append((port_ok, "status api port", port_detail))
+    if not skip_port_check:
+        port_ok, port_detail = _check_port_available(context.port)
+        checks.append((port_ok, "status api port", port_detail))
     return checks
 
 
