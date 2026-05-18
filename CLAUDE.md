@@ -12,6 +12,11 @@ Read `prd.md` before implementing. If `prd.md`, `SPEC.md`, and
 `ARCHITECTURE.md` disagree, stop and surface the mismatch before making broad
 changes.
 
+**`SPEC.md` is read-only.** It is the external reference design published by
+OpenAI and must never be edited, annotated, or reformatted — including for
+conflict resolution. Cross-doc conflicts are resolved by updating `prd.md` and
+`ARCHITECTURE.md` only.
+
 ## Branch And Commit Rules
 
 - Do not work directly on `main`.

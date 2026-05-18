@@ -9,6 +9,17 @@ and `ARCHITECTURE.md`.
 When these documents disagree, stop and surface the mismatch before making broad
 implementation changes. Do not silently choose one contract over another.
 
+## Document Ownership
+
+`SPEC.md` is the external reference design published by OpenAI. It is **read-only**.
+Never edit, reformat, or annotate `SPEC.md` for any reason — including resolving
+cross-doc conflicts, adding constraints, or clarifying behavior. It is the fixed
+reference that the implementation is measured against.
+
+Cross-doc conflicts between `SPEC.md` and `prd.md` or `ARCHITECTURE.md` must be
+resolved by updating `prd.md` and `ARCHITECTURE.md` only. Document the mismatch
+and resolution rationale there.
+
 ## Branch Discipline
 
 - Do not make direct changes on `main`.
