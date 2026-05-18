@@ -66,9 +66,31 @@ gh auth login
 
 Create a Linear API key at `linear.app/settings/api` under Personal API keys.
 
-## Install
+## Installation
 
-Install the CLI from GitHub:
+### Homebrew (recommended on macOS)
+
+```bash
+brew install codatta/symphony/symphony
+```
+
+Upgrade:
+
+```bash
+brew upgrade symphony
+```
+
+### pip / pipx / uv
+
+Install from PyPI:
+
+```bash
+pipx install symphony
+# or
+uv tool install symphony
+```
+
+Install the latest from GitHub:
 
 ```bash
 uv tool install git+https://github.com/codatta/symphony.git
@@ -146,9 +168,10 @@ uv tool install --force ./dist/symphony-*.whl
 symphony --help
 ```
 
-Native single-file binaries and Homebrew formulae are not part of this packaging
-slice. They remain follow-on distribution channels once the CLI command surface
-has stabilized.
+Native single-file binaries are not part of this packaging slice.
+
+The Homebrew tap (`codatta/symphony`) is auto-updated on each tagged release via
+`.github/workflows/homebrew-tap.yml`. See [homebrew/README.md](homebrew/README.md).
 
 Release automation is defined in `.github/workflows/release.yml`. Use the
 manual `workflow_dispatch` path with `channel=dry-run` or `channel=staging` to
