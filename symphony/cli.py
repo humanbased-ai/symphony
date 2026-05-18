@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import os
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -542,6 +543,7 @@ async def run_daemon(
 
 def _make_webhook_event_handler(runtime: SymphonyRuntime) -> "Callable[[Any], Awaitable[None]]":
     """Return an async callback that triggers an immediate run_tick on issue state-change events."""
+    _tick_lock = asyncio.Lock()
 
     async def on_webhook_event(event: Any) -> None:
         # Only dispatch on Issue events — state changes are the primary trigger.
@@ -552,10 +554,16 @@ def _make_webhook_event_handler(runtime: SymphonyRuntime) -> "Callable[[Any], Aw
             getattr(event, "action", "?"),
             getattr(event, "type", "?"),
         )
-        try:
-            await runtime.run_tick()
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Webhook-triggered tick failed: %s", exc)
+        # Coalesce concurrent webhook-triggered ticks: if one is already running,
+        # drop the new one rather than racing on shared runtime state.
+        if _tick_lock.locked():
+            LOGGER.debug("Webhook tick skipped — tick already in progress")
+            return
+        async with _tick_lock:
+            try:
+                await runtime.run_tick()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Webhook-triggered tick failed: %s", exc)
 
     return on_webhook_event
 
@@ -616,7 +624,12 @@ class RuntimeWorkflowReloader:
         self.reloader = active_reloader
         apply_runtime_workflow(self.runtime, effective)
         if self.webhook_api is not None:
-            self.webhook_api.webhook_secret = config.webhook.secret
+            if config.webhook.secret is not None:
+                self.webhook_api.webhook_secret = config.webhook.secret
+            else:
+                # Fail closed: secret removed from config — reject all incoming
+                # requests rather than silently accepting unsigned POSTs.
+                self.webhook_api.webhook_secret = secrets.token_hex(32)
         LOGGER.info("Reloaded WORKFLOW.md from %s", self.workflow_path)
         return True
 
