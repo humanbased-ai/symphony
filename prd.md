@@ -1068,6 +1068,12 @@ PRD in the same branch so the routine remains discoverable for future agents.
   log the structured failure event, and clean up the workspace (unless
   `keep_on_failure: true`). Do not auto-retry. The persistent retry queue (SPEC
   §18.2) stays in Phase 6 backlog; any future retry must use a fresh clone.
+- [ ] **[Core: Claim race prevention — state-transition as distributed lock] (Linear: IN-290)** —
+  Move ticket to `in_progress_state` in Linear before launching the agent.
+  Linear state is the distributed claim; a second Symphony instance polling
+  the same ticket will see it is no longer in `queued_states` and skip it.
+  Log `claim_succeeded` with instance identity. `symphony doctor` warns if
+  `states.in_progress` is not configured. See §8.5 for the full design.
   **Prerequisite:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md retry flows (which
   currently require failure-driven retries to be scheduled) must be updated to
   align with this no-auto-retry decision before IN-289 is implemented.
@@ -1304,6 +1310,64 @@ A persistent retry queue (SPEC §18.2) remains in the Phase 6 backlog, but it mu
 **Prerequisite:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md currently require failure-driven retries to be scheduled. Those documents must be updated to align with this no-auto-retry contract before IN-289 is implemented; until then AGENTS.md instructs implementers to treat the conflict as a blocker.
 
 **Rationale:** Auto-retry into a dirty workspace risks compounding the original failure. The operator is better positioned than Symphony to judge whether a retry is safe after reading the failure logs.
+
+### 8.5 Multi-instance claim race prevention (IN-290)
+
+**Decision: Linear state transition is the atomic claim. Symphony moves the ticket to `in_progress_state` before launching the agent — not after, not mid-run.**
+
+#### The problem
+
+Multiple Symphony instances (or multiple poll workers within one instance) can see the same ticket in a dispatchable state at nearly the same time. Without a distributed claim, both will dispatch the same issue, producing:
+
+- Duplicate agent sessions running against the same ticket
+- Branch name collision on push (two agents try to create `feat/in-42-...`)
+- Duplicate PRs opened and potentially merged
+- Wasted agent compute proportional to the number of instances
+
+An in-memory lock only protects within one process. Linear itself must be the coordination point.
+
+#### Solution: state-transition as distributed claim
+
+```
+Dispatchable states        Claimed state          Handoff / terminal
+(queued_states)      →     (in_progress_state)  →  (handoff_state / failure_state)
+e.g. "Todo"                "In Progress"            "In Review" / "Cancelled"
+```
+
+**Dispatch sequence (before agent launch):**
+
+1. Orchestrator polls Linear for issues in `queued_states` (e.g., `Todo`).
+2. Before launching any agent, Symphony immediately moves the issue to `in_progress_state` (e.g., `In Progress`) via `linear_graphql`.
+3. The state move is the claim. If two Symphony instances race:
+   - First to move wins — Linear enforces the transition.
+   - Second polls and sees the issue is already in `In Progress` — not in `queued_states` — skips it.
+4. Agent runs. On completion, agent (or Symphony on handoff) moves to `handoff_state`.
+5. On failure, Symphony moves to `failure_state` (per §8.4). Not back to `queued_states` — operator re-queues manually.
+
+**WORKFLOW.md config:**
+
+```yaml
+states:
+  queued:      ["Todo"]           # Symphony polls these; tickets here are eligible for dispatch
+  in_progress: "In Progress"      # Symphony moves here immediately on claim (before agent starts)
+  handoff:     "In Review"        # Agent moves here when work is done
+  terminal:    ["Done", "Cancelled"]
+  failure:     "Cancelled"        # Symphony moves here on non-recoverable failure
+```
+
+`in_progress` replaces the old `active` catch-all. Issues already in `In Progress` when Symphony polls are ignored — they are either claimed by another instance or being worked on by a human.
+
+#### Secondary safety net: branch collision
+
+Even with state-claim, the `git worktree add -b <branch-name>` in the workspace setup (§8.1) acts as a secondary guard. If two agents somehow both proceed past the claim step with the same branch name, the second `worktree add` fails (branch already exists) — the dispatch aborts without touching Linear state, becoming retryable. This is a last-resort guard, not a substitute for the state-claim.
+
+#### Multi-instance observability
+
+Symphony logs a `claim_succeeded` event when it moves a ticket to `in_progress_state`, with fields: `issue_id`, `instance_id` (daemon hostname + PID), `claimed_at`. This makes it visible in logs which instance claimed which ticket, without requiring a shared database.
+
+#### `symphony doctor` check
+
+Doctor warns if `states.in_progress` is not configured in WORKFLOW.md, since omitting it disables the distributed claim guard.
 
 ---
 
