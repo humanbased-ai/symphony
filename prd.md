@@ -1059,11 +1059,18 @@ be the first Phase 2 gate before desktop or productionization work expands.
 > **post-MVP follow-up work**, not Phase 1 blockers — Phase 1 closure stands.
 > Full design rationale in §8.1–§8.5.
 
-- [ ] **[Core: Per-run workspace isolation] (Linear: IN-286)** — Symphony owns
+- [x] **[Core: Per-run workspace isolation] (Linear: IN-286)** — Symphony owns
   workspace setup per the isolation matrix in §8.1. Bare clone + `git worktree`
   per dispatch (working tree and branch isolated; object store shared for monorepo
   efficiency). Per-session env var credential injection. Per-issue log file.
   Application-level crash sweep at startup. See §8.1 for the full isolation matrix.
+  - Shipped on `feat/in-286-workspace-isolation`. `symphony/workspace.py` —
+    per-run paths `<root>/<workspace_key>/<run_id>`, optional bare-clone +
+    `git worktree` mode via `workspace.repo_url`, force-cleanup via
+    `git worktree remove --force` + `git branch -D`, `sweep_stale_worktrees()`
+    called from the poll-loop startup. `WorkspaceManager.logs_root` plumbs
+    per-run log paths through the runtime. PRD §8.1 documents the deliberate
+    narrowing of SPEC §9.1–§9.2.
 - [ ] **[Core: Blocker eligibility gate] (Linear: IN-287)** — Before dispatching
   any issue, check Linear for unresolved blocking relationships. Skip (log
   `blocker_skip`) without modifying tracker state. Reconsider on the next tick.
@@ -1225,6 +1232,17 @@ be the first Phase 2 gate before desktop or productionization work expands.
 ### 8.1 Workspace population and multi-agent isolation (SPEC §9.2–9.3)
 
 **Decision: Symphony owns workspace setup. Each dispatch gets an isolated working tree and a unique branch before the agent is launched.**
+
+**Cross-doc narrowing.** SPEC §9.1 specifies a per-issue workspace path
+(`<workspace.root>/<sanitized_issue_identifier>`) and §9.2 states that
+"workspaces are reused across runs for the same issue." This PRD deliberately
+narrows that contract to per-run isolation: workspace path becomes
+`<workspace.root>/<workspace_key>/<run_id>` and every dispatch materializes a
+fresh worktree. SPEC.md is the read-only reference design and is not modified
+to match this narrowing; ARCHITECTURE.md and module docstrings document the
+behavior actually shipped. The motivation is the multi-agent isolation matrix
+below — reusing a worktree across runs reintroduces the working-tree, branch,
+and log collision risks that the matrix is designed to eliminate.
 
 #### Isolation matrix
 

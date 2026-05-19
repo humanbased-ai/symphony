@@ -80,6 +80,9 @@ class PollingConfig:
 @dataclass(frozen=True)
 class WorkspaceConfig:
     root: Path
+    repo_url: str | None = None
+    default_branch: str = "main"
+    branch_prefix: str = ""
 
     @classmethod
     def from_mapping(
@@ -94,7 +97,16 @@ class WorkspaceConfig:
             Path(tempfile.gettempdir()) / "symphony_workspaces"
         )
         root = _resolve_path(configured_root, workflow_dir=workflow_dir, environ=environ)
-        return cls(root=root)
+        raw_repo_url = _string_value(workspace.get("repo_url"))
+        repo_url = resolve_env_reference(raw_repo_url, environ) if raw_repo_url is not None else None
+        default_branch = _string_value(workspace.get("default_branch")) or "main"
+        branch_prefix = _string_value(workspace.get("branch_prefix")) or ""
+        return cls(
+            root=root,
+            repo_url=repo_url,
+            default_branch=default_branch,
+            branch_prefix=branch_prefix,
+        )
 
 
 @dataclass(frozen=True)

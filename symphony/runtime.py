@@ -234,7 +234,13 @@ class SymphonyRuntime:
 
         try:
             workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
-            _attach_runtime_entry_metadata(entry, workspace_path=getattr(workspace, "path", None))
+            _attach_runtime_entry_metadata(
+                entry,
+                workspace_path=getattr(workspace, "path", None),
+                run_log_path=getattr(workspace, "run_log_path", None),
+                run_id=getattr(workspace, "run_id", None),
+                branch_name=getattr(workspace, "branch_name", None),
+            )
             await _maybe_await(self.workspace_manager.before_run(workspace))
 
             enriched_issue = await self._enrich_with_comments(issue)
@@ -335,9 +341,22 @@ def _is_api_runner(runner: Any) -> bool:
     return hasattr(runner, "run_task") and not hasattr(runner, "start_session")
 
 
-def _attach_runtime_entry_metadata(entry: Any, *, workspace_path: Any) -> None:
+def _attach_runtime_entry_metadata(
+    entry: Any,
+    *,
+    workspace_path: Any,
+    run_log_path: Any = None,
+    run_id: Any = None,
+    branch_name: Any = None,
+) -> None:
     if workspace_path is not None:
         entry.workspace_path = Path(workspace_path)
+    if run_log_path is not None:
+        entry.run_log_path = Path(run_log_path)
+    if run_id is not None:
+        entry.run_id = str(run_id)
+    if branch_name is not None:
+        entry.branch_name = str(branch_name)
     if not hasattr(entry, "turn_count"):
         entry.turn_count = 0
     if not hasattr(entry, "recent_events"):
