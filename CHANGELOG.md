@@ -5,6 +5,14 @@ release tag is created.
 
 ## Unreleased
 
+- Fail-closed approval gate (IN-288): `symphony doctor` now hard-fails when
+  the configured runner can request approval (Codex `approval_policy` other
+  than `never`, or Claude Code `permission_mode` other than
+  `bypassPermissions`) but `tracker.approval_state` is not set — the daemon
+  would otherwise stall on the first approval request. At runtime, an
+  `approval_required` turn failure without a resolution path now parks the
+  issue (no retry, kept in `claimed`) and logs `approval_unreachable`. New
+  optional config key: `tracker.approval_state`.
 - Blocker eligibility gate (IN-287): any candidate issue with an unresolved
   blocking relationship in Linear is skipped from dispatch (previously only
   Todo issues were filtered). A `blocker_skip: issue=… blockers=…` info-level

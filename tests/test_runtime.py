@@ -521,6 +521,214 @@ class BlockerGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, len(blocker_lines), blocker_lines)
 
 
+class ApprovalGateRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approval_required_without_resolution_parks_issue_without_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            runner = FakeSessionRunner(success=False, exit_reason="approval_required")
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),  # no approval_state
+                prompt_template="x",
+                tracker=FakeTracker([target]),
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-200",), result.failed)
+            self.assertEqual("approval_unreachable", result.errors["IN-200"])
+            # No retry scheduled — issue is parked in `claimed` until operator action.
+            self.assertEqual({}, runtime.state.retry_attempts)
+            self.assertIn(target.id, runtime.state.claimed)
+            self.assertNotIn(target.id, runtime.state.running)
+            self.assertTrue(any("approval_unreachable" in line for line in logs.output))
+
+    async def test_approval_required_with_resolution_path_moves_to_approval_state(self):
+        # When tracker.approval_state IS configured, the runtime must actually
+        # use it: move the Linear issue into approval_state and release the
+        # dispatch without scheduling a retry. The previous behavior fell
+        # through to retry-scheduling, leaving approval_state unused.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            runner = FakeSessionRunner(success=False, exit_reason="approval_required")
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                        "approval_state": "Needs Approval",
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 1},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = SymphonyRuntime(
+                config=config,
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            self.assertEqual("approval_pending", result.errors["IN-501"])
+            self.assertEqual([(target.id, "team-1", "Needs Approval")], tracker.move_calls)
+            # No retry scheduled; the dispatch is released and the resolver
+            # owns the next move.
+            self.assertEqual({}, runtime.state.retry_attempts)
+            self.assertNotIn(target.id, runtime.state.claimed)
+            self.assertTrue(any("approval_pending" in line for line in logs.output))
+
+    async def test_turn_input_required_is_treated_as_approval_required(self):
+        # CodexRunner emits `turn_input_required` for generic protocol-level
+        # approval frames. Without recognizing it, those exits fell through to
+        # normal retry even when approval_state was unset.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            runner = FakeSessionRunner(success=False, exit_reason="turn_input_required")
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),  # no approval_state
+                prompt_template="x",
+                tracker=FakeTracker([target]),
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual(("IN-200",), result.failed)
+            self.assertEqual("approval_unreachable", result.errors["IN-200"])
+            self.assertEqual({}, runtime.state.retry_attempts)
+
+    async def test_parked_claim_is_not_released_while_issue_stays_active(self):
+        # Regression for PR #37 recheck: a parked approval claim must NOT be
+        # released-and-re-dispatched while the Linear issue stays continuously
+        # active. Without the operator-intervention gate, the zombie release
+        # fires every tick and the daemon loops the same approval failure on
+        # every poll interval.
+        from symphony.orchestrator import complete_worker_terminal_failure, dispatch_issue
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            tracker = FakeTracker([target])
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+            dispatch_issue(target, runtime.state, now_ms=runtime.clock_ms())
+            complete_worker_terminal_failure(target.id, runtime.state)
+            self.assertIn(target.id, runtime.state.claimed)
+            # Issue stayed in candidates across the prior tick — no operator
+            # intervention.
+            runtime._prev_candidate_ids = {target.id}
+
+            result = await runtime.run_tick()
+
+            self.assertEqual((), result.dispatched)
+            self.assertIn(target.id, runtime.state.claimed)
+
+    async def test_zombie_claim_released_after_operator_intervention(self):
+        # After `complete_worker_terminal_failure` parks an issue in
+        # `state.claimed`, an operator that moves the ticket OUT of and
+        # back INTO an active state must be able to unblock the same daemon.
+        # Operator intervention is detected by the issue being absent from
+        # `_prev_candidate_ids` (i.e., it left the candidate set last tick).
+        from symphony.orchestrator import complete_worker_terminal_failure, dispatch_issue
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            tracker = FakeTracker([target])
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+            dispatch_issue(target, runtime.state, now_ms=runtime.clock_ms())
+            complete_worker_terminal_failure(target.id, runtime.state)
+            self.assertIn(target.id, runtime.state.claimed)
+            # Issue was NOT in candidates last tick (operator moved it out and
+            # back) — the intervention signal.
+            runtime._prev_candidate_ids = set()
+
+            with self.assertLogs("symphony.runtime", level="INFO") as logs:
+                result = await runtime.run_tick()
+
+            self.assertTrue(any("claim_released" in line for line in logs.output))
+            self.assertEqual(("IN-200",), result.dispatched)
+
+    async def test_approval_state_move_failure_schedules_retry(self):
+        # Regression: if move_issue_to_state raises (Linear outage, etc.) the
+        # handler used to log and release, leaving the issue in its original
+        # active state with `_prev_candidate_ids` already containing it — the
+        # daemon would never retry the move and never re-dispatch. The fix
+        # schedules a normal retry so the next tick retries the move.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            runner = FakeSessionRunner(success=False, exit_reason="approval_required")
+
+            # Monkey-patch move to raise on the SECOND call (the first call is
+            # the IN-290 claim move which we want to succeed).
+            original_move = tracker.move_issue_to_state
+            call_count = {"n": 0}
+
+            def flaky_move(issue_id, team_id, state_name):
+                call_count["n"] += 1
+                if call_count["n"] >= 2:
+                    raise RuntimeError("linear_outage")
+                return original_move(issue_id, team_id, state_name)
+
+            tracker.move_issue_to_state = flaky_move
+
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                        "in_progress_state": "In Progress",
+                        "approval_state": "Needs Approval",
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 1},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = SymphonyRuntime(
+                config=config,
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            self.assertEqual("approval_state_move_failed", result.errors["IN-501"])
+            # Retry scheduled so the next tick re-attempts the move.
+            self.assertIn(target.id, runtime.state.retry_attempts)
+
+
 class ClaimingFakeTracker(FakeTracker):
     """FakeTracker that supports the IN-290 claim flow."""
 
