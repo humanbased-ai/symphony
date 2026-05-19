@@ -38,6 +38,8 @@ class TrackerConfig:
     project_slug: str | None = None
     active_states: tuple[str, ...] = field(default_factory=lambda: DEFAULT_ACTIVE_STATES)
     terminal_states: tuple[str, ...] = field(default_factory=lambda: DEFAULT_TERMINAL_STATES)
+    in_progress_state: str | None = None
+    queued_state: str | None = None
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "TrackerConfig":
@@ -58,6 +60,8 @@ class TrackerConfig:
             project_slug=_string_value(tracker.get("project_slug")),
             active_states=_string_tuple(tracker.get("active_states"), DEFAULT_ACTIVE_STATES),
             terminal_states=_string_tuple(tracker.get("terminal_states"), DEFAULT_TERMINAL_STATES),
+            in_progress_state=_string_value(tracker.get("in_progress_state")),
+            queued_state=_string_value(tracker.get("queued_state")),
         )
 
 

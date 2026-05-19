@@ -31,6 +31,9 @@ query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first:
       }
       branchName
       url
+      team {
+        id
+      }
       labels {
         nodes {
           name
@@ -54,6 +57,52 @@ query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first:
     pageInfo {
       hasNextPage
       endCursor
+    }
+  }
+}
+""".strip()
+
+
+WORKFLOW_STATES_QUERY = """
+query SymphonyWorkflowStates($teamId: String!, $first: Int!) {
+  team(id: $teamId) {
+    states(first: $first) {
+      nodes {
+        id
+        name
+        type
+      }
+    }
+  }
+}
+""".strip()
+
+
+ISSUE_UPDATE_STATE_MUTATION = """
+mutation SymphonyClaimIssue($issueId: String!, $stateId: String!) {
+  issueUpdate(id: $issueId, input: {stateId: $stateId}) {
+    success
+    issue {
+      id
+      identifier
+      title
+      description
+      priority
+      state {
+        name
+      }
+      branchName
+      url
+      team {
+        id
+      }
+      labels {
+        nodes {
+          name
+        }
+      }
+      createdAt
+      updatedAt
     }
   }
 }
@@ -90,6 +139,9 @@ query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!)
       }
       branchName
       url
+      team {
+        id
+      }
       labels {
         nodes {
           name
@@ -152,6 +204,14 @@ class MissingLinearProjectSlugError(LinearClientError):
     code = "missing_tracker_project_slug"
 
 
+class LinearWorkflowStateNotFoundError(LinearClientError):
+    code = "linear_workflow_state_not_found"
+
+
+class LinearIssueUpdateFailedError(LinearClientError):
+    code = "linear_issue_update_failed"
+
+
 class LinearClient:
     def __init__(
         self,
@@ -162,6 +222,12 @@ class LinearClient:
         self.tracker = tracker
         self.token_store = token_store or TokenStore(tracker)
         self.transport = transport or _urllib_transport
+        # Per-process cache of workflow state name → ID, keyed by team_id. Linear
+        # state IDs are stable, so caching once per daemon lifetime is safe; if
+        # the cache becomes stale (a state is renamed/recreated), the next
+        # ``updateIssue`` will fail with a clear error and the operator can
+        # restart Symphony to pick up the new map.
+        self._workflow_state_cache: dict[str, dict[str, str]] = {}
 
     def fetch_candidate_issues(self) -> list[Issue]:
         return self.fetch_issues_by_states(list(self.tracker.active_states))
@@ -236,6 +302,69 @@ class LinearClient:
                 comments.append(f"{author}: {text.strip()}")
         return comments
 
+    def move_issue_to_state(self, issue_id: str, team_id: str | None, state_name: str) -> Issue:
+        """Transition ``issue_id`` to ``state_name`` and return the refreshed Issue.
+
+        Used as the best-effort claim guard (PRD §8.5). The state name is
+        resolved to its team-scoped Linear state ID and cached per team_id; the
+        first claim for a given team pays the resolution cost, subsequent
+        claims hit cache.
+
+        Caller MUST re-fetch the issue afterwards to verify ownership — Linear
+        ``updateIssue`` is not a compare-and-set (two concurrent callers can
+        both succeed), so the returned issue is the post-update state as
+        reported by Linear, not a verified claim.
+        """
+
+        if not team_id:
+            raise LinearWorkflowStateNotFoundError("issue_missing_team_id")
+        state_id = self._resolve_workflow_state_id(team_id, state_name)
+        body = self.graphql(
+            ISSUE_UPDATE_STATE_MUTATION,
+            {"issueId": issue_id, "stateId": state_id},
+        )
+        result = _nested(body, "data", "issueUpdate")
+        if not isinstance(result, dict) or result.get("success") is not True:
+            raise LinearIssueUpdateFailedError(
+                f"issue_update_unsuccessful:{state_name}"
+            )
+        issue_node = result.get("issue")
+        if not isinstance(issue_node, dict):
+            raise LinearUnknownPayloadError("linear_unknown_payload")
+        return normalize_issue(issue_node)
+
+    def _resolve_workflow_state_id(self, team_id: str, state_name: str) -> str:
+        states = self._workflow_state_cache.get(team_id)
+        if states is None:
+            states = self._fetch_workflow_state_map(team_id)
+            self._workflow_state_cache[team_id] = states
+        state_id = states.get(state_name) or states.get(state_name.strip())
+        if not state_id:
+            # Refresh once in case the state was created after the cache filled.
+            states = self._fetch_workflow_state_map(team_id)
+            self._workflow_state_cache[team_id] = states
+            state_id = states.get(state_name) or states.get(state_name.strip())
+        if not state_id:
+            raise LinearWorkflowStateNotFoundError(
+                f"workflow_state_not_found:{state_name}"
+            )
+        return state_id
+
+    def _fetch_workflow_state_map(self, team_id: str) -> dict[str, str]:
+        body = self.graphql(WORKFLOW_STATES_QUERY, {"teamId": team_id, "first": 100})
+        nodes = _nested(body, "data", "team", "states", "nodes")
+        if not isinstance(nodes, list):
+            raise LinearUnknownPayloadError("linear_unknown_payload")
+        mapping: dict[str, str] = {}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            name = node.get("name")
+            state_id = node.get("id")
+            if isinstance(name, str) and isinstance(state_id, str):
+                mapping[name] = state_id
+        return mapping
+
     def graphql_raw(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         variables = variables or {}
         payload = {"query": query, "variables": variables}
@@ -291,6 +420,7 @@ def normalize_issue(raw: dict[str, Any]) -> Issue:
         blocked_by=_blockers(raw),
         created_at=_parse_datetime(raw.get("createdAt")),
         updated_at=_parse_datetime(raw.get("updatedAt")),
+        team_id=_optional_string(_nested(raw, "team", "id")),
     )
 
 

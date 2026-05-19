@@ -203,5 +203,42 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(set(), state.claimed)
 
 
+class ClaimGuardTests(unittest.TestCase):
+    def _state(self, *, in_progress_state: str | None = "In Progress") -> OrchestratorState:
+        config = WorkflowConfig.from_mapping(
+            {
+                "tracker": {
+                    "kind": "linear",
+                    "active_states": ["Todo", "In Progress"],
+                    "terminal_states": ["Done", "Canceled"],
+                    **(
+                        {"in_progress_state": in_progress_state}
+                        if in_progress_state is not None
+                        else {}
+                    ),
+                },
+                "agent": {"max_concurrent_agents": 2},
+                "polling": {"interval_ms": 5_000},
+            }
+        )
+        return OrchestratorState.from_config(config)
+
+    def test_in_progress_issues_are_filtered_when_claim_guard_enabled(self):
+        state = self._state()
+        already_claimed = issue("issue-1", "IN-501", state="In Progress")
+        queued = issue("issue-2", "IN-502", state="Todo")
+
+        selected = select_dispatchable([already_claimed, queued], state)
+
+        self.assertEqual(["issue-2"], [item.id for item in selected])
+        self.assertFalse(should_dispatch(already_claimed, state))
+
+    def test_in_progress_issues_pass_when_claim_guard_disabled(self):
+        state = self._state(in_progress_state=None)
+        already_active = issue("issue-1", "IN-501", state="In Progress")
+
+        self.assertTrue(should_dispatch(already_active, state))
+
+
 if __name__ == "__main__":
     unittest.main()

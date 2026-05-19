@@ -58,6 +58,8 @@ class OrchestratorState:
     active_states: tuple[str, ...]
     terminal_states: tuple[str, ...]
     max_concurrent_agents_by_state: Mapping[str, int] = field(default_factory=dict)
+    in_progress_state: str | None = None
+    queued_state: str | None = None
     running: dict[str, RunningEntry] = field(default_factory=dict)
     claimed: set[str] = field(default_factory=set)
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
@@ -71,6 +73,8 @@ class OrchestratorState:
             active_states=config.tracker.active_states,
             terminal_states=config.tracker.terminal_states,
             max_concurrent_agents_by_state=config.agent.max_concurrent_agents_by_state,
+            in_progress_state=config.tracker.in_progress_state,
+            queued_state=config.tracker.queued_state,
         )
 
     def apply_config(self, config: WorkflowConfig) -> None:
@@ -79,6 +83,8 @@ class OrchestratorState:
         self.active_states = config.tracker.active_states
         self.terminal_states = config.tracker.terminal_states
         self.max_concurrent_agents_by_state = config.agent.max_concurrent_agents_by_state
+        self.in_progress_state = config.tracker.in_progress_state
+        self.queued_state = config.tracker.queued_state
 
     def available_slots(self) -> int:
         return max(self.max_concurrent_agents - len(self.running), 0)
@@ -133,6 +139,14 @@ def _base_issue_eligible(
     if issue.id in state.claimed and not (allow_claimed_retry and issue.id in state.retry_attempts):
         return False
     if normalize_state(issue.state) == "todo" and _has_non_terminal_blocker(issue, state):
+        return False
+    # When the claim guard is enabled, issues already in the in-progress state
+    # are skipped — they are either claimed by another instance or being worked
+    # on by a human (PRD §8.5).
+    if (
+        state.in_progress_state
+        and normalize_state(issue.state) == normalize_state(state.in_progress_state)
+    ):
         return False
     return True
 

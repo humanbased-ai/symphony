@@ -1086,7 +1086,7 @@ be the first Phase 2 gate before desktop or productionization work expands.
   via Linear. Any future retry (SPEC §18.2 persistent queue, Phase 6 backlog)
   must use a fresh worktree. **Prerequisite:** SPEC.md §8.4/§10.7 and
   ARCHITECTURE.md retry flows must be updated before this is implemented — see §8.4.
-- [ ] **[Core: Claim race prevention — best-effort state-transition claim] (Linear: IN-290)** —
+- [x] **[Core: Claim race prevention — best-effort state-transition claim] (Linear: IN-290)** —
   Move ticket to `in_progress_state` in Linear before launching the agent as
   a best-effort claim. Linear `updateIssue` is not a compare-and-swap — two
   concurrent instances can both succeed — so this is fully protective only for
@@ -1094,6 +1094,17 @@ be the first Phase 2 gate before desktop or productionization work expands.
   Phase 2B claim-comment tie-breaker (see §8.5). Log `claim_succeeded` with
   instance identity. `symphony doctor` warns if `states.in_progress` is not
   configured. See §8.5 for the full design.
+  - Shipped on `feat/in-290-claim-race-prevention` (stacked on IN-286).
+    `symphony/runtime.py` — `_claim_issue` move-then-refetch flow,
+    `_rollback_claim_after_workspace_failure` honoring `tracker.queued_state`
+    (rollback when set, `claim_abandoned` log when unset for multi-instance
+    safety), `_instance_id()` host:pid tag on all claim events.
+    `symphony/orchestrator.py` — issues already in `in_progress_state` are
+    filtered from dispatch eligibility. `symphony/tracker/linear.py` —
+    `move_issue_to_state(issue_id, team_id, state_name)` with per-team
+    workflow-state cache. `Issue.team_id` populated by both candidate and
+    by-id queries. `symphony doctor` includes a `claim guard` row that warns
+    when `tracker.in_progress_state` is unset.
 
 ### 7.3 Phase 2A: Standalone CLI Onboarding And Packaging
 
