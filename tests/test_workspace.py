@@ -448,6 +448,28 @@ class WorkspaceManagerGitModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("feat/login-r1", branches)
             self.assertNotIn("feat/login-r2", branches)
 
+    async def test_git_mode_terminal_cleanup_uses_recorded_branch_after_checkout_change(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            upstream = _make_upstream_repo(tmp)
+            manager = WorkspaceManager(
+                WorkspaceConfig(root=tmp / "workspaces", repo_url=upstream, default_branch="main"),
+            )
+            workspace = await manager.prepare_for_run(
+                make_issue("IN-42", branch_name="feat/login"), run_id="r1"
+            )
+            subprocess.check_call(["git", "-C", str(workspace.path), "checkout", "main"])
+
+            removed = await manager.cleanup("IN-42")
+
+            self.assertTrue(removed)
+            bare = tmp / "workspaces" / BARE_REPO_DIRNAME
+            branches = subprocess.check_output(
+                ["git", "-C", str(bare), "branch", "--list"], text=True
+            )
+            self.assertIn("main", branches)
+            self.assertNotIn("feat/login-r1", branches)
+
     async def test_git_mode_sweep_deletes_orphan_metadata_branches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
