@@ -190,6 +190,10 @@ class WorkspaceManager:
 
         Used for SPEC §9 terminal cleanup, where every run for a now-terminal
         issue should be reclaimed regardless of which dispatch produced it.
+        Each per-run directory has its ``before_remove`` hook invoked while
+        the directory still contains its run contents, and the corresponding
+        branch in the bare repo (if any) is force-deleted after the worktree
+        is removed.
         """
 
         if failed and keep_on_failure:
@@ -205,26 +209,25 @@ class WorkspaceManager:
         if not issue_dir.is_dir():
             raise WorkspaceError("workspace_path_exists_not_directory")
 
+        branch_map = await self._list_worktree_branches()
         removed_any = False
         for entry in sorted(issue_dir.iterdir()):
             if not entry.is_dir():
                 continue
-            await self._remove_run_path(entry, branch_name=None)
+            branch_name = branch_map.get(str(entry.resolve()))
+            handle = Workspace(
+                path=entry,
+                workspace_key=workspace_key,
+                run_id=entry.name,
+                branch_name=branch_name,
+                run_log_path=None,
+                created_now=False,
+            )
+            await self.run_hook("before_remove", handle, best_effort=True)
+            await self._remove_run_path(entry, branch_name)
             removed_any = True
 
-        # Run before_remove once at the issue level for backwards compatibility
-        # with hooks that operate on the per-issue directory.
-        handle = Workspace(
-            path=issue_dir,
-            workspace_key=workspace_key,
-            run_id="",
-            branch_name=None,
-            run_log_path=None,
-            created_now=False,
-        )
-        try:
-            await self.run_hook("before_remove", handle, best_effort=True)
-        finally:
+        if issue_dir.exists() and issue_dir.is_dir():
             shutil.rmtree(issue_dir, ignore_errors=True)
         return removed_any or not issue_dir.exists()
 
@@ -245,6 +248,26 @@ class WorkspaceManager:
             return 0
 
         bare = self._bare_repo_path()
+        # Capture branch map before any cleanup. Some worktree metadata may
+        # point at directories that were already deleted out-of-band by a
+        # crashed dispatch — those branches won't be reachable via the disk
+        # walk below and must be force-deleted separately after prune.
+        pre_branch_map = await self._list_worktree_branches() if bare.exists() else {}
+        orphan_branches = {
+            branch
+            for path, branch in pre_branch_map.items()
+            if branch and not Path(path).exists()
+        }
+
+        # Prune first so branches whose worktree directory has been deleted
+        # out-of-band become eligible for ``git branch -D`` (otherwise git
+        # rejects the delete because the branch is "used by worktree at …").
+        if bare.exists():
+            try:
+                await _run_git(bare, ["worktree", "prune"])
+            except GitCommandError as exc:
+                LOGGER.warning("git worktree prune failed: %s", exc)
+
         removed = 0
         for issue_dir in sorted(root.iterdir()):
             if not issue_dir.is_dir() or issue_dir == bare:
@@ -252,19 +275,24 @@ class WorkspaceManager:
             for run_dir in sorted(issue_dir.iterdir()):
                 if not run_dir.is_dir():
                     continue
-                await self._remove_run_path(run_dir, branch_name=None)
+                branch_name = pre_branch_map.get(str(run_dir.resolve()))
+                await self._remove_run_path(run_dir, branch_name)
                 removed += 1
             if issue_dir.exists() and not any(issue_dir.iterdir()):
                 issue_dir.rmdir()
 
-        # ``git worktree remove`` cleans metadata for paths it removes, but
-        # crashed dispatches may leave metadata pointing at paths that have
-        # since been deleted out-of-band. ``prune`` reconciles that.
-        if bare.exists():
+        # After prune + disk walk, force-delete any orphan branches that were
+        # never represented on disk during this sweep — their worktree dirs
+        # had vanished before we started, so the disk walk could not touch
+        # them.
+        for branch_name in sorted(orphan_branches):
             try:
-                await _run_git(bare, ["worktree", "prune"])
+                await _run_git(bare, ["branch", "-D", branch_name])
             except GitCommandError as exc:
-                LOGGER.warning("git worktree prune failed: %s", exc)
+                LOGGER.warning(
+                    "git branch -D %s failed during sweep: %s", branch_name, exc
+                )
+
         return removed
 
     async def run_hook(
@@ -349,6 +377,40 @@ class WorkspaceManager:
             raise WorkspaceError("workspace_branch_name_invalid")
         prefix = self.workspace.branch_prefix or ""
         return f"{prefix}{sanitized}-{run_id}"
+
+    async def _list_worktree_branches(self) -> dict[str, str]:
+        """Return ``{worktree_path: branch_name}`` from ``git worktree list --porcelain``.
+
+        Empty when there is no bare repo (plain mode) or when the listing
+        fails. Plain-mode callers ignore the result and rmtree per-run dirs as
+        before; git-mode callers use it to look up the branch that was created
+        by ``git worktree add -b`` so cleanup can ``git branch -D`` it after
+        the worktree is removed.
+        """
+
+        bare = self._bare_repo_path()
+        if not bare.exists():
+            return {}
+        try:
+            stdout, _ = await _run_git(bare, ["worktree", "list", "--porcelain"])
+        except GitCommandError as exc:
+            LOGGER.warning("git worktree list failed: %s", exc)
+            return {}
+
+        result: dict[str, str] = {}
+        current_path: str | None = None
+        for line in stdout.splitlines():
+            if line.startswith("worktree "):
+                current_path = line[len("worktree ") :].strip()
+            elif line.startswith("branch ") and current_path is not None:
+                ref = line[len("branch ") :].strip()
+                if ref.startswith("refs/heads/"):
+                    result[str(Path(current_path).resolve())] = ref[len("refs/heads/") :]
+                else:
+                    result[str(Path(current_path).resolve())] = ref
+            elif not line.strip():
+                current_path = None
+        return result
 
     async def _materialize_git_worktree(self, run_path: Path, branch_name: str | None) -> None:
         if not self.workspace.repo_url:

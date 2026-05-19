@@ -212,6 +212,32 @@ class WorkspaceManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(removed)
             self.assertFalse((Path(temp_dir) / "workspaces" / "IN-42").exists())
 
+    async def test_terminal_cleanup_runs_before_remove_with_contents_intact(self):
+        # Regression: cleanup used to delete all per-run dirs first and then
+        # run before_remove on the (empty) issue dir, so hooks that archive or
+        # inspect run contents got nothing. The hook now runs per-run-dir
+        # before that dir is deleted.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "events.log"
+            manager = WorkspaceManager(
+                WorkspaceConfig(Path(temp_dir) / "workspaces"),
+                HooksConfig(
+                    # The hook records the run-id directory contents at hook-time;
+                    # if the hook sees an empty dir we'd record nothing.
+                    before_remove=f"ls -1 . >> {shlex.quote(str(log_path))}",
+                ),
+            )
+            run1 = await manager.prepare_for_run(make_issue("IN-42"), run_id="r1")
+            run2 = await manager.prepare_for_run(make_issue("IN-42"), run_id="r2")
+            (run1.path / "artifact-a.txt").write_text("a", encoding="utf-8")
+            (run2.path / "artifact-b.txt").write_text("b", encoding="utf-8")
+
+            await manager.cleanup("IN-42")
+
+            recorded = log_path.read_text(encoding="utf-8").splitlines()
+            self.assertIn("artifact-a.txt", recorded)
+            self.assertIn("artifact-b.txt", recorded)
+
     async def test_workspace_path_validation_rejects_out_of_root_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "workspaces"
@@ -370,6 +396,54 @@ class WorkspaceManagerGitModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(first.branch_name, second.branch_name)
             self.assertTrue((first.path / "README.md").is_file())
             self.assertTrue((second.path / "README.md").is_file())
+
+    async def test_git_mode_terminal_cleanup_deletes_all_per_run_branches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            upstream = _make_upstream_repo(tmp)
+            manager = WorkspaceManager(
+                WorkspaceConfig(root=tmp / "workspaces", repo_url=upstream, default_branch="main"),
+            )
+            await manager.prepare_for_run(
+                make_issue("IN-42", branch_name="feat/login"), run_id="r1"
+            )
+            await manager.prepare_for_run(
+                make_issue("IN-42", branch_name="feat/login"), run_id="r2"
+            )
+
+            removed = await manager.cleanup("IN-42")
+
+            self.assertTrue(removed)
+            bare = tmp / "workspaces" / BARE_REPO_DIRNAME
+            branches = subprocess.check_output(
+                ["git", "-C", str(bare), "branch", "--list"], text=True
+            )
+            # Both per-run branches must be gone — no accumulation in .repo.git.
+            self.assertNotIn("feat/login-r1", branches)
+            self.assertNotIn("feat/login-r2", branches)
+
+    async def test_git_mode_sweep_deletes_orphan_metadata_branches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            upstream = _make_upstream_repo(tmp)
+            manager = WorkspaceManager(
+                WorkspaceConfig(root=tmp / "workspaces", repo_url=upstream, default_branch="main"),
+            )
+            workspace = await manager.prepare_for_run(
+                make_issue("IN-42", branch_name="feat/login"), run_id="orphan"
+            )
+            # Simulate a crashed dispatch: the worktree directory is deleted
+            # out-of-band, but git's worktree metadata + branch survive.
+            shutil.rmtree(workspace.path)
+
+            removed = await manager.sweep_stale_worktrees()
+
+            self.assertEqual(0, removed)  # disk walk found nothing
+            bare = tmp / "workspaces" / BARE_REPO_DIRNAME
+            branches = subprocess.check_output(
+                ["git", "-C", str(bare), "branch", "--list"], text=True
+            )
+            self.assertNotIn("feat/login-orphan", branches)
 
     async def test_git_mode_sweep_force_removes_orphan_worktrees(self):
         with tempfile.TemporaryDirectory() as temp_dir:
