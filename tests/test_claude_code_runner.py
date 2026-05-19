@@ -336,5 +336,165 @@ class ClaudeCodeRunnerTimeoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(process.killed)
 
 
+class ClaudeCodeRunnerToolRoutingTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 4: tool_use / tool_result routing + stop_reason mapping."""
+
+    async def _run_with(self, events_in_order: list[dict[str, Any]]) -> tuple[list[AgentEvent], Any]:
+        process = FakeProcess()
+        for payload in events_in_order:
+            process.stdout.push_json(payload)
+        process.stdout.close()
+        runner = ClaudeCodeRunner("claude")
+        captured: list[AgentEvent] = []
+
+        async def on_event(e: AgentEvent) -> None:
+            captured.append(e)
+
+        async def fake_subprocess(*args: Any, **kwargs: Any) -> FakeProcess:
+            return process
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("symphony.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
+                session = await runner.start_session(Path(tmp))
+                result = await runner.run_turn(session, "prompt", issue(), on_event)
+        return captured, result
+
+    async def test_tool_use_emits_notification_with_summary(self):
+        events, _ = await self._run_with([
+            {"type": "system", "subtype": "init", "session_id": "sid"},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "I'll check the file."},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_a",
+                            "name": "Read",
+                            "input": {"file_path": "/path/to/file.py"},
+                        },
+                    ]
+                },
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "ok",
+                "session_id": "sid",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ])
+
+        tool_events = [e for e in events if e.data.get("event") == "tool_use"]
+        self.assertEqual(1, len(tool_events))
+        self.assertEqual("Read", tool_events[0].data["tool_name"])
+        self.assertIn("/path/to/file.py", tool_events[0].message)
+        self.assertEqual("toolu_a", tool_events[0].data["tool_use_id"])
+
+    async def test_tool_result_error_is_surfaced(self):
+        events, _ = await self._run_with([
+            {"type": "system", "subtype": "init", "session_id": "sid"},
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_a",
+                            "is_error": True,
+                            "content": "permission denied",
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "ok",
+                "session_id": "sid",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ])
+
+        error_events = [e for e in events if e.data.get("event") == "tool_result_error"]
+        self.assertEqual(1, len(error_events))
+        self.assertIn("permission denied", error_events[0].message)
+        self.assertEqual("toolu_a", error_events[0].data["tool_use_id"])
+
+    async def test_tool_result_success_is_not_logged(self):
+        # Successful tool results are noisy; only errors should surface.
+        events, _ = await self._run_with([
+            {"type": "system", "subtype": "init", "session_id": "sid"},
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_a",
+                            "is_error": False,
+                            "content": "file contents …",
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "ok",
+                "session_id": "sid",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ])
+
+        error_events = [e for e in events if e.data.get("event") == "tool_result_error"]
+        self.assertEqual([], error_events)
+
+    async def test_max_tokens_stop_reason_maps_to_failure(self):
+        _, result = await self._run_with([
+            {"type": "system", "subtype": "init", "session_id": "sid"},
+            {
+                "type": "result",
+                "subtype": "success",
+                "stop_reason": "max_tokens",
+                "is_error": False,
+                "result": "truncated",
+                "session_id": "sid",
+                "usage": {"input_tokens": 100, "output_tokens": 4096},
+            },
+        ])
+
+        self.assertFalse(result.success)
+        self.assertEqual("max_tokens", result.exit_reason)
+
+    async def test_cache_token_usage_attached_to_result_event(self):
+        events, _ = await self._run_with([
+            {"type": "system", "subtype": "init", "session_id": "sid"},
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "ok",
+                "session_id": "sid",
+                "usage": {
+                    "input_tokens": 50,
+                    "output_tokens": 25,
+                    "cache_creation_input_tokens": 2000,
+                    "cache_read_input_tokens": 1500,
+                },
+            },
+        ])
+
+        completed = [e for e in events if e.type == AgentEventType.TURN_COMPLETED]
+        self.assertEqual(1, len(completed))
+        self.assertEqual(
+            {"creation": 2000, "read": 1500},
+            completed[0].data["cache_tokens"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
