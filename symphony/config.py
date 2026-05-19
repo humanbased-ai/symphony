@@ -41,6 +41,7 @@ class TrackerConfig:
     in_progress_state: str | None = None
     queued_state: str | None = None
     approval_state: str | None = None
+    failure_state: str | None = None
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "TrackerConfig":
@@ -64,6 +65,7 @@ class TrackerConfig:
             in_progress_state=_string_value(tracker.get("in_progress_state")),
             queued_state=_string_value(tracker.get("queued_state")),
             approval_state=_string_value(tracker.get("approval_state")),
+            failure_state=_string_value(tracker.get("failure_state")),
         )
 
 
@@ -89,6 +91,7 @@ class WorkspaceConfig:
     repo_url: str | None = None
     default_branch: str = "main"
     branch_prefix: str = ""
+    keep_on_failure: bool = False
 
     @classmethod
     def from_mapping(
@@ -107,11 +110,13 @@ class WorkspaceConfig:
         repo_url = resolve_env_reference(raw_repo_url, environ) if raw_repo_url is not None else None
         default_branch = _string_value(workspace.get("default_branch")) or "main"
         branch_prefix = _string_value(workspace.get("branch_prefix")) or ""
+        keep_on_failure = bool(workspace.get("keep_on_failure", False))
         return cls(
             root=root,
             repo_url=repo_url,
             default_branch=default_branch,
             branch_prefix=branch_prefix,
+            keep_on_failure=keep_on_failure,
         )
 
 

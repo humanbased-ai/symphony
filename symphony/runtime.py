@@ -184,13 +184,25 @@ class SymphonyRuntime:
         for issue_id in list(stalled_issue_ids(self.state, now_ms=now_ms, stall_timeout_ms=stall_timeout_ms)):
             entry = self.state.running.get(issue_id)
             identifier = entry.identifier if entry else issue_id
-            LOGGER.warning("Issue %s has stalled (no events for %ds), forcing retry.", identifier, stall_timeout_ms // 1000)
-            complete_worker_failure(
-                issue_id,
-                self.state,
-                now_ms=now_ms,
-                max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
-                error="stall_timeout",
+            LOGGER.warning(
+                "Issue %s has stalled (no events for %ds).", identifier, stall_timeout_ms // 1000
+            )
+            workspace_path = getattr(entry, "workspace_path", None) if entry else None
+            stall_workspace = _StalledWorkspaceHandle.from_entry(entry) if workspace_path else None
+            await self._terminate_run(
+                issue=entry.issue if entry else Issue(
+                    id=issue_id,
+                    identifier=identifier,
+                    title="stalled",
+                    description=None,
+                    priority=None,
+                    state="",
+                    branch_name=None,
+                    url=None,
+                ),
+                workspace=stall_workspace,
+                reason="stall_timeout",
+                last_message="stall_timeout",
             )
 
         issue_ids = list(self.state.running)
@@ -327,19 +339,25 @@ class SymphonyRuntime:
                 workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
             except Exception as workspace_exc:
                 if claimed_issue is not None:
-                    # The claim flow owns the workspace-failure cleanup
-                    # path. After rollback (queued_state set) the operator
-                    # owns the next move; after claim_abandoned (queued_state
-                    # unset) operator inspection is required. In both cases
-                    # the outer retry handler MUST NOT additionally enqueue
-                    # a retry — with allow_claimed_retry=True the next tick
-                    # would re-dispatch the same ticket, potentially
-                    # duplicating an agent if a concurrent instance is
-                    # already running it.
-                    await self._rollback_claim_after_workspace_failure(
+                    # The claim flow owns the workspace-failure cleanup path:
+                    # rollback to queued_state if safe, otherwise log
+                    # claim_abandoned. The outer retry handler MUST NOT
+                    # additionally route through `_terminate_run` (would move
+                    # to failure_state, overriding the rollback) or
+                    # `complete_worker_failure` (with allow_claimed_retry=True
+                    # the next tick would re-dispatch and duplicate an agent
+                    # if a concurrent instance is already running the issue).
+                    rolled_back = await self._rollback_claim_after_workspace_failure(
                         claimed_issue, workspace_exc
                     )
                     release_issue(issue.id, self.state)
+                    if rolled_back:
+                        # The issue is back in queued_state but still in
+                        # `_prev_candidate_ids` from this tick. Without the
+                        # discard, next tick's candidate diff treats it as
+                        # not-new and the dispatch path skips it until the
+                        # operator nudges state externally (PR #38 recheck).
+                        self._prev_candidate_ids.discard(issue.id)
                     self._notify_state_change()
                     return _WorkerResult(
                         success=False, error=f"workspace_failed:{workspace_exc}"
@@ -371,35 +389,154 @@ class SymphonyRuntime:
                 return _WorkerResult(success=True)
 
             error = str(result.exit_reason or "worker_failed")
+            # Approval-required exits go through their own handler. When
+            # approval_state is set, the handler moves the issue there and
+            # returns a result — `_terminate_run` is NOT called, so
+            # failure_state does not override the approval resolution
+            # (PR #38 review fix #1). When both approval_state and
+            # failure_state are unset, the handler parks the issue. When
+            # approval_state is unset but failure_state is set, the handler
+            # returns None and we fall through to `_terminate_run` with the
+            # canonical `approval_unreachable` reason so PRD §8.3's "move
+            # to failure state" semantics fire.
             if error in APPROVAL_REQUIRED_EXIT_REASONS:
                 handled = await self._handle_approval_required(issue, error)
                 if handled is not None:
                     return handled
-            complete_worker_failure(
-                issue.id,
-                self.state,
-                now_ms=self.clock_ms(),
-                max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
-                error=error,
+                error = "approval_unreachable"
+            await self._terminate_run(
+                issue=issue,
+                workspace=workspace,
+                reason=error,
+                last_message=getattr(result, "exit_reason", None) or error,
             )
             return _WorkerResult(success=False, error=error)
         except Exception as exc:  # noqa: BLE001 - runtime must convert worker failures into retry state.
             error = str(exc) or exc.__class__.__name__
             if workspace is not None:
                 await _best_effort_after_run(self.workspace_manager, workspace)
-            if issue.id in self.state.running:
-                complete_worker_failure(
-                    issue.id,
-                    self.state,
-                    now_ms=self.clock_ms(),
-                    max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
-                    error=error,
-                )
+            await self._terminate_run(issue=issue, workspace=workspace, reason=error, last_message=error)
             return _WorkerResult(success=False, error=error)
         finally:
             if session is not None and hasattr(self.runner, "stop_session"):
                 await _maybe_await(self.runner.stop_session(session))
             self._notify_state_change()
+
+    async def _terminate_run(
+        self,
+        *,
+        issue: Issue,
+        workspace: Any,
+        reason: str,
+        last_message: str | None,
+    ) -> None:
+        """Resolve a non-recoverable run failure per PRD §8.4.
+
+        When ``tracker.failure_state`` is configured:
+          - move the issue to ``failure_state`` via the tracker;
+          - log a structured ``run_failed`` event with the reason;
+          - clean up the per-run workspace (unless ``workspace.keep_on_failure``
+            is set);
+          - release the issue from running/claimed/retry state — no auto-retry.
+
+        When ``tracker.failure_state`` is unset, fall back to the legacy
+        retry-scheduling path (``complete_worker_failure``) so deployments that
+        have not yet adopted the failure-state model continue to work
+        unchanged. Approval-unreachable runs are always terminal — they stay
+        in ``claimed`` to prevent re-dispatch in the same daemon.
+        """
+
+        if issue.id not in self.state.running:
+            return
+
+        failure_state = self.config.tracker.failure_state
+        keep = self.config.workspace.keep_on_failure
+        if failure_state:
+            LOGGER.warning(
+                "run_failed: issue=%s reason=%s failure_state=%s last_message=%s",
+                issue.identifier,
+                reason,
+                failure_state,
+                last_message,
+            )
+            move = getattr(self.tracker, "move_issue_to_state", None)
+            move_failed = False
+            if move is not None and issue.team_id:
+                try:
+                    await _call_sync(move, issue.id, issue.team_id, failure_state)
+                except Exception as exc:  # noqa: BLE001 - retry on transient errors.
+                    LOGGER.warning(
+                        "failure_state_move_failed: issue=%s error=%s — scheduling retry",
+                        issue.identifier,
+                        exc,
+                    )
+                    move_failed = True
+            elif move is None:
+                LOGGER.warning(
+                    "failure_state_move_skipped: issue=%s reason=tracker_missing_move_method",
+                    issue.identifier,
+                )
+            else:
+                LOGGER.warning(
+                    "failure_state_move_skipped: issue=%s reason=issue_missing_team_id",
+                    issue.identifier,
+                )
+
+            if move_failed:
+                # Transient: don't clean up the workspace, don't release. A
+                # normal retry is scheduled so the next tick re-attempts the
+                # failure_state move. Otherwise the ticket sits in its
+                # original active state with `_prev_candidate_ids` already
+                # containing it — stranded until external state churn.
+                complete_worker_failure(
+                    issue.id,
+                    self.state,
+                    now_ms=self.clock_ms(),
+                    max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
+                    error=f"failure_state_move_failed:{reason}",
+                )
+                return
+
+            if workspace is not None:
+                await self._cleanup_run_workspace(workspace, keep_on_failure=keep)
+            release_issue(issue.id, self.state)
+            return
+
+        if reason == "approval_unreachable":
+            # Approval-unreachable is always non-recoverable; keep in claimed
+            # even without an explicit failure_state.
+            complete_worker_terminal_failure(issue.id, self.state)
+            return
+
+        complete_worker_failure(
+            issue.id,
+            self.state,
+            now_ms=self.clock_ms(),
+            max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
+            error=reason,
+        )
+
+    async def _cleanup_run_workspace(self, workspace: Any, *, keep_on_failure: bool) -> None:
+        cleanup_for_run = getattr(self.workspace_manager, "cleanup_for_run", None)
+        try:
+            if cleanup_for_run is not None:
+                await _maybe_await(
+                    cleanup_for_run(workspace, failed=True, keep_on_failure=keep_on_failure)
+                )
+                return
+            # Legacy workspace managers (test fakes, etc.) — fall back to the
+            # identifier-based cleanup if they expose it.
+            cleanup = getattr(self.workspace_manager, "cleanup", None)
+            if cleanup is not None and not keep_on_failure:
+                identifier = getattr(workspace, "workspace_key", None) or getattr(workspace, "path", None)
+                if identifier is not None:
+                    await _maybe_await(cleanup(str(identifier)))
+        except Exception as exc:  # noqa: BLE001 - cleanup must not propagate.
+            LOGGER.warning(
+                "workspace_cleanup_failed: workspace=%s error=%s",
+                getattr(workspace, "path", workspace),
+                exc,
+            )
 
     async def _handle_approval_required(
         self, issue: Issue, exit_reason: str
@@ -409,21 +546,27 @@ class SymphonyRuntime:
         Three configurations:
 
         * ``tracker.approval_state`` set — move the issue to that state via
-          Linear and release the dispatch without scheduling a retry. If the
-          move raises (Linear outage, unresolvable state name, etc.) we
-          schedule a normal retry instead of releasing, so the next tick
-          re-attempts the move rather than stranding the ticket in its
-          original active state.
+          Linear and release the dispatch without scheduling a retry. An
+          out-of-band resolver (operator action, Phase 3 mobile push, etc.)
+          will move the issue out of ``approval_state`` when ready, at which
+          point Symphony picks it up again. If the move raises (Linear
+          outage, unresolvable state name, etc.) we schedule a normal retry
+          instead of releasing, so the next tick re-attempts the move rather
+          than stranding the ticket. Returns a ``_WorkerResult`` so the
+          caller short-circuits and ``_terminate_run`` does NOT fire —
+          approval has priority over failure_state when both are set.
         * ``tracker.approval_state`` unset, ``tracker.failure_state`` set —
+          per PRD §8.3 the unresolvable approval is treated as a
+          non-recoverable failure that moves to ``failure_state``. We
           return ``None`` so the caller falls through to ``_terminate_run``
-          with reason ``approval_unreachable``. PRD §8.3 explicitly moves
-          such issues to ``failure_state``.
+          with reason ``approval_unreachable``.
         * Both unset — fail-closed park: log ``approval_unreachable`` and
-          park the issue via ``complete_worker_terminal_failure``. A
-          subsequent re-appearance in candidates after operator intervention
-          releases the zombie claim via ``_release_zombie_claims`` on the
-          next tick (intervention is detected by the issue being absent
-          from the prior tick's candidate snapshot).
+          park the issue via ``complete_worker_terminal_failure`` (no retry,
+          kept in ``claimed``). A subsequent re-appearance in candidates
+          after operator intervention releases the zombie claim via
+          ``_release_zombie_claims`` on the next tick (intervention is
+          detected by the issue being absent from the prior tick's
+          candidate snapshot).
         """
 
         approval_state = self.config.tracker.approval_state
@@ -485,12 +628,11 @@ class SymphonyRuntime:
             release_issue(issue.id, self.state)
             return _WorkerResult(success=False, error="approval_pending")
 
-        if getattr(self.config.tracker, "failure_state", None):
-            # PRD §8.3 explicit: when failure_state IS configured (IN-289+),
-            # unresolvable approval moves there. Returning None signals the
-            # caller to route through `_terminate_run`. The `getattr` shape
-            # is required because IN-288's TrackerConfig predates the field;
-            # IN-289 adds it.
+        if self.config.tracker.failure_state:
+            # PRD §8.3 explicit: unresolvable approval moves to failure_state.
+            # Caller routes through `_terminate_run`, which performs the move,
+            # workspace cleanup, and release. Returning None signals the
+            # fall-through.
             return None
 
         LOGGER.warning(
@@ -590,7 +732,7 @@ class SymphonyRuntime:
 
     async def _rollback_claim_after_workspace_failure(
         self, claimed_issue: Issue, workspace_exc: BaseException
-    ) -> None:
+    ) -> bool:
         """Apply PRD §8.5 step 4 rollback semantics on workspace-setup failure.
 
         ``tracker.queued_state`` is the explicit rollback target. When unset
@@ -598,6 +740,11 @@ class SymphonyRuntime:
         ``claim_abandoned`` and leaves the issue in the in-progress state for
         operator inspection — rolling back unconditionally could re-queue a
         ticket that a concurrent instance is actively running.
+
+        Returns ``True`` when the issue was successfully moved back to
+        ``queued_state`` (the caller should re-mark it dispatchable so the
+        next tick picks it up); ``False`` for the abandoned/no-rollback
+        paths (caller leaves the issue alone for operator inspection).
         """
 
         queued_state = self.config.tracker.queued_state
@@ -608,7 +755,7 @@ class SymphonyRuntime:
                 _instance_id(),
                 workspace_exc,
             )
-            return
+            return False
         move = getattr(self.tracker, "move_issue_to_state", None)
         if move is None:
             LOGGER.warning(
@@ -616,7 +763,7 @@ class SymphonyRuntime:
                 claimed_issue.identifier,
                 _instance_id(),
             )
-            return
+            return False
         try:
             await _call_sync(move, claimed_issue.id, claimed_issue.team_id, queued_state)
         except Exception as exc:  # noqa: BLE001 - rollback is best-effort by design.
@@ -626,7 +773,7 @@ class SymphonyRuntime:
                 _instance_id(),
                 exc,
             )
-            return
+            return False
         LOGGER.warning(
             "claim_rollback: issue=%s instance=%s state=%s reason=%s",
             claimed_issue.identifier,
@@ -634,6 +781,7 @@ class SymphonyRuntime:
             queued_state,
             workspace_exc,
         )
+        return True
 
     async def _enrich_with_comments(self, issue: Issue) -> Issue:
         if not hasattr(self.tracker, "fetch_issue_comments"):
@@ -675,6 +823,25 @@ class _WorkerResult:
 
 class _ClaimRejectedError(RuntimeError):
     """Raised when the post-claim re-fetch shows the ticket is not owned by us."""
+
+
+@dataclass(frozen=True)
+class _StalledWorkspaceHandle:
+    """Minimal Workspace-shaped surface used to reconstruct cleanup context for stalled runs."""
+
+    path: Path
+    workspace_key: str
+    run_id: str
+    branch_name: str | None
+
+    @classmethod
+    def from_entry(cls, entry: Any) -> "_StalledWorkspaceHandle":
+        return cls(
+            path=Path(getattr(entry, "workspace_path", "")),
+            workspace_key=getattr(entry, "identifier", "") or "",
+            run_id=getattr(entry, "run_id", "") or "",
+            branch_name=getattr(entry, "branch_name", None),
+        )
 
 
 def _instance_id() -> str:

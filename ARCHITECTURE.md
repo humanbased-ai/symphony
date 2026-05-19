@@ -620,7 +620,15 @@ Orchestrator.reconcile_running():
           "⚠️ MT-60 — Agent Stalled
            No activity for 6 minutes.
            [Cancel] [Retry Now]"
-  → schedules exponential backoff retry (fresh workspace provisioned per SPEC §8.4 — failed workspace NOT reused)
+  → IN-289 path (tracker.failure_state set, default behavior):
+      runtime._terminate_run moves MT-60 → tracker.failure_state, cleans
+      the per-run workspace (unless workspace.keep_on_failure), and
+      releases all in-memory state. No auto-retry. Operator re-queues
+      manually via Linear.
+  → Legacy path (tracker.failure_state unset, backwards-compat):
+      complete_worker_failure schedules exponential backoff retry. Any
+      future Phase 6 persistent retry queue MUST provision a fresh
+      worktree — the failed worktree is not reused (PRD §8.4).
 
 Operator taps [Cancel]:
   → Telegram inline callback → POST /api/v1/sessions/<id>/cancel
