@@ -85,16 +85,27 @@ mutation SymphonyStarterCreateProject($name: String!, $teamIds: [String!]!) {
 
 _STARTER_CREATE_ISSUE_MUTATION = """
 mutation SymphonyStarterCreateIssue(
-  $title: String!, $teamId: String!, $projectId: String!, $stateId: String
+  $title: String!, $description: String,
+  $teamId: String!, $projectId: String!, $stateId: String
 ) {
   issueCreate(input: {
-    title: $title, teamId: $teamId, projectId: $projectId, stateId: $stateId
+    title: $title, description: $description,
+    teamId: $teamId, projectId: $projectId, stateId: $stateId
   }) {
     success
     issue { id identifier }
   }
 }
 """.strip()
+
+_STARTER_ISSUE_DESCRIPTION = """\
+Create a `hello_world.py` file in the repository root that prints `Hello, World!` when run.
+
+Steps:
+1. Create `hello_world.py` with `print("Hello, World!")`
+2. Verify it runs: `python hello_world.py`
+3. Push the branch and open a PR
+"""
 TickHook = Callable[[], Any]
 StatusServer = Callable[[StatusAPI, int], Awaitable[None]]
 
@@ -1205,11 +1216,17 @@ def _run_starter_mission(
         project_slug: str = project.get("slugId") or "symphony-hello-world"
         print(f"  Project created (slug: {project_slug})")
 
-        # Step 4: create 1 sample issue
+        # Step 4: create 1 sample issue with explicit description
         print("  Creating sample issue …")
         _gql(
             _STARTER_CREATE_ISSUE_MUTATION,
-            {"title": "write hello world app", "teamId": team_id, "projectId": project_id, "stateId": state_id},
+            {
+                "title": "write hello world app",
+                "description": _STARTER_ISSUE_DESCRIPTION,
+                "teamId": team_id,
+                "projectId": project_id,
+                "stateId": state_id,
+            },
         )
         print("    ✓ write hello world app")
 
@@ -1223,7 +1240,11 @@ def _run_starter_mission(
             github_org=github_org,
             github_repo=github_repo,
         )
-        write_workflow(demo_workflow, generate_workflow(demo_config), overwrite=True)
+        import re as _re
+        demo_content = _re.sub(
+            r"(max_turns:\s*)\d+", r"\g<1>5", generate_workflow(demo_config)
+        )
+        write_workflow(demo_workflow, demo_content, overwrite=True)
         print(f"  Generated: {demo_workflow}")
 
         # Step 6: run --once if runner and repo are ready
