@@ -771,9 +771,13 @@ class StarterMissionTests(unittest.TestCase):
             {"data": {"viewer": {"teams": {"nodes": [{"id": "team-1", "name": "Acme"}]}}}},
             # workflowStates
             {"data": {"workflowStates": {"nodes": [{"id": "state-1", "name": "Todo"}]}}},
+            # find project (not found)
+            {"data": {"projects": {"nodes": []}}},
             # projectCreate
             {"data": {"projectCreate": {"success": True, "project": {"id": "proj-1", "name": "symphony-hello-world", "slugId": "symphony-hello-world-abc"}}}},
-            # issueCreate × 1
+            # find issue (not found)
+            {"data": {"issues": {"nodes": []}}},
+            # issueCreate
             {"data": {"issueCreate": {"success": True, "issue": {"id": "i1", "identifier": "HW-1"}}}},
         ]
 

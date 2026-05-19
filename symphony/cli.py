@@ -65,6 +65,14 @@ query SymphonyStarterTeams {
 }
 """.strip()
 
+_STARTER_FIND_PROJECT_QUERY = """
+query SymphonyStarterFindProject($name: String!) {
+  projects(filter: {name: {eq: $name}}, first: 1) {
+    nodes { id name slugId }
+  }
+}
+""".strip()
+
 _STARTER_TEAM_STATES_QUERY = """
 query SymphonyStarterStates($teamId: ID!) {
   workflowStates(
@@ -79,6 +87,14 @@ mutation SymphonyStarterCreateProject($name: String!, $teamIds: [String!]!) {
   projectCreate(input: {name: $name, teamIds: $teamIds}) {
     success
     project { id name slugId }
+  }
+}
+""".strip()
+
+_STARTER_FIND_ISSUE_QUERY = """
+query SymphonyStarterFindIssue($projectId: ID!, $title: String!) {
+  issues(filter: {project: {id: {eq: $projectId}}, title: {eq: $title}}, first: 1) {
+    nodes { id identifier }
   }
 }
 """.strip()
@@ -1199,36 +1215,50 @@ def _run_starter_mission(
         states = ((body.get("data") or {}).get("workflowStates") or {}).get("nodes") or []
         state_id: str | None = states[0]["id"] if states else None
 
-        # Step 3: create project
-        print("  Creating Linear project: symphony-hello-world …")
-        body = _gql(
-            _STARTER_CREATE_PROJECT_MUTATION,
-            {"name": "symphony-hello-world", "teamIds": [team_id]},
-        )
-        project_result = (body.get("data") or {}).get("projectCreate") or {}
-        if not project_result.get("success"):
-            errors = body.get("errors") or []
-            msg = errors[0].get("message") if errors else "unknown error"
-            print(f"  Failed to create project: {msg}")
-            return False
-        project = project_result.get("project") or {}
-        project_id: str = project["id"]
-        project_slug: str = project.get("slugId") or "symphony-hello-world"
-        print(f"  Project created (slug: {project_slug})")
+        # Step 3: find or create project
+        body = _gql(_STARTER_FIND_PROJECT_QUERY, {"name": "symphony-hello-world"})
+        existing = ((body.get("data") or {}).get("projects") or {}).get("nodes") or []
+        if existing:
+            project = existing[0]
+            project_id: str = project["id"]
+            project_slug: str = project.get("slugId") or "symphony-hello-world"
+            print(f"  Using existing project (slug: {project_slug})")
+        else:
+            print("  Creating Linear project: symphony-hello-world …")
+            body = _gql(
+                _STARTER_CREATE_PROJECT_MUTATION,
+                {"name": "symphony-hello-world", "teamIds": [team_id]},
+            )
+            project_result = (body.get("data") or {}).get("projectCreate") or {}
+            if not project_result.get("success"):
+                errors = body.get("errors") or []
+                msg = errors[0].get("message") if errors else "unknown error"
+                print(f"  Failed to create project: {msg}")
+                return False
+            project = project_result.get("project") or {}
+            project_id = project["id"]
+            project_slug = project.get("slugId") or "symphony-hello-world"
+            print(f"  Project created (slug: {project_slug})")
 
-        # Step 4: create 1 sample issue with explicit description
-        print("  Creating sample issue …")
-        _gql(
-            _STARTER_CREATE_ISSUE_MUTATION,
-            {
-                "title": "write hello world app",
-                "description": _STARTER_ISSUE_DESCRIPTION,
-                "teamId": team_id,
-                "projectId": project_id,
-                "stateId": state_id,
-            },
-        )
-        print("    ✓ write hello world app")
+        # Step 4: find or create sample issue
+        issue_title = "write hello world app"
+        body = _gql(_STARTER_FIND_ISSUE_QUERY, {"projectId": project_id, "title": issue_title})
+        existing_issues = ((body.get("data") or {}).get("issues") or {}).get("nodes") or []
+        if existing_issues:
+            print(f"  Using existing issue: {issue_title}")
+        else:
+            print("  Creating sample issue …")
+            _gql(
+                _STARTER_CREATE_ISSUE_MUTATION,
+                {
+                    "title": issue_title,
+                    "description": _STARTER_ISSUE_DESCRIPTION,
+                    "teamId": team_id,
+                    "projectId": project_id,
+                    "stateId": state_id,
+                },
+            )
+            print(f"    ✓ {issue_title}")
 
         # Step 5: generate WORKFLOW.md
         demo_dir = Path("symphony-hello-world")
