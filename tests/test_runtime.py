@@ -521,6 +521,64 @@ class BlockerGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, len(blocker_lines), blocker_lines)
 
 
+class ApprovalGateRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approval_required_without_resolution_parks_issue_without_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            runner = FakeSessionRunner(success=False, exit_reason="approval_required")
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),  # no approval_state
+                prompt_template="x",
+                tracker=FakeTracker([target]),
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-200",), result.failed)
+            self.assertEqual("approval_unreachable", result.errors["IN-200"])
+            # No retry scheduled — issue is parked in `claimed` until operator action.
+            self.assertEqual({}, runtime.state.retry_attempts)
+            self.assertIn(target.id, runtime.state.claimed)
+            self.assertNotIn(target.id, runtime.state.running)
+            self.assertTrue(any("approval_unreachable" in line for line in logs.output))
+
+    async def test_approval_required_with_resolution_path_falls_back_to_normal_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            runner = FakeSessionRunner(success=False, exit_reason="approval_required")
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                        "approval_state": "Needs Approval",
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 1},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = SymphonyRuntime(
+                config=config,
+                prompt_template="x",
+                tracker=FakeTracker([target]),
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual(("IN-200",), result.failed)
+            # With a resolution path configured, falls back to normal retry scheduling.
+            self.assertIn(target.id, runtime.state.retry_attempts)
+
+
 class ClaimingFakeTracker(FakeTracker):
     """FakeTracker that supports the IN-290 claim flow."""
 

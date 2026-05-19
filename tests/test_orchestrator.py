@@ -9,6 +9,7 @@ from symphony.orchestrator import (
     RetryEntry,
     complete_worker_failure,
     complete_worker_success,
+    complete_worker_terminal_failure,
     dispatch_issue,
     reconcile_refreshed_issues,
     retry_delay_ms,
@@ -214,6 +215,33 @@ class OrchestratorTests(unittest.TestCase):
         )
         self.assertEqual({}, state.running)
         self.assertEqual(set(), state.claimed)
+
+
+class TerminalFailureTests(unittest.TestCase):
+    def _state(self) -> OrchestratorState:
+        config = WorkflowConfig.from_mapping(
+            {
+                "tracker": {
+                    "kind": "linear",
+                    "active_states": ["Todo"],
+                    "terminal_states": ["Done"],
+                },
+                "agent": {"max_concurrent_agents": 1},
+                "polling": {"interval_ms": 5_000},
+            }
+        )
+        return OrchestratorState.from_config(config)
+
+    def test_terminal_failure_leaves_issue_in_claimed_but_not_running(self):
+        state = self._state()
+        dispatch_issue(issue("issue-1", "IN-288"), state, now_ms=100)
+
+        entry = complete_worker_terminal_failure("issue-1", state)
+
+        self.assertEqual("IN-288", entry.identifier)
+        self.assertNotIn("issue-1", state.running)
+        self.assertIn("issue-1", state.claimed)
+        self.assertNotIn("issue-1", state.retry_attempts)
 
 
 class BlockerGateTests(unittest.TestCase):

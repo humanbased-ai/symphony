@@ -18,6 +18,7 @@ from symphony.orchestrator import (
     OrchestratorState,
     complete_worker_failure,
     complete_worker_success,
+    complete_worker_terminal_failure,
     dispatch_issue,
     is_active_state,
     is_terminal_state,
@@ -29,6 +30,9 @@ from symphony.orchestrator import (
     stalled_issue_ids,
     unresolved_blockers,
 )
+
+
+APPROVAL_REQUIRED_EXIT_REASONS = {"approval_required", "approval_unreachable"}
 from symphony.tracker.models import Issue
 from symphony.workflow import WorkflowDefinition, render_prompt
 
@@ -355,6 +359,15 @@ class SymphonyRuntime:
                 return _WorkerResult(success=True)
 
             error = str(result.exit_reason or "worker_failed")
+            if self._is_unresolvable_approval(error):
+                LOGGER.warning(
+                    "approval_unreachable: issue=%s exit_reason=%s — tracker.approval_state "
+                    "is not set; parking issue without retry (PRD §8.3)",
+                    issue.identifier,
+                    error,
+                )
+                complete_worker_terminal_failure(issue.id, self.state)
+                return _WorkerResult(success=False, error="approval_unreachable")
             complete_worker_failure(
                 issue.id,
                 self.state,
@@ -380,6 +393,19 @@ class SymphonyRuntime:
             if session is not None and hasattr(self.runner, "stop_session"):
                 await _maybe_await(self.runner.stop_session(session))
             self._notify_state_change()
+
+    def _is_unresolvable_approval(self, exit_reason: str) -> bool:
+        """Return True when an ``approval_required`` failure has no resolution path.
+
+        Resolution path = ``tracker.approval_state`` is configured (PRD §8.3).
+        When the runner is configured to auto-approve everything (e.g.,
+        ``codex.approval_policy: never``), the failure should never occur to
+        begin with; if it does (defensive), still treat as unresolvable.
+        """
+
+        if exit_reason not in APPROVAL_REQUIRED_EXIT_REASONS:
+            return False
+        return not self.config.tracker.approval_state
 
     def _emit_blocker_skip_events(self, candidates: list[Issue], new_issue_ids: set[str]) -> None:
         """Log ``blocker_skip`` for newly-visible candidates held by upstream work (PRD §8.2).

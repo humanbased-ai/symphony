@@ -153,6 +153,7 @@ agent:
   runner: codex
 codex:
   command: python --version
+  approval_policy: never
 ---
 Body
 """,
@@ -274,6 +275,7 @@ workspace:
   root: workspaces
 codex:
   command: python --version
+  approval_policy: never
 ---
 Body
 """,
@@ -287,6 +289,75 @@ Body
             checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
 
             self.assertTrue(all(ok for ok, _, _ in checks))
+            approval_rows = [row for row in checks if row[1] == "approval gate"]
+            self.assertEqual(1, len(approval_rows))
+            self.assertTrue(approval_rows[0][0])
+            self.assertIn("auto-approve", approval_rows[0][2])
+
+    def test_doctor_fails_when_approval_policy_lacks_resolution_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workflow_path = root / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: symphony-ai-agent-orchestration
+workspace:
+  root: workspaces
+codex:
+  command: python --version
+  approval_policy: on-request
+---
+Body
+""",
+                encoding="utf-8",
+            )
+
+            checks = doctor_checks(
+                workflow_path, logs_root="log", port=0, skip_port_check=True
+            )
+            approval_rows = [row for row in checks if row[1] == "approval gate"]
+
+            self.assertEqual(1, len(approval_rows))
+            ok, _, detail = approval_rows[0]
+            self.assertFalse(ok)
+            self.assertIn("tracker.approval_state", detail)
+            # The check is a hard fail — overall doctor result reflects it.
+            self.assertFalse(all(c[0] for c in checks))
+
+    def test_doctor_passes_when_approval_state_is_configured(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workflow_path = root / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: symphony-ai-agent-orchestration
+  approval_state: Needs Approval
+workspace:
+  root: workspaces
+codex:
+  command: python --version
+  approval_policy: on-request
+---
+Body
+""",
+                encoding="utf-8",
+            )
+
+            checks = doctor_checks(
+                workflow_path, logs_root="log", port=0, skip_port_check=True
+            )
+            approval_rows = [row for row in checks if row[1] == "approval gate"]
+
+            self.assertEqual(1, len(approval_rows))
+            ok, _, detail = approval_rows[0]
+            self.assertTrue(ok)
+            self.assertIn("Needs Approval", detail)
 
     def test_status_api_uses_runtime_snapshot_and_refresh_callback(self):
         class FakeRuntime:

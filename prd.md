@@ -1083,11 +1083,22 @@ be the first Phase 2 gate before desktop or productionization work expands.
     for newly-visible blocked candidates (rate-limited to first appearance
     per the tick-snapshot diff to keep log volume bounded; reconsidered when
     the upstream resolves and the ticket re-enters candidates).
-- [ ] **[Core: Fail-closed approval gate] (Linear: IN-288)** — When
+- [x] **[Core: Fail-closed approval gate] (Linear: IN-288)** — When
   `approval_policy: on-request` is set but no approval resolution path exists,
   treat it as a fatal misconfiguration at startup (`symphony doctor` reports it).
   At runtime, an unresolvable approval request aborts the run and moves the issue
   to the failure state.
+  - Shipped on `feat/in-288-fail-closed-approval` (stacked on IN-287).
+    New config: `tracker.approval_state: str | None`. `symphony doctor` adds
+    an `approval gate` row that hard-fails when the runner can request
+    approval (codex.approval_policy != "never", or claude_code permission
+    mode is not bypassPermissions) but `tracker.approval_state` is unset.
+    Runtime: when a turn fails with `approval_required` and no
+    `approval_state` is configured, the issue is parked via
+    `complete_worker_terminal_failure` (removed from running, kept in
+    `claimed`, no retry scheduled) and `approval_unreachable` is logged.
+    The "move to failure_state" step is left for IN-289 since it depends on
+    the failure-state config that ticket introduces.
 - [ ] **[Core: Failure-state transition, no auto-retry] (Linear: IN-289)** —
   On non-recoverable failure, move the issue to the configured `failure_state`,
   log the structured failure event, and clean up the workspace (unless

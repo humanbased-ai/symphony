@@ -258,6 +258,22 @@ def complete_worker_failure(
     )
 
 
+def complete_worker_terminal_failure(issue_id: str, state: OrchestratorState) -> RunningEntry:
+    """Remove ``issue_id`` from running without scheduling a retry.
+
+    Used when the failure mode is structurally non-recoverable in the current
+    daemon (e.g., approval requested but no resolution path is configured —
+    PRD §8.3). The issue stays in ``state.claimed`` so the same daemon does
+    not re-dispatch it; operator intervention (or a follow-on state move per
+    IN-289) is required to make it eligible again.
+    """
+
+    entry = _pop_running(issue_id, state)
+    state.retry_attempts.pop(issue_id, None)
+    # Intentionally leave ``state.claimed`` populated.
+    return entry
+
+
 def release_issue(issue_id: str, state: OrchestratorState) -> None:
     state.running.pop(issue_id, None)
     state.retry_attempts.pop(issue_id, None)

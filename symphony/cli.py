@@ -1317,6 +1317,11 @@ def doctor_checks(
                 "warn: tracker.in_progress_state not set — claim race unprotected (see PRD §8.5)",
             )
         )
+
+    # Fail-closed approval gate (PRD §8.3, IN-288). Hard fail when an agent
+    # could legally request approval but the workflow has no resolution path.
+    approval_ok, approval_detail = _check_approval_gate(context.config)
+    checks.append((approval_ok, "approval gate", approval_detail))
     if not skip_port_check:
         port_ok, port_detail = _check_port_available(context.port)
         checks.append((port_ok, "status api port", port_detail))
@@ -1540,6 +1545,39 @@ def _check_command(command: str) -> tuple[bool, str]:
     if executable is None:
         return False, f"missing executable: {parts[0]}"
     return True, executable
+
+
+def _check_approval_gate(config: WorkflowConfig) -> tuple[bool, str]:
+    """Doctor check for PRD §8.3 fail-closed approval gate.
+
+    Fail when the runner is configured to surface approval requests but no
+    resolution path (``tracker.approval_state``) is defined — the daemon would
+    otherwise stall on the first ``approval_required`` event forever.
+    """
+
+    approval_requestable = _agent_can_request_approval(config)
+    if not approval_requestable:
+        return True, "auto-approve (codex.approval_policy=never or claude_code bypassPermissions)"
+    if config.tracker.approval_state:
+        return True, f"approval_state={config.tracker.approval_state!r}"
+    return (
+        False,
+        "FATAL: codex.approval_policy may request approval but tracker.approval_state is "
+        "not set — runtime would stall (PRD §8.3). Set tracker.approval_state or use "
+        "codex.approval_policy: never.",
+    )
+
+
+def _agent_can_request_approval(config: WorkflowConfig) -> bool:
+    if config.agent.runner == "codex":
+        policy = (config.codex.approval_policy or "on-request").strip().lower()
+        return policy != "never"
+    # claude_code runs with permission_mode; the "bypassPermissions" default
+    # never requests approval. Anything else may.
+    if config.agent.runner == "claude_code":
+        mode = (config.claude_code.permission_mode or "").strip().lower()
+        return mode not in {"bypasspermissions", "bypass_permissions"}
+    return False
 
 
 def _check_workspace_root(path: Path) -> tuple[bool, str]:
