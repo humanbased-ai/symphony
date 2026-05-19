@@ -1137,11 +1137,24 @@ def setup_environment_checks(
             or "not found — pass --linear-api-key, set LINEAR_API_KEY, or run interactive setup",
         )
     )
+    if linear_source is not None:
+        linear_token = (
+            (getattr(args, "linear_api_key", None) or "").strip()
+            or env.get("LINEAR_API_KEY", "").strip()
+            or load_local_linear_token(path=getattr(args, "credentials_path", None), environ=env)
+            or ""
+        )
+        if linear_token:
+            valid_ok, valid_detail = _check_linear_key_valid(linear_token)
+            checks.append((valid_ok, "linear key validity", valid_detail))
 
     runner = getattr(args, "runner", DEFAULT_RUNNER)
     if runner == "claude_code":
         command_ok, command_detail = _check_command("claude")
         checks.append((command_ok, "claude command", command_detail))
+        if command_ok:
+            login_ok, login_detail = _check_claude_login()
+            checks.append((login_ok, "claude login", login_detail))
         gh_ok, gh_detail = _check_command("gh")
         checks.append((gh_ok, "gh command", gh_detail if gh_ok else f"{gh_detail} — install from cli.github.com"))
         github_source = _github_auth_source(
@@ -1157,6 +1170,16 @@ def setup_environment_checks(
                 or "not found — run: gh auth login, pass --github-token, or set GITHUB_TOKEN",
             )
         )
+        if github_source is not None:
+            github_token = (
+                (getattr(args, "github_token", None) or "").strip()
+                or env.get("GITHUB_TOKEN", "").strip()
+                or load_local_github_token(path=getattr(args, "credentials_path", None), environ=env)
+                or ""
+            )
+            if github_token:
+                scope_ok, scope_detail = _check_github_token_scopes(github_token)
+                checks.append((scope_ok, "github token scopes", scope_detail))
         github_org = getattr(args, "github_org", None) or ""
         github_repo = getattr(args, "github_repo", None) or ""
         if github_org and github_repo:
@@ -1275,15 +1298,26 @@ def doctor_checks(
 
     checks.append((True, "workflow", str(context.workflow_path)))
     checks.append((True, "linear auth", _linear_runtime_auth_source(context.config, environ=environ)))
+    linear_token = _resolve_linear_token(context.config)
+    if linear_token:
+        valid_ok, valid_detail = _check_linear_key_valid(linear_token)
+        checks.append((valid_ok, "linear key validity", valid_detail))
 
     if context.config.agent.runner == "claude_code":
         command_ok, command_check = _check_command(context.config.claude_code.command)
         checks.append((command_ok, "claude command", command_check))
+        if command_ok:
+            login_ok, login_detail = _check_claude_login()
+            checks.append((login_ok, "claude login", login_detail))
         gh_ok, gh_check = _check_command("gh")
         checks.append((gh_ok, "gh command", gh_check if gh_ok else f"{gh_check} — install from cli.github.com"))
         github_source = _github_auth_source(None, credentials_path=None, environ=environ)
         if github_source:
             checks.append((True, "github auth", github_source))
+            github_token = _resolve_github_token(environ=environ)
+            if github_token:
+                scope_ok, scope_detail = _check_github_token_scopes(github_token)
+                checks.append((scope_ok, "github token scopes", scope_detail))
         else:
             checks.append(
                 (
@@ -1524,6 +1558,80 @@ def _check_command(command: str) -> tuple[bool, str]:
     if executable is None:
         return False, f"missing executable: {parts[0]}"
     return True, executable
+
+
+def _check_claude_login() -> tuple[bool, str]:
+    """Heuristic: check if Claude CLI has been configured by looking for its config directory."""
+    home = Path.home()
+    candidates = [home / ".config" / "claude", home / ".claude"]
+    for config_dir in candidates:
+        if config_dir.is_dir() and any(config_dir.iterdir()):
+            return True, f"config dir found ({config_dir})"
+    if (home / ".claude.json").exists():
+        return True, "config found (~/.claude.json)"
+    return False, "not configured — run: claude login"
+
+
+def _check_linear_key_valid(token: str, endpoint: str = "https://api.linear.app/graphql") -> tuple[bool, str]:
+    """Validate Linear API key by calling viewer { id name }. Only fails on auth errors, not network errors."""
+    import json as _json
+    import urllib.request as _req
+    import urllib.error as _urlerr
+
+    payload = _json.dumps({"query": "query { viewer { id name } }"}).encode("utf-8")
+    request = _req.Request(
+        endpoint,
+        data=payload,
+        headers={"Authorization": token, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _req.urlopen(request, timeout=10) as resp:
+            data = _json.loads(resp.read())
+            viewer = (data.get("data") or {}).get("viewer") or {}
+            name = viewer.get("name") or viewer.get("id") or "authenticated"
+            return True, f"valid (logged in as {name})"
+    except _urlerr.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, "invalid key — check LINEAR_API_KEY or run: symphony init --linear-api-key"
+        return True, f"key present (http {exc.code} — could not verify)"
+    except Exception:
+        return True, "key present (network check skipped)"
+
+
+def _check_github_token_scopes(token: str) -> tuple[bool, str]:
+    """Check GitHub token has repo write scopes via X-OAuth-Scopes header.
+
+    Fine-grained PATs return an empty scopes header — treated as passing since
+    scope verification is not available for them via this endpoint.
+    Only fails when classic token scopes are present and repo write is absent.
+    """
+    import urllib.request as _req
+    import urllib.error as _urlerr
+
+    request = _req.Request(
+        "https://api.github.com/user",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with _req.urlopen(request, timeout=10) as resp:
+            scopes_raw = resp.headers.get("X-OAuth-Scopes", "")
+            scopes = {s.strip() for s in scopes_raw.split(",") if s.strip()}
+            if not scopes:
+                return True, "fine-grained PAT — scopes not verifiable via API"
+            if "repo" in scopes or "public_repo" in scopes:
+                return True, f"write scopes confirmed ({', '.join(sorted(scopes))})"
+            return (
+                False,
+                f"missing repo write scope — found: {', '.join(sorted(scopes))}; "
+                "token needs 'repo' (classic) or Contents + Pull-requests write (fine-grained)",
+            )
+    except _urlerr.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, "invalid token"
+        return True, f"token present (http {exc.code} — scope check skipped)"
+    except Exception:
+        return True, "token present (network check skipped)"
 
 
 def _check_workspace_root(path: Path) -> tuple[bool, str]:
