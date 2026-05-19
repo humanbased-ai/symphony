@@ -56,6 +56,45 @@ from symphony.workspace import WorkspaceManager
 
 DEFAULT_PORT = 7337
 LOGGER = logging.getLogger(__name__)
+
+_LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
+
+_STARTER_VIEWER_TEAMS_QUERY = """
+query SymphonyStarterTeams {
+  viewer { teams(first: 10) { nodes { id name } } }
+}
+""".strip()
+
+_STARTER_TEAM_STATES_QUERY = """
+query SymphonyStarterStates($teamId: String!) {
+  workflowStates(
+    filter: {team: {id: {eq: $teamId}}, type: {eq: "unstarted"}}
+    first: 10
+  ) { nodes { id name } }
+}
+""".strip()
+
+_STARTER_CREATE_PROJECT_MUTATION = """
+mutation SymphonyStarterCreateProject($name: String!, $teamIds: [String!]!) {
+  projectCreate(input: {name: $name, teamIds: $teamIds}) {
+    success
+    project { id name slugId }
+  }
+}
+""".strip()
+
+_STARTER_CREATE_ISSUE_MUTATION = """
+mutation SymphonyStarterCreateIssue(
+  $title: String!, $teamId: String!, $projectId: String!, $stateId: String
+) {
+  issueCreate(input: {
+    title: $title, teamId: $teamId, projectId: $projectId, stateId: $stateId
+  }) {
+    success
+    issue { id identifier }
+  }
+}
+""".strip()
 TickHook = Callable[[], Any]
 StatusServer = Callable[[StatusAPI, int], Awaitable[None]]
 
@@ -859,6 +898,7 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
             print(f"\nOnboarding already complete: {workflow_path}")
             print("Skipped init because WORKFLOW.md and local prerequisites validated.")
             _offer_tutorial(args)
+            _offer_starter_mission(args)
             return 0
 
         message = (
@@ -1034,6 +1074,7 @@ def _run_init_with_args(
 
     if not automated and not show_tutorial_before:
         _offer_tutorial(args)
+        _offer_starter_mission(args)
 
     return 0
 
@@ -1055,6 +1096,160 @@ def _offer_tutorial(args: argparse.Namespace) -> None:
         return
     if answer in {"", "y", "yes"}:
         run_init_tutorial_once(force=True)
+
+
+def _offer_starter_mission(
+    args: argparse.Namespace,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Prompt for the optional hello-world demo; only runs in interactive TTY mode."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        mode = _resolve_init_mode(args)
+    except OnboardingError:
+        return
+    if mode == "automated":
+        return
+
+    from symphony.onboarding_tutorial import should_show_starter_mission  # noqa: PLC0415
+
+    if not should_show_starter_mission(environ=environ):
+        return
+
+    print("\n★  Starter Mission (optional, runs once)")
+    print("   Symphony creates a sample Linear project with 3 tickets and dispatches")
+    print("   an agent on the first one — so you can see the full delivery loop.")
+    try:
+        answer = input("\nRun the demo? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if answer in {"", "y", "yes"}:
+        _run_starter_mission(args, environ=environ)
+
+
+def _run_starter_mission(
+    args: argparse.Namespace,
+    *,
+    environ: Mapping[str, str] | None = None,
+    history_path: str | Path | None = None,
+) -> bool:
+    """Create the hello-world Linear project, issues, WORKFLOW.md, and run --once.
+
+    Returns True if the mission completed (project + issues created).
+    """
+    import json as _json
+    import urllib.request as _req
+    import urllib.error as _urlerr
+
+    env = environ if environ is not None else os.environ
+
+    token = (
+        (getattr(args, "linear_api_key", None) or "").strip()
+        or env.get("LINEAR_API_KEY", "").strip()
+        or load_local_linear_token(path=getattr(args, "credentials_path", None), environ=env)
+        or ""
+    )
+    if not token:
+        print("  No Linear API key — Starter Mission requires a Linear token.")
+        return False
+
+    runner = getattr(args, "runner", DEFAULT_RUNNER) or DEFAULT_RUNNER
+    github_org = getattr(args, "github_org", None) or ""
+    github_repo = getattr(args, "github_repo", None) or ""
+
+    def _gql(query: str, variables: dict | None = None) -> dict:
+        payload = _json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+        req = _req.Request(
+            _LINEAR_GRAPHQL_URL,
+            data=payload,
+            headers={"Authorization": token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with _req.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read())
+
+    try:
+        # Step 1: resolve team
+        print("\nSetting up Starter Mission on Linear...")
+        body = _gql(_STARTER_VIEWER_TEAMS_QUERY)
+        teams = (((body.get("data") or {}).get("viewer") or {}).get("teams") or {}).get("nodes") or []
+        if not teams:
+            print("  No Linear teams found — Starter Mission requires at least one team.")
+            return False
+        team_id: str = teams[0]["id"]
+        team_name: str = teams[0].get("name", "")
+        print(f"  Using team: {team_name}")
+
+        # Step 2: find a Todo-like state (unstarted)
+        body = _gql(_STARTER_TEAM_STATES_QUERY, {"teamId": team_id})
+        states = ((body.get("data") or {}).get("workflowStates") or {}).get("nodes") or []
+        state_id: str | None = states[0]["id"] if states else None
+
+        # Step 3: create project
+        print("  Creating Linear project: symphony-hello-world …")
+        body = _gql(
+            _STARTER_CREATE_PROJECT_MUTATION,
+            {"name": "symphony-hello-world", "teamIds": [team_id]},
+        )
+        project_result = (body.get("data") or {}).get("projectCreate") or {}
+        if not project_result.get("success"):
+            errors = body.get("errors") or []
+            msg = errors[0].get("message") if errors else "unknown error"
+            print(f"  Failed to create project: {msg}")
+            return False
+        project = project_result.get("project") or {}
+        project_id: str = project["id"]
+        project_slug: str = project.get("slugId") or "symphony-hello-world"
+        print(f"  Project created (slug: {project_slug})")
+
+        # Step 4: create 3 sample issues
+        issue_titles = ["setup repo", "write hello world app", "add README"]
+        print("  Creating sample issues …")
+        for title in issue_titles:
+            _gql(
+                _STARTER_CREATE_ISSUE_MUTATION,
+                {"title": title, "teamId": team_id, "projectId": project_id, "stateId": state_id},
+            )
+            print(f"    ✓ {title}")
+
+        # Step 5: generate WORKFLOW.md
+        demo_dir = Path("symphony-hello-world")
+        demo_dir.mkdir(exist_ok=True)
+        demo_workflow = demo_dir / "WORKFLOW.md"
+        demo_config = InitConfig(
+            project_slug=project_slug,
+            runner=runner,
+            github_org=github_org,
+            github_repo=github_repo,
+        )
+        write_workflow(demo_workflow, generate_workflow(demo_config), overwrite=True)
+        print(f"  Generated: {demo_workflow}")
+
+        # Step 6: run --once if runner and repo are ready
+        if runner == "claude_code" and github_org and github_repo:
+            print(f"\nDispatching agent on first issue (runner: {runner}) …")
+            print(_dim("This may take a few minutes. Press Ctrl-C to cancel."))
+            main([str(demo_workflow), "--once"])
+        else:
+            print(f"\nDemo project ready. Run the agent with:")
+            print(f"  {_cyan(_cli_name() + ' run ' + str(demo_workflow) + ' --once')}")
+
+        # Step 7: record done
+        from symphony.onboarding_tutorial import record_starter_mission_done  # noqa: PLC0415
+
+        record_starter_mission_done(path=history_path, environ=environ)
+        print("\nStarter Mission recorded — won't repeat on future onboard runs.")
+        return True
+
+    except _urlerr.HTTPError as exc:
+        print(f"  Linear API error {exc.code}: {exc.read().decode('utf-8', errors='replace')[:200]}")
+        return False
+    except Exception as exc:
+        print(f"  Starter Mission failed: {exc}")
+        return False
 
 
 def _resolve_init_mode(args: argparse.Namespace) -> str:

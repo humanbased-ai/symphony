@@ -11,6 +11,7 @@ from typing import Callable, Mapping, TextIO
 
 INIT_TUTORIAL_ID = "init-orientation"
 INIT_TUTORIAL_VERSION = "2"
+STARTER_MISSION_ID = "hello-world-mission"
 SYMPHONY_OPENAI_BLOG_URL = "https://openai.com/index/open-source-codex-orchestration-symphony/"
 DEFAULT_CONFIG_DIR = ".config/symphony"
 DEFAULT_TUTORIAL_HISTORY_FILE = "tutorials.json"
@@ -100,6 +101,25 @@ def record_tutorial_seen(
     }
     _write_history(history_path, payload)
     return history_path
+
+
+def should_show_starter_mission(*, path: str | Path | None = None, environ: Mapping[str, str] | None = None) -> bool:
+    record = _load_tutorial_record(STARTER_MISSION_ID, path=path, environ=environ)
+    return not record.get("done")
+
+
+def record_starter_mission_done(*, path: str | Path | None = None, environ: Mapping[str, str] | None = None) -> None:
+    history_path = _resolve_history_path(path, environ)
+    payload = _load_history(history_path)
+    tutorials = payload.setdefault("tutorials", {})
+    if not isinstance(tutorials, dict):
+        tutorials = {}
+        payload["tutorials"] = tutorials
+    tutorials[STARTER_MISSION_ID] = {
+        "done": True,
+        "seen_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    _write_history(history_path, payload)
 
 
 def prompt_tutorial_language(

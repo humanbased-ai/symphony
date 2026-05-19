@@ -16,6 +16,7 @@ from symphony.cli import (
     _check_github_token_scopes,
     _check_linear_key_valid,
     _detect_github_from_remote,
+    _run_starter_mission,
     create_runtime,
     create_status_api,
     create_status_http_server,
@@ -741,6 +742,133 @@ class OnboardAutoDetectTests(unittest.TestCase):
             self.assertEqual(0, result)
             content = workflow_path.read_text()
             self.assertIn("my-project", content)
+
+
+class StarterMissionTests(unittest.TestCase):
+    def _make_args(self, tmp_dir: str, **kwargs):
+        defaults = {
+            "workflow_path": str(Path(tmp_dir) / "WORKFLOW.md"),
+            "linear_api_key": "lin_test",
+            "github_token": None,
+            "credentials_path": None,
+            "runner": "codex",
+            "codex_command": "python --version",
+            "github_org": "",
+            "github_repo": "",
+            "yes": True,
+            "mode": None,
+        }
+        defaults.update(kwargs)
+        return type("Args", (), defaults)()
+
+    def _make_gql_responses(self):
+        """Sequence of JSON responses for the 4 GraphQL calls made by _run_starter_mission."""
+        import json as _json
+        import io
+
+        responses = [
+            # viewer teams
+            {"data": {"viewer": {"teams": {"nodes": [{"id": "team-1", "name": "Acme"}]}}}},
+            # workflowStates
+            {"data": {"workflowStates": {"nodes": [{"id": "state-1", "name": "Todo"}]}}},
+            # projectCreate
+            {"data": {"projectCreate": {"success": True, "project": {"id": "proj-1", "name": "symphony-hello-world", "slugId": "symphony-hello-world-abc"}}}},
+            # issueCreate × 3
+            {"data": {"issueCreate": {"success": True, "issue": {"id": "i1", "identifier": "HW-1"}}}},
+            {"data": {"issueCreate": {"success": True, "issue": {"id": "i2", "identifier": "HW-2"}}}},
+            {"data": {"issueCreate": {"success": True, "issue": {"id": "i3", "identifier": "HW-3"}}}},
+        ]
+
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None):
+            idx = call_count[0]
+            call_count[0] += 1
+            body = _json.dumps(responses[idx]).encode()
+            resp = type("R", (), {
+                "read": lambda self: body,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *a: False,
+            })()
+            return resp
+
+        return fake_urlopen
+
+    def test_creates_project_and_issues_and_workflow_md(self):
+        import os as _os
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            orig = _os.getcwd()
+            _os.chdir(tmp)
+            try:
+                with (
+                    patch("urllib.request.urlopen", side_effect=self._make_gql_responses()),
+                    patch("symphony.cli.main", return_value=0),
+                ):
+                    result = _run_starter_mission(args, environ={"LINEAR_API_KEY": "lin_test"})
+            finally:
+                _os.chdir(orig)
+
+            self.assertTrue(result)
+            demo_workflow = Path(tmp) / "symphony-hello-world" / "WORKFLOW.md"
+            self.assertTrue(demo_workflow.exists())
+            content = demo_workflow.read_text()
+            self.assertIn("symphony-hello-world-abc", content)
+
+    def test_returns_false_when_no_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, linear_api_key="")
+            result = _run_starter_mission(args, environ={})
+        self.assertFalse(result)
+
+    def test_returns_false_when_project_create_fails(self):
+        import json as _json
+        call_count = [0]
+        responses = [
+            {"data": {"viewer": {"teams": {"nodes": [{"id": "team-1", "name": "Acme"}]}}}},
+            {"data": {"workflowStates": {"nodes": []}}},
+            {"data": {"projectCreate": {"success": False}}},
+        ]
+
+        def fake_urlopen(req, timeout=None):
+            body = _json.dumps(responses[call_count[0]]).encode()
+            call_count[0] += 1
+            resp = type("R", (), {
+                "read": lambda self: body,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *a: False,
+            })()
+            return resp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                result = _run_starter_mission(args, environ={"LINEAR_API_KEY": "lin_test"})
+        self.assertFalse(result)
+
+    def test_records_done_in_tutorials_json(self):
+        import os as _os
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            history_path = Path(tmp) / "tutorials.json"
+            orig = _os.getcwd()
+            _os.chdir(tmp)
+            try:
+                with (
+                    patch("urllib.request.urlopen", side_effect=self._make_gql_responses()),
+                    patch("symphony.cli.main", return_value=0),
+                ):
+                    _run_starter_mission(
+                        args,
+                        environ={"LINEAR_API_KEY": "lin_test"},
+                        history_path=history_path,
+                    )
+            finally:
+                _os.chdir(orig)
+
+            payload = _json.loads(history_path.read_text())
+            self.assertTrue(payload["tutorials"]["hello-world-mission"]["done"])
 
 
 if __name__ == "__main__":
