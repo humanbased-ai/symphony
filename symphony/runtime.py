@@ -382,17 +382,21 @@ class SymphonyRuntime:
                 return _WorkerResult(success=True)
 
             error = str(result.exit_reason or "worker_failed")
-            # IN-288 fix: approval-required exits have their own handler that
-            # MUST short-circuit before _terminate_run gets a chance to move
-            # the issue to failure_state. When approval_state is configured,
-            # the issue is moved there and the dispatch is released without
-            # retry; when approval_state is unset, the issue is parked.
-            # Neither path interacts with failure_state — IN-289 only fires
-            # for non-approval, non-rollback failures.
+            # Approval-required exits go through their own handler. When
+            # approval_state is set, the handler moves the issue there and
+            # returns a result — `_terminate_run` is NOT called, so
+            # failure_state does not override the approval resolution
+            # (PR #38 review fix #1). When both approval_state and
+            # failure_state are unset, the handler parks the issue. When
+            # approval_state is unset but failure_state is set, the handler
+            # returns None and we fall through to `_terminate_run` with the
+            # canonical `approval_unreachable` reason so PRD §8.3's "move
+            # to failure state" semantics fire.
             if error in APPROVAL_REQUIRED_EXIT_REASONS:
                 handled = await self._handle_approval_required(issue, error)
                 if handled is not None:
                     return handled
+                error = "approval_unreachable"
             await self._terminate_run(
                 issue=issue,
                 workspace=workspace,
@@ -517,21 +521,27 @@ class SymphonyRuntime:
         Three configurations:
 
         * ``tracker.approval_state`` set — move the issue to that state via
-          Linear and release the dispatch without scheduling a retry. If the
-          move raises (Linear outage, unresolvable state name, etc.) we
-          schedule a normal retry instead of releasing, so the next tick
-          re-attempts the move rather than stranding the ticket in its
-          original active state.
+          Linear and release the dispatch without scheduling a retry. An
+          out-of-band resolver (operator action, Phase 3 mobile push, etc.)
+          will move the issue out of ``approval_state`` when ready, at which
+          point Symphony picks it up again. If the move raises (Linear
+          outage, unresolvable state name, etc.) we schedule a normal retry
+          instead of releasing, so the next tick re-attempts the move rather
+          than stranding the ticket. Returns a ``_WorkerResult`` so the
+          caller short-circuits and ``_terminate_run`` does NOT fire —
+          approval has priority over failure_state when both are set.
         * ``tracker.approval_state`` unset, ``tracker.failure_state`` set —
+          per PRD §8.3 the unresolvable approval is treated as a
+          non-recoverable failure that moves to ``failure_state``. We
           return ``None`` so the caller falls through to ``_terminate_run``
-          with reason ``approval_unreachable``. PRD §8.3 explicitly moves
-          such issues to ``failure_state``.
+          with reason ``approval_unreachable``.
         * Both unset — fail-closed park: log ``approval_unreachable`` and
-          park the issue via ``complete_worker_terminal_failure``. A
-          subsequent re-appearance in candidates after operator intervention
-          releases the zombie claim via ``_release_zombie_claims`` on the
-          next tick (intervention is detected by the issue being absent
-          from the prior tick's candidate snapshot).
+          park the issue via ``complete_worker_terminal_failure`` (no retry,
+          kept in ``claimed``). A subsequent re-appearance in candidates
+          after operator intervention releases the zombie claim via
+          ``_release_zombie_claims`` on the next tick (intervention is
+          detected by the issue being absent from the prior tick's
+          candidate snapshot).
         """
 
         approval_state = self.config.tracker.approval_state
@@ -593,12 +603,11 @@ class SymphonyRuntime:
             release_issue(issue.id, self.state)
             return _WorkerResult(success=False, error="approval_pending")
 
-        if getattr(self.config.tracker, "failure_state", None):
-            # PRD §8.3 explicit: when failure_state IS configured (IN-289+),
-            # unresolvable approval moves there. Returning None signals the
-            # caller to route through `_terminate_run`. The `getattr` shape
-            # is required because IN-288's TrackerConfig predates the field;
-            # IN-289 adds it.
+        if self.config.tracker.failure_state:
+            # PRD §8.3 explicit: unresolvable approval moves to failure_state.
+            # Caller routes through `_terminate_run`, which performs the move,
+            # workspace cleanup, and release. Returning None signals the
+            # fall-through.
             return None
 
         LOGGER.warning(

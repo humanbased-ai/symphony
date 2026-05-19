@@ -619,6 +619,98 @@ class FailureStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([(target.id, "team-1", "Cancelled")], tracker.move_calls)
             self.assertNotIn(target.id, runtime.state.claimed)
 
+    async def test_approval_state_takes_priority_over_failure_state(self):
+        # Regression: when BOTH approval_state and failure_state are configured,
+        # an approval_required exit must route to approval_state (PR #38 review
+        # fix #1). Previously the runtime called _terminate_run unconditionally
+        # for approval failures, which moved the issue to failure_state and
+        # bypassed the approval resolution path entirely.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            runner = FakeSessionRunner(success=False, exit_reason="approval_required")
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done", "Cancelled"],
+                        "approval_state": "Needs Approval",
+                        "failure_state": "Cancelled",
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 1},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = SymphonyRuntime(
+                config=config,
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual("approval_pending", result.errors["IN-501"])
+            # Move went to approval_state, NOT failure_state.
+            self.assertEqual(
+                [(target.id, "team-1", "Needs Approval")], tracker.move_calls
+            )
+
+    async def test_workspace_failure_after_claim_does_not_double_move_to_failure_state(self):
+        # Regression: when both queued_state and failure_state are configured
+        # and workspace prep fails after a successful claim, the rollback
+        # handler moves the issue back to queued_state. The outer failure
+        # handler MUST NOT also move it to failure_state — that would
+        # double-move the ticket and turn a recoverable workspace error into
+        # a cancelled Linear issue (PR #38 review fix #2).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            workspace_manager = FailingWorkspaceManager(Path(temp_dir) / "workspaces")
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo", "In Progress"],
+                        "terminal_states": ["Done", "Cancelled"],
+                        "in_progress_state": "In Progress",
+                        "queued_state": "Todo",
+                        "failure_state": "Cancelled",
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 1},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = SymphonyRuntime(
+                config=config,
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                await runtime.run_tick()
+
+            # Exactly two moves: claim → In Progress, then rollback → Todo.
+            # Failure_state must NOT appear in the call sequence.
+            self.assertEqual(
+                [
+                    (target.id, "team-1", "In Progress"),
+                    (target.id, "team-1", "Todo"),
+                ],
+                tracker.move_calls,
+            )
+            self.assertTrue(any("claim_rollback:" in line for line in logs.output))
+            # And run_failed should not be logged — the rollback owns the path.
+            self.assertFalse(any("run_failed:" in line for line in logs.output))
+
     async def test_legacy_mode_still_retries_when_failure_state_unset(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = _team_issue()
