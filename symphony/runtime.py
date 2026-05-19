@@ -347,10 +347,17 @@ class SymphonyRuntime:
                     # `complete_worker_failure` (with allow_claimed_retry=True
                     # the next tick would re-dispatch and duplicate an agent
                     # if a concurrent instance is already running the issue).
-                    await self._rollback_claim_after_workspace_failure(
+                    rolled_back = await self._rollback_claim_after_workspace_failure(
                         claimed_issue, workspace_exc
                     )
                     release_issue(issue.id, self.state)
+                    if rolled_back:
+                        # The issue is back in queued_state but still in
+                        # `_prev_candidate_ids` from this tick. Without the
+                        # discard, next tick's candidate diff treats it as
+                        # not-new and the dispatch path skips it until the
+                        # operator nudges state externally (PR #38 recheck).
+                        self._prev_candidate_ids.discard(issue.id)
                     self._notify_state_change()
                     return _WorkerResult(
                         success=False, error=f"workspace_failed:{workspace_exc}"
@@ -453,15 +460,17 @@ class SymphonyRuntime:
                 last_message,
             )
             move = getattr(self.tracker, "move_issue_to_state", None)
+            move_failed = False
             if move is not None and issue.team_id:
                 try:
                     await _call_sync(move, issue.id, issue.team_id, failure_state)
-                except Exception as exc:  # noqa: BLE001 - failure move is best-effort.
+                except Exception as exc:  # noqa: BLE001 - retry on transient errors.
                     LOGGER.warning(
-                        "failure_state_move_failed: issue=%s error=%s",
+                        "failure_state_move_failed: issue=%s error=%s — scheduling retry",
                         issue.identifier,
                         exc,
                     )
+                    move_failed = True
             elif move is None:
                 LOGGER.warning(
                     "failure_state_move_skipped: issue=%s reason=tracker_missing_move_method",
@@ -472,6 +481,22 @@ class SymphonyRuntime:
                     "failure_state_move_skipped: issue=%s reason=issue_missing_team_id",
                     issue.identifier,
                 )
+
+            if move_failed:
+                # Transient: don't clean up the workspace, don't release. A
+                # normal retry is scheduled so the next tick re-attempts the
+                # failure_state move. Otherwise the ticket sits in its
+                # original active state with `_prev_candidate_ids` already
+                # containing it — stranded until external state churn.
+                complete_worker_failure(
+                    issue.id,
+                    self.state,
+                    now_ms=self.clock_ms(),
+                    max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
+                    error=f"failure_state_move_failed:{reason}",
+                )
+                return
+
             if workspace is not None:
                 await self._cleanup_run_workspace(workspace, keep_on_failure=keep)
             release_issue(issue.id, self.state)
@@ -707,7 +732,7 @@ class SymphonyRuntime:
 
     async def _rollback_claim_after_workspace_failure(
         self, claimed_issue: Issue, workspace_exc: BaseException
-    ) -> None:
+    ) -> bool:
         """Apply PRD §8.5 step 4 rollback semantics on workspace-setup failure.
 
         ``tracker.queued_state`` is the explicit rollback target. When unset
@@ -715,6 +740,11 @@ class SymphonyRuntime:
         ``claim_abandoned`` and leaves the issue in the in-progress state for
         operator inspection — rolling back unconditionally could re-queue a
         ticket that a concurrent instance is actively running.
+
+        Returns ``True`` when the issue was successfully moved back to
+        ``queued_state`` (the caller should re-mark it dispatchable so the
+        next tick picks it up); ``False`` for the abandoned/no-rollback
+        paths (caller leaves the issue alone for operator inspection).
         """
 
         queued_state = self.config.tracker.queued_state
@@ -725,7 +755,7 @@ class SymphonyRuntime:
                 _instance_id(),
                 workspace_exc,
             )
-            return
+            return False
         move = getattr(self.tracker, "move_issue_to_state", None)
         if move is None:
             LOGGER.warning(
@@ -733,7 +763,7 @@ class SymphonyRuntime:
                 claimed_issue.identifier,
                 _instance_id(),
             )
-            return
+            return False
         try:
             await _call_sync(move, claimed_issue.id, claimed_issue.team_id, queued_state)
         except Exception as exc:  # noqa: BLE001 - rollback is best-effort by design.
@@ -743,7 +773,7 @@ class SymphonyRuntime:
                 _instance_id(),
                 exc,
             )
-            return
+            return False
         LOGGER.warning(
             "claim_rollback: issue=%s instance=%s state=%s reason=%s",
             claimed_issue.identifier,
@@ -751,6 +781,7 @@ class SymphonyRuntime:
             queued_state,
             workspace_exc,
         )
+        return True
 
     async def _enrich_with_comments(self, issue: Issue) -> Issue:
         if not hasattr(self.tracker, "fetch_issue_comments"):

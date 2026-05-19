@@ -711,6 +711,83 @@ class FailureStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
             # And run_failed should not be logged — the rollback owns the path.
             self.assertFalse(any("run_failed:" in line for line in logs.output))
 
+    async def test_failure_state_move_failure_schedules_retry(self):
+        # Regression: if the failure_state move raises (transient Linear
+        # outage), the original code logged and released, leaving the issue
+        # in its active state with `_prev_candidate_ids` already containing
+        # it — stranded with no retry.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            runner = FakeSessionRunner(success=False, exit_reason="agent_crashed")
+
+            # Patch move_issue_to_state to raise unconditionally. With no
+            # claim guard configured this is the only move attempt.
+            tracker.move_issue_to_state = (
+                lambda issue_id, team_id, state_name: (_ for _ in ()).throw(
+                    RuntimeError("linear_outage")
+                )
+            )
+
+            runtime = SymphonyRuntime(
+                config=self._config(Path(temp_dir) / "workspaces", failure_state="Cancelled"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            # Retry scheduled so next tick re-attempts the failure_state move.
+            self.assertIn(target.id, runtime.state.retry_attempts)
+            self.assertIn(
+                "failure_state_move_failed",
+                runtime.state.retry_attempts[target.id].error or "",
+            )
+
+    async def test_rollback_clears_prev_candidate_marker_for_redispatch(self):
+        # Regression: after a successful rollback to queued_state, the issue
+        # was released but still in `_prev_candidate_ids`. The candidate-set
+        # diff on the next tick treated it as not-new and skipped dispatch
+        # until external state churn occurred. Fix: clear the prev-candidate
+        # marker so the rolled-back issue is dispatched as new on the next
+        # tick.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            workspace_manager = FailingWorkspaceManager(Path(temp_dir) / "workspaces")
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo", "In Progress"],
+                        "terminal_states": ["Done", "Cancelled"],
+                        "in_progress_state": "In Progress",
+                        "queued_state": "Todo",
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 1},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = SymphonyRuntime(
+                config=config,
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            await runtime.run_tick()
+
+            # The rolled-back ticket must not be in `_prev_candidate_ids` so
+            # the next tick treats it as new and dispatches it.
+            self.assertNotIn(target.id, runtime._prev_candidate_ids)
+
     async def test_legacy_mode_still_retries_when_failure_state_unset(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = _team_issue()
