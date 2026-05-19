@@ -625,6 +625,12 @@ class ClaimFlowTests(unittest.IsolatedAsyncioTestCase):
             # No rollback call — only the original forward move.
             self.assertEqual([(target.id, "team-1", "In Progress")], tracker.move_calls)
             self.assertTrue(any("claim_abandoned:" in line for line in logs.output))
+            # Regression: the outer retry handler must NOT enqueue a retry for
+            # abandoned claims. With allow_claimed_retry=True the next tick
+            # would otherwise re-dispatch the same ticket, potentially
+            # duplicating an agent if a concurrent instance is running it.
+            self.assertEqual({}, runtime.state.retry_attempts)
+            self.assertNotIn(target.id, runtime.state.claimed)
 
     async def test_issues_already_in_in_progress_state_are_skipped(self):
         with tempfile.TemporaryDirectory() as temp_dir:

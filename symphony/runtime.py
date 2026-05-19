@@ -286,7 +286,23 @@ class SymphonyRuntime:
                 workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
             except Exception as workspace_exc:
                 if claimed_issue is not None:
-                    await self._rollback_claim_after_workspace_failure(claimed_issue, workspace_exc)
+                    # The claim flow owns the workspace-failure cleanup
+                    # path. After rollback (queued_state set) the operator
+                    # owns the next move; after claim_abandoned (queued_state
+                    # unset) operator inspection is required. In both cases
+                    # the outer retry handler MUST NOT additionally enqueue
+                    # a retry — with allow_claimed_retry=True the next tick
+                    # would re-dispatch the same ticket, potentially
+                    # duplicating an agent if a concurrent instance is
+                    # already running it.
+                    await self._rollback_claim_after_workspace_failure(
+                        claimed_issue, workspace_exc
+                    )
+                    release_issue(issue.id, self.state)
+                    self._notify_state_change()
+                    return _WorkerResult(
+                        success=False, error=f"workspace_failed:{workspace_exc}"
+                    )
                 raise
             _attach_runtime_entry_metadata(
                 entry,
