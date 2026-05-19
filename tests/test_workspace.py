@@ -397,6 +397,32 @@ class WorkspaceManagerGitModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((first.path / "README.md").is_file())
             self.assertTrue((second.path / "README.md").is_file())
 
+    async def test_git_mode_concurrent_first_dispatches_share_one_bare_clone(self):
+        # Regression: multiple concurrent prepare_for_run calls into an empty
+        # workspace root each saw `.repo.git` missing and tried `git clone
+        # --bare` simultaneously. One succeeded, the others failed against the
+        # half-created destination, marking the losing workers as failed.
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            upstream = _make_upstream_repo(tmp)
+            manager = WorkspaceManager(
+                WorkspaceConfig(root=tmp / "workspaces", repo_url=upstream, default_branch="main"),
+            )
+
+            results = await asyncio.gather(
+                manager.prepare_for_run(make_issue("IN-A", branch_name="feat/a"), run_id="a"),
+                manager.prepare_for_run(make_issue("IN-B", branch_name="feat/b"), run_id="b"),
+                manager.prepare_for_run(make_issue("IN-C", branch_name="feat/c"), run_id="c"),
+            )
+
+            # All three workspaces materialized successfully.
+            for workspace in results:
+                self.assertTrue((workspace.path / "README.md").is_file())
+            # Exactly one bare clone exists.
+            self.assertTrue((tmp / "workspaces" / BARE_REPO_DIRNAME).is_dir())
+
     async def test_git_mode_terminal_cleanup_deletes_all_per_run_branches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)

@@ -22,6 +22,22 @@ _UNSAFE_WORKSPACE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _UNSAFE_BRANCH_CHARS = re.compile(r"[^A-Za-z0-9._/-]+")
 BARE_REPO_DIRNAME = ".repo.git"
 
+# Per-bare-repo asyncio locks so concurrent `prepare_for_run` calls that
+# share a bare repo serialize their clone/fetch step. Keyed by the resolved
+# bare-repo path; created lazily on first access. The lock is module-level
+# (not per WorkspaceManager) so multiple manager instances pointing at the
+# same root still cooperate.
+_BARE_REPO_LOCKS: dict[str, "asyncio.Lock"] = {}
+
+
+def _bare_repo_lock(bare_path: Path) -> "asyncio.Lock":
+    key = str(bare_path)
+    lock = _BARE_REPO_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _BARE_REPO_LOCKS[key] = lock
+    return lock
+
 
 class WorkspaceError(ValueError):
     """Raised when a workspace path or lifecycle operation is invalid."""
@@ -419,13 +435,24 @@ class WorkspaceManager:
             raise WorkspaceError("workspace_branch_name_invalid")
 
         bare = self._bare_repo_path()
-        if not bare.exists():
-            await _run_git(bare.parent, ["clone", "--bare", self.workspace.repo_url, bare.name])
-        else:
-            try:
-                await _run_git(bare, ["fetch", "--prune", "origin"])
-            except GitCommandError as exc:
-                LOGGER.warning("git fetch failed (continuing with cached objects): %s", exc)
+        # Serialize clone/fetch on the same bare repo so concurrent
+        # dispatches into an empty workspace root don't race
+        # ``git clone --bare`` against the same destination (one clone
+        # succeeds, the others fail against a half-created directory).
+        # Worktree add can run concurrently — each dispatch adds a distinct
+        # `<root>/<key>/<run_id>` path so there is no collision.
+        async with _bare_repo_lock(bare):
+            if not bare.exists():
+                await _run_git(
+                    bare.parent, ["clone", "--bare", self.workspace.repo_url, bare.name]
+                )
+            else:
+                try:
+                    await _run_git(bare, ["fetch", "--prune", "origin"])
+                except GitCommandError as exc:
+                    LOGGER.warning(
+                        "git fetch failed (continuing with cached objects): %s", exc
+                    )
 
         base_ref = self.workspace.default_branch or "HEAD"
         try:
