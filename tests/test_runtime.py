@@ -398,6 +398,74 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(("IN-301",), result3.dispatched)
 
 
+class BlockerGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_blocked_candidate_emits_blocker_skip_and_is_not_dispatched(self):
+        from symphony.tracker.models import Blocker
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            blocked = Issue(
+                id="issue-blocked",
+                identifier="IN-700",
+                title="Blocked work",
+                description=None,
+                priority=1,
+                state="Todo",
+                branch_name=None,
+                url=None,
+                blocked_by=(Blocker(id="b1", identifier="IN-699", state="In Progress"),),
+            )
+            clean = issue(issue_id="issue-clean", identifier="IN-701")
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=FakeTracker([blocked, clean]),
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="INFO") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-701",), result.dispatched)
+            self.assertTrue(
+                any("blocker_skip" in line and "IN-700" in line and "IN-699" in line for line in logs.output),
+                logs.output,
+            )
+
+    async def test_blocker_skip_only_logged_on_first_appearance(self):
+        from symphony.tracker.models import Blocker
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            blocked = Issue(
+                id="issue-blocked",
+                identifier="IN-702",
+                title="Blocked",
+                description=None,
+                priority=1,
+                state="Todo",
+                branch_name=None,
+                url=None,
+                blocked_by=(Blocker(id="b1", identifier="IN-699", state="Todo"),),
+            )
+            tracker = FakeTracker([blocked])
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="INFO") as logs:
+                await runtime.run_tick()  # first tick — new candidate, should log
+                await runtime.run_tick()  # second tick — same candidate, no new log
+
+            blocker_lines = [line for line in logs.output if "blocker_skip" in line]
+            self.assertEqual(1, len(blocker_lines), blocker_lines)
+
+
 class ClaimingFakeTracker(FakeTracker):
     """FakeTracker that supports the IN-290 claim flow."""
 

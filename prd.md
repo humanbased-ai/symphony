@@ -1071,9 +1071,18 @@ be the first Phase 2 gate before desktop or productionization work expands.
     called from the poll-loop startup. `WorkspaceManager.logs_root` plumbs
     per-run log paths through the runtime. PRD §8.1 documents the deliberate
     narrowing of SPEC §9.1–§9.2.
-- [ ] **[Core: Blocker eligibility gate] (Linear: IN-287)** — Before dispatching
+- [x] **[Core: Blocker eligibility gate] (Linear: IN-287)** — Before dispatching
   any issue, check Linear for unresolved blocking relationships. Skip (log
   `blocker_skip`) without modifying tracker state. Reconsider on the next tick.
+  - Shipped on `feat/in-287-blocker-gate` (stacked on IN-290).
+    `symphony/orchestrator.py` — `_base_issue_eligible` now applies the
+    blocker check to ALL active states (previously Todo-only); the helper
+    becomes public as `unresolved_blockers(issue, state) -> tuple[Blocker,...]`
+    so callers can read the upstream list. `symphony/runtime.py` —
+    `_emit_blocker_skip_events` logs `blocker_skip: issue=… blockers=…`
+    for newly-visible blocked candidates (rate-limited to first appearance
+    per the tick-snapshot diff to keep log volume bounded; reconsidered when
+    the upstream resolves and the ticket re-enters candidates).
 - [ ] **[Core: Fail-closed approval gate] (Linear: IN-288)** — When
   `approval_policy: on-request` is set but no approval resolution path exists,
   treat it as a fatal misconfiguration at startup (`symphony doctor` reports it).

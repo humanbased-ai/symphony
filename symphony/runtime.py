@@ -19,6 +19,7 @@ from symphony.orchestrator import (
     complete_worker_failure,
     complete_worker_success,
     dispatch_issue,
+    is_active_state,
     is_terminal_state,
     normalize_state,
     reconcile_refreshed_issues,
@@ -26,6 +27,7 @@ from symphony.orchestrator import (
     select_dispatchable,
     should_dispatch,
     stalled_issue_ids,
+    unresolved_blockers,
 )
 from symphony.tracker.models import Issue
 from symphony.workflow import WorkflowDefinition, render_prompt
@@ -96,6 +98,8 @@ class SymphonyRuntime:
 
         released = await self._release_due_retries_missing_from_candidates(candidates)
         dispatched_issues = self._dispatch_due_retries(candidates, now_ms=now_ms)
+
+        self._emit_blocker_skip_events(candidates, new_issue_ids)
 
         eligible = [issue for issue in candidates if issue.id in new_issue_ids]
         remaining = [issue for issue in eligible if issue.id not in {item.id for item in dispatched_issues}]
@@ -355,6 +359,33 @@ class SymphonyRuntime:
             if session is not None and hasattr(self.runner, "stop_session"):
                 await _maybe_await(self.runner.stop_session(session))
             self._notify_state_change()
+
+    def _emit_blocker_skip_events(self, candidates: list[Issue], new_issue_ids: set[str]) -> None:
+        """Log ``blocker_skip`` for newly-visible candidates held by upstream work (PRD §8.2).
+
+        Only emitted for newly-visible candidates (issues not seen on the prior
+        tick) to keep log volume bounded — a long-blocked ticket would
+        otherwise log every poll interval. Reconsidered on each new arrival.
+        """
+
+        for issue in candidates:
+            if issue.id not in new_issue_ids:
+                continue
+            if not is_active_state(issue, self.state):
+                continue
+            if issue.id in self.state.running or issue.id in self.state.claimed:
+                continue
+            blockers = unresolved_blockers(issue, self.state)
+            if not blockers:
+                continue
+            blocker_ids = ",".join(
+                blocker.identifier or blocker.id or "?" for blocker in blockers
+            )
+            LOGGER.info(
+                "blocker_skip: issue=%s blockers=%s",
+                issue.identifier,
+                blocker_ids,
+            )
 
     async def _claim_issue(self, issue: Issue, claim_target: str) -> Issue:
         """Move ``issue`` to ``claim_target`` and re-fetch to verify ownership (PRD §8.5)."""
