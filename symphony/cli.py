@@ -554,55 +554,83 @@ async def run_daemon(
     status_server: StatusServer = serve_status_api,
     webhook_api: WebhookAPI | None = None,
 ) -> None:
-    status_api = create_status_api(runtime)
-    # Single lock shared by the poll loop and every webhook-triggered tick so
-    # they cannot execute concurrently against the same runtime state.
-    tick_lock = asyncio.Lock()
-    # Build a WebhookAPI from config when not explicitly provided.
-    if webhook_api is None and context.config.webhook.secret:
-        webhook_api = WebhookAPI(
-            webhook_secret=context.config.webhook.secret,
-            on_event=_make_webhook_event_handler(runtime, tick_lock=tick_lock),
-        )
-    elif webhook_api is not None:
-        # Re-inject on_event with the shared lock regardless of how the API was built.
-        webhook_api.on_event = _make_webhook_event_handler(runtime, tick_lock=tick_lock)
-    # Auto-register the webhook with Linear when url + team_id + secret are all configured.
-    wh = context.config.webhook
-    if wh.url and wh.team_id and wh.secret:
-        from symphony.tracker.webhooks import WebhookRegistrar, WebhookRegistrarError  # noqa: PLC0415
-        try:
-            api_key = TokenStore(context.config.tracker).resolve_linear_token()
-            registrar = WebhookRegistrar(api_token=api_key)
-            webhook_id = await registrar.register(wh.url, wh.team_id, wh.secret)
-            LOGGER.info("Webhook registered: id=%s url=%s", webhook_id, wh.url)
-        except (MissingLinearTokenError, WebhookRegistrarError) as exc:
-            LOGGER.warning("Webhook auto-registration failed (falling back to polling): %s", exc)
+    from symphony.project_lock import FileLock, WebhookClaim, encode_claim, run_heartbeat  # noqa: PLC0415
 
-    # serve_status_api signature accepts webhook_api as keyword arg when present.
-    import functools as _functools  # noqa: PLC0415
-    _status_server = _functools.partial(status_server, webhook_api=webhook_api) if webhook_api is not None else status_server
-    status_task = asyncio.create_task(_status_server(status_api, context.port))
-    poll_task = asyncio.create_task(
-        run_poll_loop(
-            runtime,
-            before_tick=workflow_reloader.reload_if_changed if workflow_reloader is not None else None,
-            tick_lock=tick_lock,
-        )
-    )
-    tasks = {status_task, poll_task}
+    file_lock = FileLock(context.config.workspace.root)
+    lock_info = file_lock.acquire()
+
+    webhook_claim: WebhookClaim | None = None
+    heartbeat_task: asyncio.Task | None = None
 
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for task in done:
-            task.result()
-        for task in pending:
-            task.cancel()
-    finally:
-        for task in tasks:
-            if not task.done():
+        status_api = create_status_api(runtime)
+        # Single lock shared by the poll loop and every webhook-triggered tick so
+        # they cannot execute concurrently against the same runtime state.
+        tick_lock = asyncio.Lock()
+        # Build a WebhookAPI from config when not explicitly provided.
+        if webhook_api is None and context.config.webhook.secret:
+            webhook_api = WebhookAPI(
+                webhook_secret=context.config.webhook.secret,
+                on_event=_make_webhook_event_handler(runtime, tick_lock=tick_lock),
+            )
+        elif webhook_api is not None:
+            # Re-inject on_event with the shared lock regardless of how the API was built.
+            webhook_api.on_event = _make_webhook_event_handler(runtime, tick_lock=tick_lock)
+        # Auto-register the webhook with Linear when url + team_id + secret are all configured.
+        wh = context.config.webhook
+        if wh.url and wh.team_id and wh.secret:
+            from symphony.tracker.webhooks import WebhookRegistrar, WebhookRegistrarError  # noqa: PLC0415
+            try:
+                api_key = TokenStore(context.config.tracker).resolve_linear_token()
+                registrar = WebhookRegistrar(api_token=api_key)
+                # Cross-machine conflict check: raise ProjectLockError if another instance
+                # has an active claim embedded in a webhook label for this team.
+                webhook_claim = WebhookClaim(registrar, wh.team_id, wh.url)
+                await webhook_claim.check()
+                webhook_id = await registrar.register(
+                    wh.url, wh.team_id, wh.secret, label=encode_claim(lock_info)
+                )
+                webhook_claim.set_webhook_id(webhook_id)
+                LOGGER.info("Webhook registered: id=%s url=%s", webhook_id, wh.url)
+            except Exception as exc:  # noqa: BLE001
+                from symphony.project_lock import ProjectLockError  # noqa: PLC0415
+                if isinstance(exc, ProjectLockError):
+                    raise
+                LOGGER.warning("Webhook auto-registration failed (falling back to polling): %s", exc)
+
+        heartbeat_task = asyncio.create_task(
+            run_heartbeat(file_lock, lock_info, webhook_claim)
+        )
+
+        # serve_status_api signature accepts webhook_api as keyword arg when present.
+        import functools as _functools  # noqa: PLC0415
+        _status_server = _functools.partial(status_server, webhook_api=webhook_api) if webhook_api is not None else status_server
+        status_task = asyncio.create_task(_status_server(status_api, context.port))
+        poll_task = asyncio.create_task(
+            run_poll_loop(
+                runtime,
+                before_tick=workflow_reloader.reload_if_changed if workflow_reloader is not None else None,
+                tick_lock=tick_lock,
+            )
+        )
+        tasks = {status_task, poll_task}
+
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                task.result()
+            for task in pending:
                 task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        if heartbeat_task is not None and not heartbeat_task.done():
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        file_lock.release()
 
 
 def _make_webhook_event_handler(
@@ -813,7 +841,11 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     workflow_reloader = RuntimeWorkflowReloader.from_context(
         runtime, context, webhook_api=_webhook_api
     )
-    asyncio.run(run_daemon(runtime, context, workflow_reloader=workflow_reloader, webhook_api=_webhook_api))
+    from symphony.project_lock import ProjectLockError  # noqa: PLC0415
+    try:
+        asyncio.run(run_daemon(runtime, context, workflow_reloader=workflow_reloader, webhook_api=_webhook_api))
+    except ProjectLockError as exc:
+        parser.exit(1, f"{_fail('Error')}: {exc}\n")
     return 0
 
 

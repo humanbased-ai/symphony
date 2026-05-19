@@ -32,8 +32,17 @@ mutation SymphonyCreateWebhook($input: WebhookCreateInput!) {
     webhook {
       id
       url
+      label
       enabled
     }
+  }
+}
+""".strip()
+
+UPDATE_WEBHOOK_LABEL_MUTATION = """
+mutation SymphonyUpdateWebhookLabel($id: String!, $label: String!) {
+  webhookUpdate(id: $id, input: {label: $label}) {
+    success
   }
 }
 """.strip()
@@ -106,12 +115,15 @@ class WebhookRegistrar:
         self.api_token = api_token
         self.graphql_url = f"{base_url.rstrip('/')}/graphql"
 
-    async def register(self, url: str, team_id: str, secret: str) -> str:
+    async def register(self, url: str, team_id: str, secret: str, *, label: str | None = None) -> str:
         """Register webhook; return webhook ID.
 
         Any existing webhook for *url* is deleted before creating a fresh one.
         Linear does not expose stored secrets via the API, so the only way to
         guarantee the secret is current (e.g. after rotation) is to recreate.
+
+        Pass *label* to embed a claim string in the webhook (used by project-level
+        mutual exclusion to detect competing instances across machines).
         """
         existing = await self.list_webhooks(team_id)
         for webhook in existing:
@@ -119,16 +131,18 @@ class WebhookRegistrar:
                 await self.unregister(webhook["id"])
                 break
 
+        input_data: dict[str, Any] = {
+            "url": url,
+            "teamId": team_id,
+            "secret": secret,
+            "resourceTypes": ["Issue"],
+        }
+        if label is not None:
+            input_data["label"] = label
+
         result = self._graphql(
             CREATE_WEBHOOK_MUTATION,
-            {
-                "input": {
-                    "url": url,
-                    "teamId": team_id,
-                    "secret": secret,
-                    "resourceTypes": ["Issue"],
-                }
-            },
+            {"input": input_data},
         )
         webhook_data = (result.get("data") or {}).get("webhookCreate") or {}
         if not webhook_data.get("success"):
@@ -138,6 +152,16 @@ class WebhookRegistrar:
         if not webhook_id:
             raise WebhookRegistrarError("webhook_create_missing_id")
         return webhook_id
+
+    async def update_label(self, webhook_id: str, label: str) -> None:
+        """Update the label field of an existing webhook."""
+        result = self._graphql(
+            UPDATE_WEBHOOK_LABEL_MUTATION,
+            {"id": webhook_id, "label": label},
+        )
+        updated = (result.get("data") or {}).get("webhookUpdate") or {}
+        if not updated.get("success"):
+            raise WebhookRegistrarError("webhook_update_label_failed")
 
     async def unregister(self, webhook_id: str) -> None:
         """Delete a webhook by ID."""

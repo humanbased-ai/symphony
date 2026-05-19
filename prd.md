@@ -1418,6 +1418,27 @@ Doctor warns if `states.in_progress` is not configured in WORKFLOW.md, since omi
 
 ---
 
+### 8.6 Project-level mutual exclusion (daemon startup guard)
+
+**Problem:** Multiple Symphony daemons targeting the same Linear project will each poll for and dispatch the same issues independently, producing duplicate agent runs. This happens when team members independently start Symphony on different machines for the same project.
+
+**Solution: two-layer lock on daemon startup.**
+
+Layer 1 — **file lock** (`{workspace_root}/.symphony.lock`): always active, covers same-machine conflicts. Contains `{pid, host, started_at, heartbeat}`. On startup, if an active lock exists (heartbeat recent, or same-host process alive), the new daemon exits immediately with a clear error message. A stale lock (heartbeat > 5 min old, process dead or different host) is silently replaced.
+
+Layer 2 — **webhook claim**: active when `webhook.url + webhook.team_id + webhook.secret` are all configured. The claim is a JSON payload embedded in the Linear webhook's `label` field using the prefix `symphony-claim:`. On startup, before registering the webhook, Symphony lists the team's webhooks and checks for active symphony claims from a different URL (different instance). If found, startup is aborted. Stale claims are ignored.
+
+Both layers use a **heartbeat task** (60 s interval) that refreshes the lock file timestamp and updates the webhook label in the background. A crashed daemon stops updating its heartbeat; other daemons detect the claim as stale after 5 minutes and can take over.
+
+**Failure modes:**
+- If the file lock is stale (PID dead, same host): automatic takeover with a log warning.
+- If the webhook claim check cannot reach Linear: fail-open — startup proceeds with a log warning. This avoids blocking operators during Linear API outages.
+- Poll-only mode (no webhook configured): only the file lock applies. Cross-machine conflicts in poll-only mode are not caught at startup; issue-level deduplication via Linear state transitions (§8.5) remains the last line of defense.
+
+**Implementation:** `symphony/project_lock.py` (`FileLock`, `WebhookClaim`, `LockInfo`, `run_heartbeat`). Integrated in `run_daemon()` in `cli.py`. `--once` and `--check` modes bypass the lock entirely (not a daemon).
+
+---
+
 ## 9. Open Questions
 
 1. **Linear OAuth app registration:** Should Symphony ship with a shared OAuth client_id (users install the Symphony Linear app from Linear's marketplace), or does each team register their own Linear application with their own client_id/secret?
