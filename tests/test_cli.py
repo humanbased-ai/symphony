@@ -773,10 +773,8 @@ class StarterMissionTests(unittest.TestCase):
             {"data": {"workflowStates": {"nodes": [{"id": "state-1", "name": "Todo"}]}}},
             # projectCreate
             {"data": {"projectCreate": {"success": True, "project": {"id": "proj-1", "name": "symphony-hello-world", "slugId": "symphony-hello-world-abc"}}}},
-            # issueCreate × 3
+            # issueCreate × 1
             {"data": {"issueCreate": {"success": True, "issue": {"id": "i1", "identifier": "HW-1"}}}},
-            {"data": {"issueCreate": {"success": True, "issue": {"id": "i2", "identifier": "HW-2"}}}},
-            {"data": {"issueCreate": {"success": True, "issue": {"id": "i3", "identifier": "HW-3"}}}},
         ]
 
         call_count = [0]
@@ -818,7 +816,8 @@ class StarterMissionTests(unittest.TestCase):
     def test_returns_false_when_no_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._make_args(tmp, linear_api_key="")
-            result = _run_starter_mission(args, environ={})
+            with patch("symphony.cli.load_local_linear_token", return_value=None):
+                result = _run_starter_mission(args, environ={})
         self.assertFalse(result)
 
     def test_returns_false_when_project_create_fails(self):

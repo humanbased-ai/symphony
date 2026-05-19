@@ -66,7 +66,7 @@ query SymphonyStarterTeams {
 """.strip()
 
 _STARTER_TEAM_STATES_QUERY = """
-query SymphonyStarterStates($teamId: String!) {
+query SymphonyStarterStates($teamId: ID!) {
   workflowStates(
     filter: {team: {id: {eq: $teamId}}, type: {eq: "unstarted"}}
     first: 10
@@ -1119,8 +1119,8 @@ def _offer_starter_mission(
         return
 
     print("\n★  Starter Mission (optional, runs once)")
-    print("   Symphony creates a sample Linear project with 3 tickets and dispatches")
-    print("   an agent on the first one — so you can see the full delivery loop.")
+    print("   Symphony creates a sample Linear project with 1 ticket and dispatches")
+    print("   an agent on it — so you can see the full delivery loop.")
     try:
         answer = input("\nRun the demo? [Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -1205,15 +1205,13 @@ def _run_starter_mission(
         project_slug: str = project.get("slugId") or "symphony-hello-world"
         print(f"  Project created (slug: {project_slug})")
 
-        # Step 4: create 3 sample issues
-        issue_titles = ["setup repo", "write hello world app", "add README"]
-        print("  Creating sample issues …")
-        for title in issue_titles:
-            _gql(
-                _STARTER_CREATE_ISSUE_MUTATION,
-                {"title": title, "teamId": team_id, "projectId": project_id, "stateId": state_id},
-            )
-            print(f"    ✓ {title}")
+        # Step 4: create 1 sample issue
+        print("  Creating sample issue …")
+        _gql(
+            _STARTER_CREATE_ISSUE_MUTATION,
+            {"title": "write hello world app", "teamId": team_id, "projectId": project_id, "stateId": state_id},
+        )
+        print("    ✓ write hello world app")
 
         # Step 5: generate WORKFLOW.md
         demo_dir = Path("symphony-hello-world")
