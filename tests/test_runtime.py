@@ -546,9 +546,14 @@ class ApprovalGateRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(target.id, runtime.state.running)
             self.assertTrue(any("approval_unreachable" in line for line in logs.output))
 
-    async def test_approval_required_with_resolution_path_falls_back_to_normal_retry(self):
+    async def test_approval_required_with_resolution_path_moves_to_approval_state(self):
+        # When tracker.approval_state IS configured, the runtime must actually
+        # use it: move the Linear issue into approval_state and release the
+        # dispatch without scheduling a retry. The previous behavior fell
+        # through to retry-scheduling, leaving approval_state unused.
         with tempfile.TemporaryDirectory() as temp_dir:
-            target = issue()
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
             runner = FakeSessionRunner(success=False, exit_reason="approval_required")
             config = WorkflowConfig.from_mapping(
                 {
@@ -566,6 +571,34 @@ class ApprovalGateRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime = SymphonyRuntime(
                 config=config,
                 prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            self.assertEqual("approval_pending", result.errors["IN-501"])
+            self.assertEqual([(target.id, "team-1", "Needs Approval")], tracker.move_calls)
+            # No retry scheduled; the dispatch is released and the resolver
+            # owns the next move.
+            self.assertEqual({}, runtime.state.retry_attempts)
+            self.assertNotIn(target.id, runtime.state.claimed)
+            self.assertTrue(any("approval_pending" in line for line in logs.output))
+
+    async def test_turn_input_required_is_treated_as_approval_required(self):
+        # CodexRunner emits `turn_input_required` for generic protocol-level
+        # approval frames. Without recognizing it, those exits fell through to
+        # normal retry even when approval_state was unset.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            runner = FakeSessionRunner(success=False, exit_reason="turn_input_required")
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),  # no approval_state
+                prompt_template="x",
                 tracker=FakeTracker([target]),
                 workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
                 runner=runner,
@@ -575,8 +608,44 @@ class ApprovalGateRuntimeTests(unittest.IsolatedAsyncioTestCase):
             result = await runtime.run_tick()
 
             self.assertEqual(("IN-200",), result.failed)
-            # With a resolution path configured, falls back to normal retry scheduling.
-            self.assertIn(target.id, runtime.state.retry_attempts)
+            self.assertEqual("approval_unreachable", result.errors["IN-200"])
+            self.assertEqual({}, runtime.state.retry_attempts)
+
+    async def test_zombie_claim_released_when_issue_reappears_in_candidates(self):
+        # Regression: after `complete_worker_terminal_failure` parks an issue
+        # in `state.claimed` (e.g., approval_unreachable in IN-288), an
+        # operator that re-queues the ticket externally must be able to
+        # unblock the same daemon. The runtime releases the stale claim when
+        # the issue re-appears in candidates without a running entry or
+        # pending retry.
+        from symphony.orchestrator import complete_worker_terminal_failure, dispatch_issue
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            tracker = FakeTracker([target])
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+            # Simulate a prior terminal failure: claim is parked.
+            dispatch_issue(target, runtime.state, now_ms=runtime.clock_ms())
+            complete_worker_terminal_failure(target.id, runtime.state)
+            self.assertIn(target.id, runtime.state.claimed)
+            # Pretend the prior tick saw it so it's not "new".
+            runtime._prev_candidate_ids = {target.id}
+
+            # Operator intervention: the issue is still in candidates on the
+            # next tick. The zombie claim should be released so dispatch can
+            # pick it up as new — and it does, in the same tick.
+            with self.assertLogs("symphony.runtime", level="INFO") as logs:
+                result = await runtime.run_tick()
+
+            self.assertTrue(any("claim_released" in line for line in logs.output))
+            self.assertEqual(("IN-200",), result.dispatched)
 
 
 class ClaimingFakeTracker(FakeTracker):
