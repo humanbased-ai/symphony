@@ -348,7 +348,7 @@ def configure_logging(level: str, logs_root: Path | None = None) -> None:
 
 def create_runtime(context: StartupContext) -> SymphonyRuntime:
     linear_client = create_tracker(context.config)
-    workspace_manager = create_workspace_manager(context.config)
+    workspace_manager = create_workspace_manager(context.config, logs_root=context.logs_root)
     runner = create_runner(context.config, linear_client)
     return SymphonyRuntime(
         config=context.config,
@@ -367,8 +367,16 @@ def create_tracker(config: WorkflowConfig) -> LinearClient:
     return LinearClient(config.tracker)
 
 
-def create_workspace_manager(config: WorkflowConfig) -> WorkspaceManager:
-    return WorkspaceManager(config.workspace, config.hooks)
+def create_workspace_manager(
+    config: WorkflowConfig,
+    *,
+    logs_root: Path | None = None,
+) -> WorkspaceManager:
+    return WorkspaceManager(
+        config.workspace,
+        config.hooks,
+        logs_root=logs_root,
+    )
 
 
 def create_runner(config: WorkflowConfig, linear_client: LinearClient) -> CodexRunner | ClaudeCodeRunner:
@@ -398,6 +406,25 @@ async def run_once(runtime: SymphonyRuntime) -> RuntimeTickResult:
     return await runtime.run_tick()
 
 
+async def _startup_workspace_sweep(workspace_manager: WorkspaceManager) -> None:
+    """Force-clean orphan per-run worktrees from prior crashed dispatches.
+
+    Symphony does not persist its in-memory running set across restarts, so any
+    per-run workspace that exists at startup is stale by definition (PRD §8.1).
+    """
+
+    sweep = getattr(workspace_manager, "sweep_stale_worktrees", None)
+    if sweep is None:
+        return
+    try:
+        removed = await sweep()
+    except Exception as exc:  # noqa: BLE001 - sweep is best-effort and must not block startup.
+        LOGGER.warning("Startup workspace sweep failed: %s", exc)
+        return
+    if removed:
+        LOGGER.info("Startup workspace sweep removed %d stale per-run director%s.", removed, "y" if removed == 1 else "ies")
+
+
 async def run_poll_loop(
     runtime: SymphonyRuntime,
     *,
@@ -409,8 +436,10 @@ async def run_poll_loop(
     # issues have not yet been excluded.
     if tick_lock is not None:
         async with tick_lock:
+            await _startup_workspace_sweep(runtime.workspace_manager)
             await runtime.record_startup_issues()
     else:
+        await _startup_workspace_sweep(runtime.workspace_manager)
         await runtime.record_startup_issues()
     while True:
         try:
@@ -683,7 +712,8 @@ def apply_runtime_workflow(runtime: SymphonyRuntime, effective: EffectiveWorkflo
     runtime.workflow = effective.definition
     runtime.prompt_template = effective.definition.prompt_template
     runtime.tracker = linear_client
-    runtime.workspace_manager = create_workspace_manager(effective.config)
+    logs_root = getattr(runtime.workspace_manager, "logs_root", None)
+    runtime.workspace_manager = create_workspace_manager(effective.config, logs_root=logs_root)
     runtime.runner = create_runner(effective.config, linear_client)
     runtime.state.apply_config(effective.config)
     runtime._notify_state_change()
