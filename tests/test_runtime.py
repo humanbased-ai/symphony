@@ -521,6 +521,126 @@ class BlockerGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, len(blocker_lines), blocker_lines)
 
 
+class FailureStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def _config(self, workspace_root: Path, *, failure_state: str | None, keep_on_failure: bool = False) -> WorkflowConfig:
+        ws: dict = {"root": str(workspace_root)}
+        if keep_on_failure:
+            ws["keep_on_failure"] = True
+        tracker_cfg = {
+            "kind": "linear",
+            "active_states": ["Todo"],
+            "terminal_states": ["Done", "Cancelled"],
+        }
+        if failure_state:
+            tracker_cfg["failure_state"] = failure_state
+        return WorkflowConfig.from_mapping(
+            {
+                "tracker": tracker_cfg,
+                "workspace": ws,
+                "agent": {"max_concurrent_agents": 1},
+                "polling": {"interval_ms": 5_000},
+            }
+        )
+
+    async def test_worker_failure_moves_issue_to_failure_state_and_cleans_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
+            runner = FakeSessionRunner(success=False, exit_reason="agent_crashed")
+            runtime = SymphonyRuntime(
+                config=self._config(Path(temp_dir) / "workspaces", failure_state="Cancelled"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            self.assertEqual([(target.id, "team-1", "Cancelled")], tracker.move_calls)
+            # No retry scheduled — issue is fully released.
+            self.assertEqual({}, runtime.state.retry_attempts)
+            self.assertNotIn(target.id, runtime.state.claimed)
+            self.assertNotIn(target.id, runtime.state.running)
+            self.assertTrue(any("run_failed" in line and "Cancelled" in line for line in logs.output))
+            # Workspace cleanup happened (the fake records cleanup calls).
+            self.assertIn(("cleanup", "IN-501"), workspace_manager.calls)
+
+    async def test_keep_on_failure_skips_workspace_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
+            runner = FakeSessionRunner(success=False, exit_reason="agent_crashed")
+            runtime = SymphonyRuntime(
+                config=self._config(
+                    Path(temp_dir) / "workspaces",
+                    failure_state="Cancelled",
+                    keep_on_failure=True,
+                ),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            self.assertNotIn(("cleanup", "IN-501"), workspace_manager.calls)
+
+    async def test_unresolvable_approval_now_moves_to_failure_state(self):
+        # IN-289 layer on top of IN-288: when both approval_state and
+        # failure_state are missing, approval failures park (IN-288 behavior).
+        # When failure_state is configured, they should additionally move.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
+            runner = FakeSessionRunner(success=False, exit_reason="approval_required")
+            runtime = SymphonyRuntime(
+                config=self._config(Path(temp_dir) / "workspaces", failure_state="Cancelled"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            self.assertEqual("approval_unreachable", result.errors["IN-501"])
+            self.assertEqual([(target.id, "team-1", "Cancelled")], tracker.move_calls)
+            self.assertNotIn(target.id, runtime.state.claimed)
+
+    async def test_legacy_mode_still_retries_when_failure_state_unset(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            runner = FakeSessionRunner(success=False, exit_reason="agent_crashed")
+            runtime = SymphonyRuntime(
+                config=self._config(Path(temp_dir) / "workspaces", failure_state=None),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            # No failure-state move attempted, retry still scheduled.
+            self.assertEqual([], tracker.move_calls)
+            self.assertIn(target.id, runtime.state.retry_attempts)
+
+
 class ApprovalGateRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_required_without_resolution_parks_issue_without_retry(self):
         with tempfile.TemporaryDirectory() as temp_dir:

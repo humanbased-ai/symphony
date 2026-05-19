@@ -1322,6 +1322,22 @@ def doctor_checks(
     # could legally request approval but the workflow has no resolution path.
     approval_ok, approval_detail = _check_approval_gate(context.config)
     checks.append((approval_ok, "approval gate", approval_detail))
+
+    # Failure-state transition (PRD §8.4, IN-289). Warn (don't hard-fail) when
+    # `tracker.failure_state` is unset — legacy retry behavior still works.
+    if context.config.tracker.failure_state:
+        checks.append(
+            (True, "failure state", f"failure_state={context.config.tracker.failure_state!r}")
+        )
+    else:
+        checks.append(
+            (
+                True,
+                "failure state",
+                "warn: tracker.failure_state not set — non-recoverable failures will retry "
+                "indefinitely instead of moving to a failure state (PRD §8.4)",
+            )
+        )
     if not skip_port_check:
         port_ok, port_detail = _check_port_available(context.port)
         checks.append((port_ok, "status api port", port_detail))

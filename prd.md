@@ -1099,13 +1099,24 @@ be the first Phase 2 gate before desktop or productionization work expands.
     `claimed`, no retry scheduled) and `approval_unreachable` is logged.
     The "move to failure_state" step is left for IN-289 since it depends on
     the failure-state config that ticket introduces.
-- [ ] **[Core: Failure-state transition, no auto-retry] (Linear: IN-289)** —
+- [x] **[Core: Failure-state transition, no auto-retry] (Linear: IN-289)** —
   On non-recoverable failure, move the issue to the configured `failure_state`,
   log the structured failure event, and clean up the workspace (unless
   `keep_on_failure: true`). No Symphony-initiated auto-retry; operator re-queues
   via Linear. Any future retry (SPEC §18.2 persistent queue, Phase 6 backlog)
-  must use a fresh worktree. **Prerequisite:** SPEC.md §8.4/§10.7 and
-  ARCHITECTURE.md retry flows must be updated before this is implemented — see §8.4.
+  must use a fresh worktree.
+  - Shipped on `feat/in-289-failure-state-transition` (stacked on IN-288).
+    New config: `tracker.failure_state: str | None`,
+    `workspace.keep_on_failure: bool`. `runtime._terminate_run` routes all
+    non-recoverable failure paths (turn failure, exception, stall timeout,
+    approval-unreachable) through a single helper that moves the issue,
+    logs `run_failed: issue=… reason=… failure_state=… last_message=…`,
+    cleans the per-run workspace via `cleanup_for_run` (unless
+    `keep_on_failure`), and releases the issue from all state sets. When
+    `failure_state` is unset, the legacy retry behavior is preserved for
+    backwards compatibility. `symphony doctor` adds a `failure state` row.
+    ARCHITECTURE.md retry flows updated; SPEC.md left untouched (operator
+    decision: SPEC.md is the read-only reference design).
 - [x] **[Core: Claim race prevention — best-effort state-transition claim] (Linear: IN-290)** —
   Move ticket to `in_progress_state` in Linear before launching the agent as
   a best-effort claim. Linear `updateIssue` is not a compare-and-swap — two
@@ -1364,7 +1375,7 @@ The operator decides whether to re-queue by moving the issue back to an active s
 
 A persistent retry queue (SPEC §18.2) remains in the Phase 6 backlog. When implemented, it must never reuse the same workspace — each retry provisions a fresh worktree.
 
-**Cross-doc conflict and resolution:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md require failure-driven retries to be scheduled automatically. This PRD's decision narrows, not contradicts, that contract: the constraint is **no auto-retry into the same workspace**, not no retry at all. Retries are permitted provided they use a fresh worktree. SPEC.md and ARCHITECTURE.md must be updated before IN-289 is implemented to reflect this narrowing — specifically, any retry scheduling must provision a new workspace rather than resuming the failed one. Until those documents are updated, AGENTS.md instructs implementers to treat the cross-doc conflict as a blocker on IN-289.
+**Cross-doc narrowing:** SPEC.md §8.4/§10.7 and ARCHITECTURE.md describe failure-driven retries as automatically scheduled. This PRD narrows the contract to: **no auto-retry into the same workspace, and no auto-retry at all without an explicit `failure_state` move first.** Retries (the Phase 6 persistent-queue work) are permitted provided they (a) move the issue back to a queued state via operator action and (b) provision a fresh worktree on the next dispatch. SPEC.md is the read-only OpenAI reference design and is not modified to reflect this narrowing; ARCHITECTURE.md is updated alongside the IN-289 implementation to document the actual shipped retry semantics. Implementations that omit `tracker.failure_state` continue to schedule retries as SPEC describes, so omitting the new config does not break SPEC conformance.
 
 **Rationale:** Auto-retry into a dirty workspace risks compounding the original failure. The operator is better positioned to judge whether a retry is warranted after reading the failure log.
 

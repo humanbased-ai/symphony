@@ -184,13 +184,25 @@ class SymphonyRuntime:
         for issue_id in list(stalled_issue_ids(self.state, now_ms=now_ms, stall_timeout_ms=stall_timeout_ms)):
             entry = self.state.running.get(issue_id)
             identifier = entry.identifier if entry else issue_id
-            LOGGER.warning("Issue %s has stalled (no events for %ds), forcing retry.", identifier, stall_timeout_ms // 1000)
-            complete_worker_failure(
-                issue_id,
-                self.state,
-                now_ms=now_ms,
-                max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
-                error="stall_timeout",
+            LOGGER.warning(
+                "Issue %s has stalled (no events for %ds).", identifier, stall_timeout_ms // 1000
+            )
+            workspace_path = getattr(entry, "workspace_path", None) if entry else None
+            stall_workspace = _StalledWorkspaceHandle.from_entry(entry) if workspace_path else None
+            await self._terminate_run(
+                issue=entry.issue if entry else Issue(
+                    id=issue_id,
+                    identifier=identifier,
+                    title="stalled",
+                    description=None,
+                    priority=None,
+                    state="",
+                    branch_name=None,
+                    url=None,
+                ),
+                workspace=stall_workspace,
+                reason="stall_timeout",
+                last_message="stall_timeout",
             )
 
         issue_ids = list(self.state.running)
@@ -327,15 +339,14 @@ class SymphonyRuntime:
                 workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
             except Exception as workspace_exc:
                 if claimed_issue is not None:
-                    # The claim flow owns the workspace-failure cleanup
-                    # path. After rollback (queued_state set) the operator
-                    # owns the next move; after claim_abandoned (queued_state
-                    # unset) operator inspection is required. In both cases
-                    # the outer retry handler MUST NOT additionally enqueue
-                    # a retry — with allow_claimed_retry=True the next tick
-                    # would re-dispatch the same ticket, potentially
-                    # duplicating an agent if a concurrent instance is
-                    # already running it.
+                    # The claim flow owns the workspace-failure cleanup path:
+                    # rollback to queued_state if safe, otherwise log
+                    # claim_abandoned. The outer retry handler MUST NOT
+                    # additionally route through `_terminate_run` (would move
+                    # to failure_state, overriding the rollback) or
+                    # `complete_worker_failure` (with allow_claimed_retry=True
+                    # the next tick would re-dispatch and duplicate an agent
+                    # if a concurrent instance is already running the issue).
                     await self._rollback_claim_after_workspace_failure(
                         claimed_issue, workspace_exc
                     )
@@ -371,35 +382,132 @@ class SymphonyRuntime:
                 return _WorkerResult(success=True)
 
             error = str(result.exit_reason or "worker_failed")
+            # IN-288 fix: approval-required exits have their own handler that
+            # MUST short-circuit before _terminate_run gets a chance to move
+            # the issue to failure_state. When approval_state is configured,
+            # the issue is moved there and the dispatch is released without
+            # retry; when approval_state is unset, the issue is parked.
+            # Neither path interacts with failure_state — IN-289 only fires
+            # for non-approval, non-rollback failures.
             if error in APPROVAL_REQUIRED_EXIT_REASONS:
                 handled = await self._handle_approval_required(issue, error)
                 if handled is not None:
                     return handled
-            complete_worker_failure(
-                issue.id,
-                self.state,
-                now_ms=self.clock_ms(),
-                max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
-                error=error,
+            await self._terminate_run(
+                issue=issue,
+                workspace=workspace,
+                reason=error,
+                last_message=getattr(result, "exit_reason", None) or error,
             )
             return _WorkerResult(success=False, error=error)
         except Exception as exc:  # noqa: BLE001 - runtime must convert worker failures into retry state.
             error = str(exc) or exc.__class__.__name__
             if workspace is not None:
                 await _best_effort_after_run(self.workspace_manager, workspace)
-            if issue.id in self.state.running:
-                complete_worker_failure(
-                    issue.id,
-                    self.state,
-                    now_ms=self.clock_ms(),
-                    max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
-                    error=error,
-                )
+            await self._terminate_run(issue=issue, workspace=workspace, reason=error, last_message=error)
             return _WorkerResult(success=False, error=error)
         finally:
             if session is not None and hasattr(self.runner, "stop_session"):
                 await _maybe_await(self.runner.stop_session(session))
             self._notify_state_change()
+
+    async def _terminate_run(
+        self,
+        *,
+        issue: Issue,
+        workspace: Any,
+        reason: str,
+        last_message: str | None,
+    ) -> None:
+        """Resolve a non-recoverable run failure per PRD §8.4.
+
+        When ``tracker.failure_state`` is configured:
+          - move the issue to ``failure_state`` via the tracker;
+          - log a structured ``run_failed`` event with the reason;
+          - clean up the per-run workspace (unless ``workspace.keep_on_failure``
+            is set);
+          - release the issue from running/claimed/retry state — no auto-retry.
+
+        When ``tracker.failure_state`` is unset, fall back to the legacy
+        retry-scheduling path (``complete_worker_failure``) so deployments that
+        have not yet adopted the failure-state model continue to work
+        unchanged. Approval-unreachable runs are always terminal — they stay
+        in ``claimed`` to prevent re-dispatch in the same daemon.
+        """
+
+        if issue.id not in self.state.running:
+            return
+
+        failure_state = self.config.tracker.failure_state
+        keep = self.config.workspace.keep_on_failure
+        if failure_state:
+            LOGGER.warning(
+                "run_failed: issue=%s reason=%s failure_state=%s last_message=%s",
+                issue.identifier,
+                reason,
+                failure_state,
+                last_message,
+            )
+            move = getattr(self.tracker, "move_issue_to_state", None)
+            if move is not None and issue.team_id:
+                try:
+                    await _call_sync(move, issue.id, issue.team_id, failure_state)
+                except Exception as exc:  # noqa: BLE001 - failure move is best-effort.
+                    LOGGER.warning(
+                        "failure_state_move_failed: issue=%s error=%s",
+                        issue.identifier,
+                        exc,
+                    )
+            elif move is None:
+                LOGGER.warning(
+                    "failure_state_move_skipped: issue=%s reason=tracker_missing_move_method",
+                    issue.identifier,
+                )
+            else:
+                LOGGER.warning(
+                    "failure_state_move_skipped: issue=%s reason=issue_missing_team_id",
+                    issue.identifier,
+                )
+            if workspace is not None:
+                await self._cleanup_run_workspace(workspace, keep_on_failure=keep)
+            release_issue(issue.id, self.state)
+            return
+
+        if reason == "approval_unreachable":
+            # Approval-unreachable is always non-recoverable; keep in claimed
+            # even without an explicit failure_state.
+            complete_worker_terminal_failure(issue.id, self.state)
+            return
+
+        complete_worker_failure(
+            issue.id,
+            self.state,
+            now_ms=self.clock_ms(),
+            max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
+            error=reason,
+        )
+
+    async def _cleanup_run_workspace(self, workspace: Any, *, keep_on_failure: bool) -> None:
+        cleanup_for_run = getattr(self.workspace_manager, "cleanup_for_run", None)
+        try:
+            if cleanup_for_run is not None:
+                await _maybe_await(
+                    cleanup_for_run(workspace, failed=True, keep_on_failure=keep_on_failure)
+                )
+                return
+            # Legacy workspace managers (test fakes, etc.) — fall back to the
+            # identifier-based cleanup if they expose it.
+            cleanup = getattr(self.workspace_manager, "cleanup", None)
+            if cleanup is not None and not keep_on_failure:
+                identifier = getattr(workspace, "workspace_key", None) or getattr(workspace, "path", None)
+                if identifier is not None:
+                    await _maybe_await(cleanup(str(identifier)))
+        except Exception as exc:  # noqa: BLE001 - cleanup must not propagate.
+            LOGGER.warning(
+                "workspace_cleanup_failed: workspace=%s error=%s",
+                getattr(workspace, "path", workspace),
+                exc,
+            )
 
     async def _handle_approval_required(
         self, issue: Issue, exit_reason: str
@@ -675,6 +783,25 @@ class _WorkerResult:
 
 class _ClaimRejectedError(RuntimeError):
     """Raised when the post-claim re-fetch shows the ticket is not owned by us."""
+
+
+@dataclass(frozen=True)
+class _StalledWorkspaceHandle:
+    """Minimal Workspace-shaped surface used to reconstruct cleanup context for stalled runs."""
+
+    path: Path
+    workspace_key: str
+    run_id: str
+    branch_name: str | None
+
+    @classmethod
+    def from_entry(cls, entry: Any) -> "_StalledWorkspaceHandle":
+        return cls(
+            path=Path(getattr(entry, "workspace_path", "")),
+            workspace_key=getattr(entry, "identifier", "") or "",
+            run_id=getattr(entry, "run_id", "") or "",
+            branch_name=getattr(entry, "branch_name", None),
+        )
 
 
 def _instance_id() -> str:

@@ -327,6 +327,55 @@ Body
             # The check is a hard fail — overall doctor result reflects it.
             self.assertFalse(all(c[0] for c in checks))
 
+    def test_doctor_failure_state_row_warns_when_unset(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: symphony
+workspace:
+  root: workspaces
+codex:
+  command: python --version
+  approval_policy: never
+---
+Body
+""",
+                encoding="utf-8",
+            )
+            checks = doctor_checks(workflow_path, logs_root="log", port=0, skip_port_check=True)
+            row = [c for c in checks if c[1] == "failure state"][0]
+            self.assertTrue(row[0])
+            self.assertIn("warn", row[2].lower())
+
+    def test_doctor_failure_state_row_passes_when_configured(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: symphony
+  failure_state: Cancelled
+workspace:
+  root: workspaces
+codex:
+  command: python --version
+  approval_policy: never
+---
+Body
+""",
+                encoding="utf-8",
+            )
+            checks = doctor_checks(workflow_path, logs_root="log", port=0, skip_port_check=True)
+            row = [c for c in checks if c[1] == "failure state"][0]
+            self.assertTrue(row[0])
+            self.assertIn("Cancelled", row[2])
+
     def test_doctor_passes_when_approval_state_is_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

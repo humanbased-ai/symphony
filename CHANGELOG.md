@@ -5,6 +5,17 @@ release tag is created.
 
 ## Unreleased
 
+- Failure-state transition with no auto-retry (IN-289): when
+  `tracker.failure_state` is configured, non-recoverable run failures (turn
+  failure, exception, stall timeout, approval-unreachable) now move the
+  issue to that state via Linear, clean up the per-run workspace (unless
+  `workspace.keep_on_failure` is set), and release the issue without
+  scheduling a retry. A structured `run_failed: issue=… reason=…
+  failure_state=… last_message=…` event is logged. When
+  `tracker.failure_state` is unset, the previous retry-scheduling behavior
+  is preserved for backwards compatibility. `symphony doctor` adds a
+  `failure state` row indicating which mode the workflow is in. New
+  optional config keys: `tracker.failure_state`, `workspace.keep_on_failure`.
 - Fail-closed approval gate (IN-288): `symphony doctor` now hard-fails when
   the configured runner can request approval (Codex `approval_policy` other
   than `never`, or Claude Code `permission_mode` other than
