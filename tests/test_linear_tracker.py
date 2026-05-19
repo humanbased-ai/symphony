@@ -10,7 +10,9 @@ from symphony.tracker.linear import (
     LinearAPIStatusError,
     LinearClient,
     LinearGraphQLError,
+    LinearIssueUpdateFailedError,
     LinearMissingEndCursorError,
+    LinearWorkflowStateNotFoundError,
     normalize_issue,
 )
 from symphony.tools.linear_graphql import LinearGraphQLTool, linear_graphql_tool
@@ -303,6 +305,132 @@ class LinearTrackerTests(unittest.TestCase):
         self.assertEqual("linear_api_request", result["error"]["code"])
         self.assertIn("[REDACTED]", result["error"]["message"])
         self.assertNotIn("lin_secret", str(result))
+
+
+def _states_response() -> GraphQLResponse:
+    return GraphQLResponse(
+        200,
+        {
+            "data": {
+                "team": {
+                    "states": {
+                        "nodes": [
+                            {"id": "state-todo", "name": "Todo", "type": "unstarted"},
+                            {"id": "state-progress", "name": "In Progress", "type": "started"},
+                            {"id": "state-done", "name": "Done", "type": "completed"},
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+
+def _claim_mutation_response(state_name: str = "In Progress") -> GraphQLResponse:
+    return GraphQLResponse(
+        200,
+        {
+            "data": {
+                "issueUpdate": {
+                    "success": True,
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "IN-1",
+                        "title": "Build the thing",
+                        "description": "Do useful work",
+                        "priority": 1,
+                        "state": {"name": state_name},
+                        "branchName": "feature/in-1",
+                        "url": "https://linear.app/example/issue/IN-1",
+                        "team": {"id": "team-1"},
+                        "labels": {"nodes": []},
+                        "createdAt": "2026-05-07T01:02:03.000Z",
+                        "updatedAt": "2026-05-07T04:05:06.000Z",
+                    },
+                }
+            }
+        },
+    )
+
+
+class MoveIssueToStateTests(unittest.TestCase):
+    def _client(self, transport: RecordingTransport) -> LinearClient:
+        tracker = TrackerConfig.from_mapping(
+            {
+                "tracker": {
+                    "kind": "linear",
+                    "project_slug": "symphony",
+                    "active_states": ["Todo"],
+                    "api_key": "$LINEAR_KEY",
+                }
+            }
+        )
+        return LinearClient(
+            tracker,
+            token_store=TokenStore(tracker, environ={"LINEAR_KEY": "lin_secret"}),
+            transport=transport,
+        )
+
+    def test_move_resolves_state_name_and_invokes_mutation(self):
+        transport = RecordingTransport([_states_response(), _claim_mutation_response()])
+        client = self._client(transport)
+
+        result = client.move_issue_to_state("issue-1", "team-1", "In Progress")
+
+        self.assertEqual("issue-1", result.id)
+        self.assertEqual("In Progress", result.state)
+        self.assertEqual("team-1", result.team_id)
+        self.assertEqual(2, len(transport.calls))
+        states_call, mutation_call = transport.calls
+        self.assertIn("team(id: $teamId)", states_call["payload"]["query"])
+        self.assertEqual({"teamId": "team-1", "first": 100}, states_call["payload"]["variables"])
+        self.assertIn("issueUpdate", mutation_call["payload"]["query"])
+        self.assertEqual(
+            {"issueId": "issue-1", "stateId": "state-progress"},
+            mutation_call["payload"]["variables"],
+        )
+
+    def test_state_map_is_cached_per_team(self):
+        transport = RecordingTransport(
+            [
+                _states_response(),
+                _claim_mutation_response(),
+                _claim_mutation_response(state_name="Done"),
+            ]
+        )
+        client = self._client(transport)
+
+        client.move_issue_to_state("issue-1", "team-1", "In Progress")
+        client.move_issue_to_state("issue-1", "team-1", "Done")
+
+        # Only one workflowStates query for the second call (cache hit).
+        self.assertEqual(3, len(transport.calls))
+        self.assertIn("issueUpdate", transport.calls[2]["payload"]["query"])
+
+    def test_missing_state_raises(self):
+        # First call returns the initial map; the refresh call also returns it
+        # so the not-found path is exercised end-to-end.
+        transport = RecordingTransport([_states_response(), _states_response()])
+        client = self._client(transport)
+
+        with self.assertRaises(LinearWorkflowStateNotFoundError):
+            client.move_issue_to_state("issue-1", "team-1", "Nonexistent")
+
+    def test_missing_team_id_raises(self):
+        client = self._client(RecordingTransport([]))
+
+        with self.assertRaises(LinearWorkflowStateNotFoundError):
+            client.move_issue_to_state("issue-1", None, "In Progress")
+
+    def test_unsuccessful_update_raises(self):
+        bad_response = GraphQLResponse(
+            200, {"data": {"issueUpdate": {"success": False, "issue": None}}}
+        )
+        transport = RecordingTransport([_states_response(), bad_response])
+        client = self._client(transport)
+
+        with self.assertRaises(LinearIssueUpdateFailedError):
+            client.move_issue_to_state("issue-1", "team-1", "In Progress")
 
 
 if __name__ == "__main__":

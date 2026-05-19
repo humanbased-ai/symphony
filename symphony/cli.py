@@ -1301,6 +1301,22 @@ def doctor_checks(
 
     logs_root = context.logs_root
     checks.append((True, "logs root", str(logs_root)))
+
+    # Claim guard (PRD §8.5, IN-290). Surface informationally — single-instance
+    # setups without the guard still pass doctor; the message tells operators
+    # how to enable it.
+    if context.config.tracker.in_progress_state:
+        checks.append(
+            (True, "claim guard", f"in_progress_state={context.config.tracker.in_progress_state!r}")
+        )
+    else:
+        checks.append(
+            (
+                True,
+                "claim guard",
+                "warn: tracker.in_progress_state not set — claim race unprotected (see PRD §8.5)",
+            )
+        )
     if not skip_port_check:
         port_ok, port_detail = _check_port_available(context.port)
         checks.append((port_ok, "status api port", port_detail))

@@ -5,6 +5,18 @@ release tag is created.
 
 ## Unreleased
 
+- Best-effort state-transition claim before dispatch (IN-290): when
+  `tracker.in_progress_state` is configured, Symphony moves the issue to that
+  state via Linear `updateIssue` before launching the agent and re-fetches to
+  verify ownership. Issues already in the in-progress state are skipped on
+  poll (claimed by another instance or being worked on by a human). On
+  workspace-setup failure after a successful claim, Symphony rolls the issue
+  back to `tracker.queued_state` when set; otherwise it logs `claim_abandoned`
+  for operator inspection (safer default for multi-instance deployments).
+  `symphony doctor` adds a `claim guard` row warning when
+  `tracker.in_progress_state` is unset. New optional config keys:
+  `tracker.in_progress_state`, `tracker.queued_state`. New required `Issue`
+  field: `team_id` (populated by Linear adapter).
 - Per-run workspace isolation (IN-286): workspaces are now materialized at
   `<workspace.root>/<workspace_key>/<run_id>` per dispatch. When
   `workspace.repo_url` is configured, Symphony maintains a bare clone at

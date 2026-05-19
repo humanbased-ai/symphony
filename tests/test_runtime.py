@@ -398,5 +398,278 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(("IN-301",), result3.dispatched)
 
 
+class ClaimingFakeTracker(FakeTracker):
+    """FakeTracker that supports the IN-290 claim flow."""
+
+    def __init__(
+        self,
+        candidates: list[Issue],
+        *,
+        states: list[Issue] | None = None,
+        post_claim_state: str | None = None,
+        post_claim_override_issue_id: str | None = None,
+        post_claim_state_for_override: str | None = None,
+        move_raises: Exception | None = None,
+    ) -> None:
+        super().__init__(candidates, states=states)
+        self.post_claim_state = post_claim_state
+        self.post_claim_override_issue_id = post_claim_override_issue_id
+        self.post_claim_state_for_override = post_claim_state_for_override
+        self.move_raises = move_raises
+        self.move_calls: list[tuple[str, str | None, str]] = []
+
+    def move_issue_to_state(self, issue_id: str, team_id: str | None, state_name: str) -> Issue:
+        if self.move_raises is not None:
+            raise self.move_raises
+        self.move_calls.append((issue_id, team_id, state_name))
+        # Apply the move to our local "states" view so subsequent fetches see it,
+        # unless the test wants to simulate a competing instance changing state.
+        source = self.candidates if self.states is None else self.states
+        target = next((item for item in source if item.id == issue_id), None)
+        if target is None:
+            raise RuntimeError(f"unknown issue {issue_id}")
+        applied_state = state_name
+        if (
+            self.post_claim_override_issue_id == issue_id
+            and self.post_claim_state_for_override is not None
+        ):
+            applied_state = self.post_claim_state_for_override
+        elif self.post_claim_state is not None:
+            applied_state = self.post_claim_state
+        updated = Issue(
+            id=target.id,
+            identifier=target.identifier,
+            title=target.title,
+            description=target.description,
+            priority=target.priority,
+            state=applied_state,
+            branch_name=target.branch_name,
+            url=target.url,
+            labels=target.labels,
+            blocked_by=target.blocked_by,
+            team_id=target.team_id,
+        )
+        if self.states is None:
+            self.candidates = [updated if item.id == issue_id else item for item in self.candidates]
+        else:
+            self.states = [updated if item.id == issue_id else item for item in self.states]
+        return updated
+
+
+def _claim_config(workspace_root: Path, *, in_progress_state: str = "In Progress", queued_state: str | None = None):
+    return WorkflowConfig.from_mapping(
+        {
+            "tracker": {
+                "kind": "linear",
+                "active_states": ["Todo", "In Progress"],
+                "terminal_states": ["Done", "Canceled"],
+                "in_progress_state": in_progress_state,
+                **({"queued_state": queued_state} if queued_state else {}),
+            },
+            "workspace": {"root": str(workspace_root)},
+            "agent": {"max_concurrent_agents": 2},
+            "polling": {"interval_ms": 5_000},
+        }
+    )
+
+
+def _team_issue(*, state: str = "Todo", issue_id: str = "issue-claim", identifier: str = "IN-501") -> Issue:
+    return Issue(
+        id=issue_id,
+        identifier=identifier,
+        title=f"{identifier} title",
+        description=None,
+        priority=1,
+        state=state,
+        branch_name=None,
+        url=None,
+        team_id="team-1",
+    )
+
+
+class FailingWorkspaceManager(FakeWorkspaceManager):
+    async def prepare_for_issue(self, target: Issue) -> FakeWorkspace:
+        self.calls.append(("prepare", target.identifier))
+        raise RuntimeError("workspace_blew_up")
+
+
+class ClaimFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_claim_succeeds_and_workspace_prep_runs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
+            runner = FakeSessionRunner()
+            runtime = SymphonyRuntime(
+                config=_claim_config(Path(temp_dir) / "workspaces"),
+                prompt_template="work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=runner,
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="INFO") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.dispatched)
+            self.assertEqual([(target.id, "team-1", "In Progress")], tracker.move_calls)
+            self.assertTrue(any("claim_succeeded" in line for line in logs.output))
+            # Workspace prep ran after the claim — verifies the order.
+            self.assertIn(("prepare", "IN-501"), workspace_manager.calls)
+
+    async def test_transient_claim_error_schedules_retry(self):
+        # When `move_issue_to_state` raises (transient Linear 5xx, network
+        # blip, …) the issue must remain eligible — otherwise it ends up in
+        # `_prev_candidate_ids` as "already seen" but never on a retry queue
+        # and gets stranded until it leaves and re-enters the candidate set.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target], move_raises=RuntimeError("linear_500"))
+            workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
+            runtime = SymphonyRuntime(
+                config=_claim_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            self.assertIn(target.id, runtime.state.retry_attempts)
+            retry = runtime.state.retry_attempts[target.id]
+            self.assertEqual(1, retry.attempt)
+            self.assertIn("claim_error", retry.error or "")
+            # Claim retains the slot for the rescheduled attempt.
+            self.assertIn(target.id, runtime.state.claimed)
+            # Workspace prep MUST NOT run when the claim fails.
+            self.assertEqual([], workspace_manager.calls)
+            self.assertTrue(any("claim_error" in line for line in logs.output))
+
+    async def test_post_claim_verification_failure_aborts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            # Simulate a concurrent instance moving the ticket away after we
+            # called updateIssue — the re-fetch shows it's no longer in "In
+            # Progress" (PRD §8.5 step 3).
+            tracker = ClaimingFakeTracker(
+                [target],
+                post_claim_override_issue_id=target.id,
+                post_claim_state_for_override="Done",
+            )
+            workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
+            runtime = SymphonyRuntime(
+                config=_claim_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            self.assertEqual([], workspace_manager.calls)
+            self.assertTrue(any("claim_failed" in line for line in logs.output))
+            self.assertTrue(any("post_claim_state_mismatch" in line for line in logs.output))
+
+    async def test_workspace_failure_after_claim_rolls_back_when_queued_state_set(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            workspace_manager = FailingWorkspaceManager(Path(temp_dir) / "workspaces")
+            runtime = SymphonyRuntime(
+                config=_claim_config(Path(temp_dir) / "workspaces", queued_state="Todo"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            # Two move calls: forward to In Progress, then back to Todo.
+            self.assertEqual(
+                [(target.id, "team-1", "In Progress"), (target.id, "team-1", "Todo")],
+                tracker.move_calls,
+            )
+            self.assertTrue(any("claim_rollback:" in line for line in logs.output))
+
+    async def test_workspace_failure_after_claim_logs_abandoned_when_no_queued_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            workspace_manager = FailingWorkspaceManager(Path(temp_dir) / "workspaces")
+            runtime = SymphonyRuntime(
+                config=_claim_config(Path(temp_dir) / "workspaces"),  # queued_state unset
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=workspace_manager,
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            with self.assertLogs("symphony.runtime", level="WARNING") as logs:
+                result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.failed)
+            # No rollback call — only the original forward move.
+            self.assertEqual([(target.id, "team-1", "In Progress")], tracker.move_calls)
+            self.assertTrue(any("claim_abandoned:" in line for line in logs.output))
+            # Regression: the outer retry handler must NOT enqueue a retry for
+            # abandoned claims. With allow_claimed_retry=True the next tick
+            # would otherwise re-dispatch the same ticket, potentially
+            # duplicating an agent if a concurrent instance is running it.
+            self.assertEqual({}, runtime.state.retry_attempts)
+            self.assertNotIn(target.id, runtime.state.claimed)
+
+    async def test_issues_already_in_in_progress_state_are_skipped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # The candidate is currently in "In Progress" — either claimed by
+            # another instance or being worked on by a human.
+            target = _team_issue(state="In Progress")
+            tracker = ClaimingFakeTracker([target])
+            runtime = SymphonyRuntime(
+                config=_claim_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual((), result.dispatched)
+            self.assertEqual([], tracker.move_calls)
+
+    async def test_legacy_mode_skips_claim_when_in_progress_state_unset(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = _team_issue()
+            tracker = ClaimingFakeTracker([target])
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),  # no in_progress_state
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            result = await runtime.run_tick()
+
+            self.assertEqual(("IN-501",), result.dispatched)
+            self.assertEqual([], tracker.move_calls)
+
+
 if __name__ == "__main__":
     unittest.main()

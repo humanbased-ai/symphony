@@ -26,3 +26,4 @@ class Issue:
     comments: tuple[str, ...] = field(default_factory=tuple)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    team_id: str | None = None

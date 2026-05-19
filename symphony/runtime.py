@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
+import socket
 import time
 import dataclasses
 from collections.abc import Callable
@@ -18,6 +20,7 @@ from symphony.orchestrator import (
     complete_worker_success,
     dispatch_issue,
     is_terminal_state,
+    normalize_state,
     reconcile_refreshed_issues,
     release_issue,
     select_dispatchable,
@@ -231,9 +234,76 @@ class SymphonyRuntime:
         entry = self.state.running[issue.id]
         workspace = None
         session = None
+        claimed_issue: Issue | None = None
+        claim_target = self.config.tracker.in_progress_state
 
         try:
-            workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
+            if claim_target:
+                try:
+                    claimed_issue = await self._claim_issue(issue, claim_target)
+                except _ClaimRejectedError as exc:
+                    LOGGER.warning(
+                        "claim_failed: issue=%s instance=%s reason=%s",
+                        issue.identifier,
+                        _instance_id(),
+                        exc,
+                    )
+                    release_issue(issue.id, self.state)
+                    self._notify_state_change()
+                    return _WorkerResult(success=False, error=f"claim_failed:{exc}")
+                except Exception as exc:  # noqa: BLE001 - any unexpected error aborts the claim.
+                    # Treat as transient (Linear 5xx, network blip, etc.) and
+                    # schedule a retry. Without this, the issue is recorded in
+                    # `_prev_candidate_ids` as "already seen" but stays out of
+                    # `retry_attempts`, so the next tick treats it as
+                    # pre-existing and never re-dispatches until it leaves and
+                    # re-enters the candidate set.
+                    LOGGER.warning(
+                        "claim_error: issue=%s instance=%s error=%s — scheduling retry",
+                        issue.identifier,
+                        _instance_id(),
+                        exc,
+                    )
+                    complete_worker_failure(
+                        issue.id,
+                        self.state,
+                        now_ms=self.clock_ms(),
+                        max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
+                        error=f"claim_error:{exc}",
+                    )
+                    self._notify_state_change()
+                    return _WorkerResult(success=False, error=f"claim_error:{exc}")
+                LOGGER.info(
+                    "claim_succeeded: issue=%s instance=%s state=%s",
+                    claimed_issue.identifier,
+                    _instance_id(),
+                    claimed_issue.state,
+                )
+                issue = claimed_issue
+                entry.issue = issue
+
+            try:
+                workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
+            except Exception as workspace_exc:
+                if claimed_issue is not None:
+                    # The claim flow owns the workspace-failure cleanup
+                    # path. After rollback (queued_state set) the operator
+                    # owns the next move; after claim_abandoned (queued_state
+                    # unset) operator inspection is required. In both cases
+                    # the outer retry handler MUST NOT additionally enqueue
+                    # a retry — with allow_claimed_retry=True the next tick
+                    # would re-dispatch the same ticket, potentially
+                    # duplicating an agent if a concurrent instance is
+                    # already running it.
+                    await self._rollback_claim_after_workspace_failure(
+                        claimed_issue, workspace_exc
+                    )
+                    release_issue(issue.id, self.state)
+                    self._notify_state_change()
+                    return _WorkerResult(
+                        success=False, error=f"workspace_failed:{workspace_exc}"
+                    )
+                raise
             _attach_runtime_entry_metadata(
                 entry,
                 workspace_path=getattr(workspace, "path", None),
@@ -286,6 +356,73 @@ class SymphonyRuntime:
                 await _maybe_await(self.runner.stop_session(session))
             self._notify_state_change()
 
+    async def _claim_issue(self, issue: Issue, claim_target: str) -> Issue:
+        """Move ``issue`` to ``claim_target`` and re-fetch to verify ownership (PRD §8.5)."""
+
+        move = getattr(self.tracker, "move_issue_to_state", None)
+        if move is None:
+            raise _ClaimRejectedError("tracker_missing_move_method")
+
+        await _call_sync(move, issue.id, issue.team_id, claim_target)
+        refreshed_list = list(
+            await _call_sync(self.tracker.fetch_issue_states_by_ids, [issue.id])
+        )
+        refreshed = next((item for item in refreshed_list if item.id == issue.id), None)
+        if refreshed is None:
+            raise _ClaimRejectedError("post_claim_refetch_empty")
+        if normalize_state(refreshed.state) != normalize_state(claim_target):
+            raise _ClaimRejectedError(
+                f"post_claim_state_mismatch:{refreshed.state}!={claim_target}"
+            )
+        return refreshed
+
+    async def _rollback_claim_after_workspace_failure(
+        self, claimed_issue: Issue, workspace_exc: BaseException
+    ) -> None:
+        """Apply PRD §8.5 step 4 rollback semantics on workspace-setup failure.
+
+        ``tracker.queued_state`` is the explicit rollback target. When unset
+        (the default, safe for multi-instance deployments), Symphony logs
+        ``claim_abandoned`` and leaves the issue in the in-progress state for
+        operator inspection — rolling back unconditionally could re-queue a
+        ticket that a concurrent instance is actively running.
+        """
+
+        queued_state = self.config.tracker.queued_state
+        if not queued_state:
+            LOGGER.warning(
+                "claim_abandoned: issue=%s instance=%s reason=%s",
+                claimed_issue.identifier,
+                _instance_id(),
+                workspace_exc,
+            )
+            return
+        move = getattr(self.tracker, "move_issue_to_state", None)
+        if move is None:
+            LOGGER.warning(
+                "claim_abandoned: issue=%s instance=%s reason=tracker_missing_move_method",
+                claimed_issue.identifier,
+                _instance_id(),
+            )
+            return
+        try:
+            await _call_sync(move, claimed_issue.id, claimed_issue.team_id, queued_state)
+        except Exception as exc:  # noqa: BLE001 - rollback is best-effort by design.
+            LOGGER.warning(
+                "claim_rollback_failed: issue=%s instance=%s error=%s",
+                claimed_issue.identifier,
+                _instance_id(),
+                exc,
+            )
+            return
+        LOGGER.warning(
+            "claim_rollback: issue=%s instance=%s state=%s reason=%s",
+            claimed_issue.identifier,
+            _instance_id(),
+            queued_state,
+            workspace_exc,
+        )
+
     async def _enrich_with_comments(self, issue: Issue) -> Issue:
         if not hasattr(self.tracker, "fetch_issue_comments"):
             return issue
@@ -322,6 +459,20 @@ class SymphonyRuntime:
 class _WorkerResult:
     success: bool
     error: str | None = None
+
+
+class _ClaimRejectedError(RuntimeError):
+    """Raised when the post-claim re-fetch shows the ticket is not owned by us."""
+
+
+def _instance_id() -> str:
+    """Return a host:pid string used to tag claim events for multi-instance triage."""
+
+    try:
+        host = socket.gethostname()
+    except OSError:
+        host = "unknown"
+    return f"{host}:{os.getpid()}"
 
 
 async def _maybe_await(value: Any) -> Any:
