@@ -406,24 +406,24 @@ class SymphonyRuntime:
     ) -> "_WorkerResult | None":
         """Resolve an approval-required turn failure per PRD §8.3.
 
-        Two paths:
+        Three configurations:
 
-        * ``tracker.approval_state`` is configured — move the issue to that
-          state via Linear and release the dispatch without scheduling a
-          retry. An out-of-band resolver (operator action, Phase 3 mobile
-          push, etc.) will move the issue out of ``approval_state`` when
-          ready, at which point Symphony picks it up again.
-        * ``tracker.approval_state`` is not configured — the configuration
-          is fail-closed: log ``approval_unreachable`` and park the issue
-          via ``complete_worker_terminal_failure`` (no retry, kept in
-          ``claimed`` so the same daemon does not re-dispatch). A subsequent
-          re-appearance in candidates after operator intervention releases
-          the zombie claim via ``_release_zombie_claims`` on the next tick.
-
-        Returns the ``_WorkerResult`` to propagate, or ``None`` if the
-        caller should fall through to the regular retry path (defensive —
-        not currently reachable because the caller only enters this branch
-        for known approval exit reasons).
+        * ``tracker.approval_state`` set — move the issue to that state via
+          Linear and release the dispatch without scheduling a retry. If the
+          move raises (Linear outage, unresolvable state name, etc.) we
+          schedule a normal retry instead of releasing, so the next tick
+          re-attempts the move rather than stranding the ticket in its
+          original active state.
+        * ``tracker.approval_state`` unset, ``tracker.failure_state`` set —
+          return ``None`` so the caller falls through to ``_terminate_run``
+          with reason ``approval_unreachable``. PRD §8.3 explicitly moves
+          such issues to ``failure_state``.
+        * Both unset — fail-closed park: log ``approval_unreachable`` and
+          park the issue via ``complete_worker_terminal_failure``. A
+          subsequent re-appearance in candidates after operator intervention
+          releases the zombie claim via ``_release_zombie_claims`` on the
+          next tick (intervention is detected by the issue being absent
+          from the prior tick's candidate snapshot).
         """
 
         approval_state = self.config.tracker.approval_state
@@ -435,27 +435,63 @@ class SymphonyRuntime:
                 approval_state,
             )
             move = getattr(self.tracker, "move_issue_to_state", None)
+            move_attempt_failed = False
+            terminal_misconfig = False
             if move is not None and issue.team_id:
                 try:
                     await _call_sync(move, issue.id, issue.team_id, approval_state)
-                except Exception as exc:  # noqa: BLE001 - move is best-effort.
+                except Exception as exc:  # noqa: BLE001 - retry on transient errors.
                     LOGGER.warning(
-                        "approval_state_move_failed: issue=%s error=%s",
+                        "approval_state_move_failed: issue=%s error=%s — scheduling retry",
                         issue.identifier,
                         exc,
                     )
+                    move_attempt_failed = True
             elif move is None:
                 LOGGER.warning(
                     "approval_state_move_skipped: issue=%s reason=tracker_missing_move_method",
                     issue.identifier,
                 )
+                terminal_misconfig = True
             else:
                 LOGGER.warning(
                     "approval_state_move_skipped: issue=%s reason=issue_missing_team_id",
                     issue.identifier,
                 )
+                terminal_misconfig = True
+
+            if move_attempt_failed:
+                # Transient: schedule a normal retry so the next tick retries
+                # the move. The ticket is still in the active candidate set,
+                # `complete_worker_failure` keeps it in `claimed` and adds a
+                # `RetryEntry` that `_dispatch_due_retries` picks up.
+                complete_worker_failure(
+                    issue.id,
+                    self.state,
+                    now_ms=self.clock_ms(),
+                    max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
+                    error="approval_state_move_failed",
+                )
+                return _WorkerResult(success=False, error="approval_state_move_failed")
+            if terminal_misconfig:
+                # The runtime cannot move this issue without operator action
+                # (no tracker mutation API, or no team_id on the issue). Park
+                # rather than retrying — looping won't help.
+                complete_worker_terminal_failure(issue.id, self.state)
+                return _WorkerResult(
+                    success=False, error="approval_state_move_skipped"
+                )
+
             release_issue(issue.id, self.state)
             return _WorkerResult(success=False, error="approval_pending")
+
+        if getattr(self.config.tracker, "failure_state", None):
+            # PRD §8.3 explicit: when failure_state IS configured (IN-289+),
+            # unresolvable approval moves there. Returning None signals the
+            # caller to route through `_terminate_run`. The `getattr` shape
+            # is required because IN-288's TrackerConfig predates the field;
+            # IN-289 adds it.
+            return None
 
         LOGGER.warning(
             "approval_unreachable: issue=%s exit_reason=%s — tracker.approval_state "
@@ -467,20 +503,22 @@ class SymphonyRuntime:
         return _WorkerResult(success=False, error="approval_unreachable")
 
     def _release_zombie_claims(self, candidates: list[Issue]) -> None:
-        """Release stale claims for issues that have re-appeared in candidates.
+        """Release stale claims after operator intervention.
 
         After a terminal failure (e.g., IN-288 ``approval_unreachable``),
         Symphony leaves the issue in ``state.claimed`` so the same daemon
-        does not re-dispatch it. If an operator later intervenes — moves
-        the issue out of and back into an active state, fixes the
-        ``approval_state`` config and hot-reloads, etc. — the in-memory
-        claim becomes a zombie that blocks ``should_dispatch`` forever.
+        does not re-dispatch it on the next tick — that would loop the
+        same failure on every poll. We only release the claim when the
+        operator has clearly intervened: the issue must currently be in
+        the candidate set AND have been ABSENT on the prior tick
+        (i.e., the operator moved it out of the active states and then
+        back in). That out-and-back motion is the only externally
+        observable signal of intent to re-dispatch.
 
-        Detection: any candidate whose id is in ``state.claimed`` but NOT
-        in ``state.running`` and NOT in ``state.retry_attempts`` is a
-        zombie — we have no active work for it, so the claim is stale.
-        Discard from claimed and from ``_prev_candidate_ids`` so it can
-        be treated as a new arrival.
+        Without this gate, a parked-approval issue that stays in the
+        active state would be released every tick and immediately
+        re-dispatched, defeating the no-retry contract of
+        ``complete_worker_terminal_failure``.
         """
 
         zombie_ids = {
@@ -490,15 +528,18 @@ class SymphonyRuntime:
                 issue.id in self.state.claimed
                 and issue.id not in self.state.running
                 and issue.id not in self.state.retry_attempts
+                # Operator intervention signal: issue was OUT of the
+                # candidate set last tick. Without this guard the release
+                # fires every tick a parked issue stays active.
+                and issue.id not in self._prev_candidate_ids
             )
         }
         for zombie_id in zombie_ids:
             LOGGER.info(
-                "claim_released: issue=%s reason=zombie_claim_after_terminal_failure",
+                "claim_released: issue=%s reason=operator_reintroduced_after_terminal_failure",
                 zombie_id,
             )
             self.state.claimed.discard(zombie_id)
-            self._prev_candidate_ids.discard(zombie_id)
 
     def _emit_blocker_skip_events(self, candidates: list[Issue], new_issue_ids: set[str]) -> None:
         """Log ``blocker_skip`` for newly-visible candidates held by upstream work (PRD §8.2).
