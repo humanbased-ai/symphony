@@ -142,10 +142,15 @@ def _base_issue_eligible(
         return False
     # When the claim guard is enabled, issues already in the in-progress state
     # are skipped — they are either claimed by another instance or being worked
-    # on by a human (PRD §8.5).
+    # on by a human (PRD §8.5). The exception is our own continuation retries:
+    # `complete_worker_success` leaves the issue in `state.retry_attempts` and
+    # `state.claimed` after a successful run, but the agent has typically also
+    # moved the Linear issue into `in_progress_state` during the run, so without
+    # this carve-out continuation retries would be permanently filtered.
     if (
         state.in_progress_state
         and normalize_state(issue.state) == normalize_state(state.in_progress_state)
+        and not (allow_claimed_retry and issue.id in state.retry_attempts)
     ):
         return False
     return True

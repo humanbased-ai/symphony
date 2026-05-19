@@ -239,6 +239,28 @@ class ClaimGuardTests(unittest.TestCase):
 
         self.assertTrue(should_dispatch(already_active, state))
 
+    def test_continuation_retry_for_claimed_issue_bypasses_in_progress_filter(self):
+        # Regression: after a successful run Symphony's agent leaves the
+        # Linear issue in `in_progress_state` and `complete_worker_success`
+        # schedules a continuation `RetryEntry`. The IN-290 filter must not
+        # reject the continuation retry when allow_claimed_retry=True;
+        # otherwise the daemon never fires its own continuation path while
+        # the issue stays in In Progress.
+        state = self._state()
+        target = issue("issue-1", "IN-290", state="In Progress")
+        state.claimed.add("issue-1")
+        state.retry_attempts["issue-1"] = RetryEntry(
+            issue_id="issue-1",
+            identifier="IN-290",
+            attempt=1,
+            due_at_ms=0,
+            error=None,
+        )
+
+        self.assertTrue(should_dispatch(target, state, allow_claimed_retry=True))
+        # And the same issue is still rejected without the retry permission.
+        self.assertFalse(should_dispatch(target, state))
+
 
 if __name__ == "__main__":
     unittest.main()

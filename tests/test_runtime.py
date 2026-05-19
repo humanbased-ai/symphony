@@ -518,7 +518,11 @@ class ClaimFlowTests(unittest.IsolatedAsyncioTestCase):
             # Workspace prep ran after the claim — verifies the order.
             self.assertIn(("prepare", "IN-501"), workspace_manager.calls)
 
-    async def test_claim_move_failure_releases_dispatch_without_retry(self):
+    async def test_transient_claim_error_schedules_retry(self):
+        # When `move_issue_to_state` raises (transient Linear 5xx, network
+        # blip, …) the issue must remain eligible — otherwise it ends up in
+        # `_prev_candidate_ids` as "already seen" but never on a retry queue
+        # and gets stranded until it leaves and re-enters the candidate set.
         with tempfile.TemporaryDirectory() as temp_dir:
             target = _team_issue()
             tracker = ClaimingFakeTracker([target], move_raises=RuntimeError("linear_500"))
@@ -536,8 +540,12 @@ class ClaimFlowTests(unittest.IsolatedAsyncioTestCase):
                 result = await runtime.run_tick()
 
             self.assertEqual(("IN-501",), result.failed)
-            self.assertEqual({}, runtime.state.retry_attempts)
-            self.assertNotIn(target.id, runtime.state.claimed)
+            self.assertIn(target.id, runtime.state.retry_attempts)
+            retry = runtime.state.retry_attempts[target.id]
+            self.assertEqual(1, retry.attempt)
+            self.assertIn("claim_error", retry.error or "")
+            # Claim retains the slot for the rescheduled attempt.
+            self.assertIn(target.id, runtime.state.claimed)
             # Workspace prep MUST NOT run when the claim fails.
             self.assertEqual([], workspace_manager.calls)
             self.assertTrue(any("claim_error" in line for line in logs.output))

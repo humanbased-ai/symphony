@@ -252,13 +252,25 @@ class SymphonyRuntime:
                     self._notify_state_change()
                     return _WorkerResult(success=False, error=f"claim_failed:{exc}")
                 except Exception as exc:  # noqa: BLE001 - any unexpected error aborts the claim.
+                    # Treat as transient (Linear 5xx, network blip, etc.) and
+                    # schedule a retry. Without this, the issue is recorded in
+                    # `_prev_candidate_ids` as "already seen" but stays out of
+                    # `retry_attempts`, so the next tick treats it as
+                    # pre-existing and never re-dispatches until it leaves and
+                    # re-enters the candidate set.
                     LOGGER.warning(
-                        "claim_error: issue=%s instance=%s error=%s",
+                        "claim_error: issue=%s instance=%s error=%s — scheduling retry",
                         issue.identifier,
                         _instance_id(),
                         exc,
                     )
-                    release_issue(issue.id, self.state)
+                    complete_worker_failure(
+                        issue.id,
+                        self.state,
+                        now_ms=self.clock_ms(),
+                        max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
+                        error=f"claim_error:{exc}",
+                    )
                     self._notify_state_change()
                     return _WorkerResult(success=False, error=f"claim_error:{exc}")
                 LOGGER.info(
