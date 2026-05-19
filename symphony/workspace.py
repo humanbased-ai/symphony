@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -18,9 +19,11 @@ from symphony.tracker.models import Issue
 LOGGER = logging.getLogger(__name__)
 HOOK_OUTPUT_LIMIT = 4_000
 WORKSPACE_MODE = stat.S_IRWXU
+METADATA_MODE = stat.S_IRUSR | stat.S_IWUSR
 _UNSAFE_WORKSPACE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _UNSAFE_BRANCH_CHARS = re.compile(r"[^A-Za-z0-9._/-]+")
 BARE_REPO_DIRNAME = ".repo.git"
+RUN_METADATA_SUFFIX = ".symphony-workspace.json"
 
 # Per-bare-repo asyncio locks so concurrent `prepare_for_run` calls that
 # share a bare repo serialize their clone/fetch step. Keyed by the resolved
@@ -82,7 +85,8 @@ class WorkspaceManager:
     * Git mode (`workspace.repo_url` configured): maintain a bare clone at
       `<root>/.repo.git` and materialize a fresh `git worktree` per dispatch at
       `<root>/<workspace_key>/<run_id>` on a unique branch. Cleanup forcibly
-      removes the worktree and deletes the branch.
+      removes the worktree and deletes the branch Symphony recorded at create
+      time, even if the worktree later checks out a different branch.
     * Plain mode (no `repo_url`): create an empty per-run directory at the same
       path; the agent populates it (typically via `gh repo clone`). Cleanup
       removes the per-run directory only.
@@ -137,6 +141,7 @@ class WorkspaceManager:
             run_log_path=run_log_path,
             created_now=True,
         )
+        self._write_run_metadata(handle)
 
         try:
             await self.run_hook("after_create", handle)
@@ -180,6 +185,7 @@ class WorkspaceManager:
 
         await self.run_hook("before_remove", workspace, best_effort=True)
         await self._remove_run_path(run_path, workspace.branch_name)
+        self._remove_run_metadata(workspace.workspace_key, workspace.run_id)
         # If no sibling runs remain for this issue, drop the parent dir too.
         parent = run_path.parent
         if parent != root and parent.exists() and parent.is_dir() and not any(parent.iterdir()):
@@ -225,12 +231,11 @@ class WorkspaceManager:
         if not issue_dir.is_dir():
             raise WorkspaceError("workspace_path_exists_not_directory")
 
-        branch_map = await self._list_worktree_branches()
         removed_any = False
         for entry in sorted(issue_dir.iterdir()):
             if not entry.is_dir():
                 continue
-            branch_name = branch_map.get(str(entry.resolve()))
+            branch_name = self._read_run_branch_name(workspace_key, entry.name)
             handle = Workspace(
                 path=entry,
                 workspace_key=workspace_key,
@@ -241,6 +246,7 @@ class WorkspaceManager:
             )
             await self.run_hook("before_remove", handle, best_effort=True)
             await self._remove_run_path(entry, branch_name)
+            self._remove_run_metadata(workspace_key, entry.name)
             removed_any = True
 
         if issue_dir.exists() and issue_dir.is_dir():
@@ -264,16 +270,14 @@ class WorkspaceManager:
             return 0
 
         bare = self._bare_repo_path()
-        # Capture branch map before any cleanup. Some worktree metadata may
-        # point at directories that were already deleted out-of-band by a
-        # crashed dispatch — those branches won't be reachable via the disk
-        # walk below and must be force-deleted separately after prune.
-        pre_branch_map = await self._list_worktree_branches() if bare.exists() else {}
-        orphan_branches = {
-            branch
-            for path, branch in pre_branch_map.items()
-            if branch and not Path(path).exists()
-        }
+        metadata_by_path = self._list_run_metadata()
+        orphan_metadata_paths: set[Path] = set()
+        orphan_branches: set[str] = set()
+        for run_path, (branch_name, metadata_path) in metadata_by_path.items():
+            if not Path(run_path).exists():
+                orphan_metadata_paths.add(metadata_path)
+                if branch_name:
+                    orphan_branches.add(branch_name)
 
         # Prune first so branches whose worktree directory has been deleted
         # out-of-band become eligible for ``git branch -D`` (otherwise git
@@ -291,8 +295,9 @@ class WorkspaceManager:
             for run_dir in sorted(issue_dir.iterdir()):
                 if not run_dir.is_dir():
                     continue
-                branch_name = pre_branch_map.get(str(run_dir.resolve()))
+                branch_name = metadata_by_path.get(str(run_dir.resolve()), (None, None))[0]
                 await self._remove_run_path(run_dir, branch_name)
+                self._remove_run_metadata(issue_dir.name, run_dir.name)
                 removed += 1
             if issue_dir.exists() and not any(issue_dir.iterdir()):
                 issue_dir.rmdir()
@@ -308,6 +313,11 @@ class WorkspaceManager:
                 LOGGER.warning(
                     "git branch -D %s failed during sweep: %s", branch_name, exc
                 )
+        for metadata_path in sorted(orphan_metadata_paths):
+            metadata_path.unlink(missing_ok=True)
+            issue_dir = metadata_path.parent
+            if issue_dir.exists() and issue_dir.is_dir() and not any(issue_dir.iterdir()):
+                issue_dir.rmdir()
 
         return removed
 
@@ -370,6 +380,9 @@ class WorkspaceManager:
     def _bare_repo_path(self) -> Path:
         return (self.workspace.root.expanduser().resolve() / BARE_REPO_DIRNAME).resolve()
 
+    def _metadata_path(self, workspace_key: str, run_id: str) -> Path:
+        return (self._issue_path(workspace_key) / f".{run_id}{RUN_METADATA_SUFFIX}").resolve()
+
     def _compute_run_log_path(self, workspace_key: str, run_id: str) -> Path | None:
         if self.logs_root is None:
             return None
@@ -394,38 +407,59 @@ class WorkspaceManager:
         prefix = self.workspace.branch_prefix or ""
         return f"{prefix}{sanitized}-{run_id}"
 
-    async def _list_worktree_branches(self) -> dict[str, str]:
-        """Return ``{worktree_path: branch_name}`` from ``git worktree list --porcelain``.
+    def _write_run_metadata(self, workspace: Workspace) -> None:
+        metadata_path = self._metadata_path(workspace.workspace_key, workspace.run_id)
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "workspace_key": workspace.workspace_key,
+                    "run_id": workspace.run_id,
+                    "branch_name": workspace.branch_name,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        metadata_path.chmod(METADATA_MODE)
 
-        Empty when there is no bare repo (plain mode) or when the listing
-        fails. Plain-mode callers ignore the result and rmtree per-run dirs as
-        before; git-mode callers use it to look up the branch that was created
-        by ``git worktree add -b`` so cleanup can ``git branch -D`` it after
-        the worktree is removed.
-        """
-
-        bare = self._bare_repo_path()
-        if not bare.exists():
-            return {}
+    def _read_run_branch_name(self, workspace_key: str, run_id: str) -> str | None:
+        metadata_path = self._metadata_path(workspace_key, run_id)
+        if not metadata_path.exists():
+            return None
         try:
-            stdout, _ = await _run_git(bare, ["worktree", "list", "--porcelain"])
-        except GitCommandError as exc:
-            LOGGER.warning("git worktree list failed: %s", exc)
-            return {}
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            LOGGER.warning("Failed to read workspace metadata %s: %s", metadata_path, exc)
+            return None
+        branch_name = data.get("branch_name")
+        return branch_name if isinstance(branch_name, str) and branch_name else None
 
-        result: dict[str, str] = {}
-        current_path: str | None = None
-        for line in stdout.splitlines():
-            if line.startswith("worktree "):
-                current_path = line[len("worktree ") :].strip()
-            elif line.startswith("branch ") and current_path is not None:
-                ref = line[len("branch ") :].strip()
-                if ref.startswith("refs/heads/"):
-                    result[str(Path(current_path).resolve())] = ref[len("refs/heads/") :]
-                else:
-                    result[str(Path(current_path).resolve())] = ref
-            elif not line.strip():
-                current_path = None
+    def _remove_run_metadata(self, workspace_key: str, run_id: str) -> None:
+        self._metadata_path(workspace_key, run_id).unlink(missing_ok=True)
+
+    def _list_run_metadata(self) -> dict[str, tuple[str | None, Path]]:
+        root = self.workspace.root.expanduser().resolve()
+        result: dict[str, tuple[str | None, Path]] = {}
+        if not root.exists():
+            return result
+        for issue_dir in sorted(root.iterdir()):
+            if not issue_dir.is_dir() or issue_dir.name == BARE_REPO_DIRNAME:
+                continue
+            for metadata_path in sorted(issue_dir.glob(f"*{RUN_METADATA_SUFFIX}")):
+                try:
+                    data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    LOGGER.warning("Failed to read workspace metadata %s: %s", metadata_path, exc)
+                    continue
+                run_id = data.get("run_id")
+                if not isinstance(run_id, str) or not run_id:
+                    continue
+                branch_name = data.get("branch_name")
+                if not isinstance(branch_name, str):
+                    branch_name = None
+                run_path = self._run_path(issue_dir.name, run_id)
+                result[str(run_path)] = (branch_name, metadata_path)
         return result
 
     async def _materialize_git_worktree(self, run_path: Path, branch_name: str | None) -> None:
@@ -499,6 +533,8 @@ class WorkspaceManager:
                 workspace.path,
                 exc_info=True,
             )
+        finally:
+            self._remove_run_metadata(workspace.workspace_key, workspace.run_id)
 
 
 def sanitize_workspace_key(issue_identifier: str) -> str:
