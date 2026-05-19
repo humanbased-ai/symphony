@@ -138,7 +138,10 @@ def _base_issue_eligible(
         return False
     if issue.id in state.claimed and not (allow_claimed_retry and issue.id in state.retry_attempts):
         return False
-    if normalize_state(issue.state) == "todo" and _has_non_terminal_blocker(issue, state):
+    # Blocker eligibility gate (PRD §8.2, IN-287). Applies to ANY active issue,
+    # not just Todo — an "In Progress" ticket whose upstream regressed should
+    # not be picked up for a continuation retry either.
+    if unresolved_blockers(issue, state):
         return False
     # When the claim guard is enabled, issues already in the in-progress state
     # are skipped — they are either claimed by another instance or being worked
@@ -317,9 +320,23 @@ def _dispatch_sort_key(issue: Issue) -> tuple[int, bool, datetime, str]:
     return (priority, issue.created_at is None, created_at, issue.identifier)
 
 
-def _has_non_terminal_blocker(issue: Issue, state: OrchestratorState) -> bool:
+def unresolved_blockers(issue: Issue, state: OrchestratorState) -> tuple:
+    """Return the tuple of blockers on ``issue`` whose state is not terminal.
+
+    Public so the runtime can log structured ``blocker_skip`` events with the
+    list of upstream identifiers (PRD §8.2).
+    """
+
     terminal_states = {normalize_state(item) for item in state.terminal_states}
-    return any(normalize_state(blocker.state) not in terminal_states for blocker in issue.blocked_by)
+    return tuple(
+        blocker
+        for blocker in issue.blocked_by
+        if normalize_state(blocker.state) not in terminal_states
+    )
+
+
+def _has_non_terminal_blocker(issue: Issue, state: OrchestratorState) -> bool:
+    return bool(unresolved_blockers(issue, state))
 
 
 def _pop_running(issue_id: str, state: OrchestratorState) -> RunningEntry:

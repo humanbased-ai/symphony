@@ -19,6 +19,7 @@ from symphony.orchestrator import (
     complete_worker_failure,
     complete_worker_success,
     dispatch_issue,
+    is_active_state,
     is_terminal_state,
     normalize_state,
     reconcile_refreshed_issues,
@@ -26,6 +27,7 @@ from symphony.orchestrator import (
     select_dispatchable,
     should_dispatch,
     stalled_issue_ids,
+    unresolved_blockers,
 )
 from symphony.tracker.models import Issue
 from symphony.workflow import WorkflowDefinition, render_prompt
@@ -82,6 +84,13 @@ class SymphonyRuntime:
         # first tick to seed this with the currently-active set, which makes
         # pre-existing issues invisible until they leave and re-enter active states.
         self._prev_candidate_ids: set[str] = set()
+        # Track candidates that were filtered out by the blocker gate (PRD §8.2)
+        # last tick. When an issue transitions from blocked → unblocked across
+        # ticks, we re-add it to ``new_issue_ids`` so dispatch reconsiders it
+        # even though it's not technically a new arrival — otherwise non-Todo
+        # blocked candidates that became unblocked while their candidate row
+        # stayed stable would be stranded forever.
+        self._prev_blocked_ids: set[str] = set()
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -92,10 +101,26 @@ class SymphonyRuntime:
 
         current_ids = {issue.id for issue in candidates}
         new_issue_ids = current_ids - self._prev_candidate_ids
+
+        # PR #36 recheck: issues whose blockers resolved between ticks are
+        # NOT in new_issue_ids (they were marked seen last tick), but they
+        # ARE eligible now. Detect blocked → unblocked transitions and
+        # re-add them so the dispatch path reconsiders them this tick.
+        currently_blocked_ids = {
+            issue.id
+            for issue in candidates
+            if is_active_state(issue, self.state)
+            and unresolved_blockers(issue, self.state)
+        }
+        newly_unblocked_ids = (self._prev_blocked_ids - currently_blocked_ids) & current_ids
+        new_issue_ids |= newly_unblocked_ids
+        self._prev_blocked_ids = currently_blocked_ids
         self._prev_candidate_ids = current_ids
 
         released = await self._release_due_retries_missing_from_candidates(candidates)
         dispatched_issues = self._dispatch_due_retries(candidates, now_ms=now_ms)
+
+        self._emit_blocker_skip_events(candidates, new_issue_ids)
 
         eligible = [issue for issue in candidates if issue.id in new_issue_ids]
         remaining = [issue for issue in eligible if issue.id not in {item.id for item in dispatched_issues}]
@@ -355,6 +380,33 @@ class SymphonyRuntime:
             if session is not None and hasattr(self.runner, "stop_session"):
                 await _maybe_await(self.runner.stop_session(session))
             self._notify_state_change()
+
+    def _emit_blocker_skip_events(self, candidates: list[Issue], new_issue_ids: set[str]) -> None:
+        """Log ``blocker_skip`` for newly-visible candidates held by upstream work (PRD §8.2).
+
+        Only emitted for newly-visible candidates (issues not seen on the prior
+        tick) to keep log volume bounded — a long-blocked ticket would
+        otherwise log every poll interval. Reconsidered on each new arrival.
+        """
+
+        for issue in candidates:
+            if issue.id not in new_issue_ids:
+                continue
+            if not is_active_state(issue, self.state):
+                continue
+            if issue.id in self.state.running or issue.id in self.state.claimed:
+                continue
+            blockers = unresolved_blockers(issue, self.state)
+            if not blockers:
+                continue
+            blocker_ids = ",".join(
+                blocker.identifier or blocker.id or "?" for blocker in blockers
+            )
+            LOGGER.info(
+                "blocker_skip: issue=%s blockers=%s",
+                issue.identifier,
+                blocker_ids,
+            )
 
     async def _claim_issue(self, issue: Issue, claim_target: str) -> Issue:
         """Move ``issue`` to ``claim_target`` and re-fetch to verify ownership (PRD §8.5)."""

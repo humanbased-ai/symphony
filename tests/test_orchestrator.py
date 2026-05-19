@@ -15,6 +15,7 @@ from symphony.orchestrator import (
     select_dispatchable,
     should_dispatch,
     stalled_issue_ids,
+    unresolved_blockers,
 )
 from symphony.tracker.models import Blocker, Issue
 
@@ -140,6 +141,18 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertTrue(should_dispatch(unblocked, state))
 
+    def test_in_progress_issue_with_open_blocker_is_also_filtered(self):
+        # IN-287 expanded the blocker gate from Todo-only to all active states.
+        state = self.state()
+        blocked = issue(
+            "issue-1",
+            "IN-287",
+            state="In Progress",
+            blocked_by=(Blocker(id="blocker-1", identifier="IN-100", state="Todo"),),
+        )
+
+        self.assertFalse(should_dispatch(blocked, state))
+
     def test_worker_success_schedules_short_continuation_retry(self):
         state = self.state()
         dispatch_issue(issue("issue-1", "IN-169"), state, now_ms=100)
@@ -201,6 +214,51 @@ class OrchestratorTests(unittest.TestCase):
         )
         self.assertEqual({}, state.running)
         self.assertEqual(set(), state.claimed)
+
+
+class BlockerGateTests(unittest.TestCase):
+    def _state(self) -> OrchestratorState:
+        config = WorkflowConfig.from_mapping(
+            {
+                "tracker": {
+                    "kind": "linear",
+                    "active_states": ["Todo", "In Progress"],
+                    "terminal_states": ["Done", "Canceled"],
+                },
+                "agent": {"max_concurrent_agents": 2},
+                "polling": {"interval_ms": 5_000},
+            }
+        )
+        return OrchestratorState.from_config(config)
+
+    def test_unresolved_blockers_returns_only_non_terminal(self):
+        state = self._state()
+        target = issue(
+            "issue-1",
+            "IN-100",
+            blocked_by=(
+                Blocker(id="b1", identifier="IN-1", state="Done"),
+                Blocker(id="b2", identifier="IN-2", state="Todo"),
+                Blocker(id="b3", identifier="IN-3", state="Canceled"),
+            ),
+        )
+
+        blockers = unresolved_blockers(target, state)
+
+        self.assertEqual(["IN-2"], [b.identifier for b in blockers])
+
+    def test_blocked_issue_is_excluded_from_select_dispatchable(self):
+        state = self._state()
+        clean = issue("issue-1", "IN-001")
+        blocked = issue(
+            "issue-2",
+            "IN-002",
+            blocked_by=(Blocker(id="b1", identifier="IN-9", state="In Progress"),),
+        )
+
+        selected = select_dispatchable([clean, blocked], state)
+
+        self.assertEqual(["issue-1"], [item.id for item in selected])
 
 
 class ClaimGuardTests(unittest.TestCase):

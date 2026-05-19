@@ -5,6 +5,11 @@ release tag is created.
 
 ## Unreleased
 
+- Blocker eligibility gate (IN-287): any candidate issue with an unresolved
+  blocking relationship in Linear is skipped from dispatch (previously only
+  Todo issues were filtered). A `blocker_skip: issue=… blockers=…` info-level
+  event is logged when a blocked candidate first appears in the poll snapshot,
+  giving operators visibility into upstream-held work without flooding logs.
 - Best-effort state-transition claim before dispatch (IN-290): when
   `tracker.in_progress_state` is configured, Symphony moves the issue to that
   state via Linear `updateIssue` before launching the agent and re-fetches to
