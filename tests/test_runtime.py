@@ -433,6 +433,61 @@ class BlockerGateTests(unittest.IsolatedAsyncioTestCase):
                 logs.output,
             )
 
+    async def test_unblocked_candidate_becomes_dispatchable_on_next_tick(self):
+        # Regression: a non-Todo candidate that first appears blocked is
+        # marked seen via _prev_candidate_ids. If the blocker later resolves
+        # while the candidate row stays in the same active state, it's no
+        # longer "new" in the candidate diff — without the blocked→unblocked
+        # tracking the issue is stranded forever.
+        from symphony.tracker.models import Blocker
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            blocker = Blocker(id="b1", identifier="IN-UP", state="In Progress")
+            blocked = Issue(
+                id="issue-X",
+                identifier="IN-X",
+                title="held by upstream",
+                description=None,
+                priority=1,
+                state="In Progress",  # non-Todo active state
+                branch_name=None,
+                url=None,
+                blocked_by=(blocker,),
+            )
+            tracker = FakeTracker([blocked])
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="x",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(10_000),
+            )
+
+            # Tick 1: blocked → not dispatched, marked seen.
+            result1 = await runtime.run_tick()
+            self.assertEqual((), result1.dispatched)
+            self.assertIn(blocked.id, runtime._prev_blocked_ids)
+
+            # Tick 2: blocker resolves (Done). The candidate row is the same
+            # but the blocker state changed. Must be re-evaluated for dispatch.
+            unblocked = Issue(
+                id=blocked.id,
+                identifier=blocked.identifier,
+                title=blocked.title,
+                description=blocked.description,
+                priority=blocked.priority,
+                state=blocked.state,
+                branch_name=None,
+                url=None,
+                blocked_by=(Blocker(id="b1", identifier="IN-UP", state="Done"),),
+            )
+            tracker.candidates = [unblocked]
+
+            result2 = await runtime.run_tick()
+            self.assertEqual(("IN-X",), result2.dispatched)
+            self.assertNotIn(unblocked.id, runtime._prev_blocked_ids)
+
     async def test_blocker_skip_only_logged_on_first_appearance(self):
         from symphony.tracker.models import Blocker
 
