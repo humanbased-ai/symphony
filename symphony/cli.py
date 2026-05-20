@@ -1214,6 +1214,7 @@ def _run_starter_mission(
         body = _gql(_STARTER_TEAM_STATES_QUERY, {"teamId": team_id})
         states = ((body.get("data") or {}).get("workflowStates") or {}).get("nodes") or []
         state_id: str | None = states[0]["id"] if states else None
+        state_name: str | None = states[0].get("name") if states else None
 
         # Step 3: find or create project
         body = _gql(_STARTER_FIND_PROJECT_QUERY, {"name": "symphony-hello-world"})
@@ -1248,7 +1249,7 @@ def _run_starter_mission(
             print(f"  Using existing issue: {issue_title}")
         else:
             print("  Creating sample issue …")
-            _gql(
+            issue_body = _gql(
                 _STARTER_CREATE_ISSUE_MUTATION,
                 {
                     "title": issue_title,
@@ -1258,6 +1259,12 @@ def _run_starter_mission(
                     "stateId": state_id,
                 },
             )
+            issue_result = (issue_body.get("data") or {}).get("issueCreate") or {}
+            if not issue_result.get("success"):
+                errors = issue_body.get("errors") or []
+                msg = errors[0].get("message") if errors else "unknown error"
+                print(f"  Failed to create issue: {msg}")
+                return False
             print(f"    ✓ {issue_title}")
 
         # Step 5: generate WORKFLOW.md
@@ -1269,6 +1276,7 @@ def _run_starter_mission(
             runner=runner,
             github_org=github_org,
             github_repo=github_repo,
+            active_states=(state_name,) if state_name else DEFAULT_ACTIVE_STATES,
         )
         import re as _re
         demo_content = _re.sub(
@@ -1832,7 +1840,9 @@ def _check_linear_key_valid(token: str, endpoint: str = "https://api.linear.app/
     try:
         with _req.urlopen(request, timeout=10) as resp:
             data = _json.loads(resp.read())
-            viewer = (data.get("data") or {}).get("viewer") or {}
+            viewer = (data.get("data") or {}).get("viewer")
+            if not viewer:
+                return False, "invalid key — check LINEAR_API_KEY or run: symphony init --linear-api-key"
             name = viewer.get("name") or viewer.get("id") or "authenticated"
             return True, f"valid (logged in as {name})"
     except _urlerr.HTTPError as exc:
