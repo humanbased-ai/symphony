@@ -201,7 +201,8 @@ class ClaudeCodeRunner(CLIAgentRunner):
                     ))
 
             elif event_type == "assistant":
-                text = _extract_text(event.get("message", {}).get("content", []))
+                content = event.get("message", {}).get("content", [])
+                text = _extract_text(content)
                 if text:
                     await on_event(AgentEvent(
                         type=AgentEventType.NOTIFICATION,
@@ -210,6 +211,44 @@ class ClaudeCodeRunner(CLIAgentRunner):
                         session_id=state.session_id or session.id,
                         message=text[:500],
                         data={"event": "assistant_message"},
+                    ))
+                # Tool routing: each tool_use block becomes its own NOTIFICATION
+                # so operators can see "Claude called Bash: …" in the dashboard.
+                for tool_use in _extract_tool_uses(content):
+                    summary = _summarize_tool_input(tool_use["name"], tool_use["input"])
+                    await on_event(AgentEvent(
+                        type=AgentEventType.NOTIFICATION,
+                        issue_id=issue.id,
+                        issue_identifier=issue.identifier,
+                        session_id=state.session_id or session.id,
+                        message=f"{tool_use['name']}: {summary}"[:500],
+                        data={
+                            "event": "tool_use",
+                            "tool_name": tool_use["name"],
+                            "tool_use_id": tool_use.get("id"),
+                            "tool_input": tool_use.get("input"),
+                        },
+                    ))
+
+            elif event_type == "user":
+                # Tool results return as user-role messages with tool_result
+                # blocks. Surface only failures by default (success is implied
+                # by the next assistant message); errors are worth observing.
+                content = event.get("message", {}).get("content", [])
+                for tool_result in _extract_tool_results(content):
+                    if not tool_result.get("is_error"):
+                        continue
+                    snippet = _extract_text_content(tool_result.get("content"))
+                    await on_event(AgentEvent(
+                        type=AgentEventType.NOTIFICATION,
+                        issue_id=issue.id,
+                        issue_identifier=issue.identifier,
+                        session_id=state.session_id or session.id,
+                        message=f"tool_error: {snippet[:400]}",
+                        data={
+                            "event": "tool_result_error",
+                            "tool_use_id": tool_result.get("tool_use_id"),
+                        },
                     ))
 
             elif event_type == "result":
@@ -223,33 +262,54 @@ class ClaudeCodeRunner(CLIAgentRunner):
                         raw_usage.get("output_tokens", 0),
                     )
                 subtype = event.get("subtype", "")
+                stop_reason = event.get("stop_reason", "")
                 is_error = event.get("is_error", False)
                 result_text = event.get("result", "")
+                cache_creation = raw_usage.get("cache_creation_input_tokens", 0)
+                cache_read = raw_usage.get("cache_read_input_tokens", 0)
 
-                if is_error or subtype.startswith("error"):
+                exit_reason = _claude_exit_reason(
+                    is_error=is_error,
+                    subtype=subtype,
+                    stop_reason=stop_reason,
+                )
+
+                event_data: dict[str, Any] = {
+                    "subtype": subtype,
+                    "stop_reason": stop_reason,
+                }
+                if cache_creation or cache_read:
+                    event_data["cache_tokens"] = {
+                        "creation": cache_creation,
+                        "read": cache_read,
+                    }
+
+                if is_error or subtype.startswith("error") or stop_reason in {"max_tokens", "stop_sequence"}:
+                    event_data["event"] = "turn_failed"
                     await on_event(AgentEvent(
                         type=AgentEventType.TURN_FAILED,
                         issue_id=issue.id,
                         issue_identifier=issue.identifier,
                         session_id=state.session_id or session.id,
-                        message=result_text or subtype or "claude_error",
-                        data={"event": "turn_failed", "subtype": subtype},
+                        message=result_text or exit_reason or "claude_error",
+                        data=event_data,
                     ))
                     return TurnResult(
                         success=False,
-                        exit_reason=subtype or "turn_failed",
+                        exit_reason=exit_reason,
                         usage=usage,
                     )
 
+                event_data["event"] = "turn_completed"
                 await on_event(AgentEvent(
                     type=AgentEventType.TURN_COMPLETED,
                     issue_id=issue.id,
                     issue_identifier=issue.identifier,
                     session_id=state.session_id or session.id,
                     message=(result_text[:500] if result_text else "Turn completed."),
-                    data={"event": "turn_completed", "subtype": subtype},
+                    data=event_data,
                 ))
-                return TurnResult(success=True, exit_reason="turn_completed", usage=usage)
+                return TurnResult(success=True, exit_reason=exit_reason, usage=usage)
 
         returncode = await process.wait()
         return TurnResult(
@@ -266,6 +326,77 @@ def _extract_text(content: list[Any]) -> str:
         if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
     ]
     return " ".join(parts)
+
+
+def _extract_tool_uses(content: list[Any]) -> list[dict[str, Any]]:
+    """Pull tool_use blocks out of an assistant message's content."""
+    return [
+        block
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name")
+    ]
+
+
+def _extract_tool_results(content: list[Any]) -> list[dict[str, Any]]:
+    """Pull tool_result blocks out of a user message's content."""
+    return [
+        block
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+
+
+def _extract_text_content(content: Any) -> str:
+    """Normalize tool_result.content (string or block list) to a string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return _extract_text(content)
+    return ""
+
+
+def _summarize_tool_input(tool_name: str, tool_input: Any) -> str:
+    """Produce a short, log-friendly summary of a tool call's input.
+
+    Avoids dumping full Edit diffs or Read content into the event log while
+    still giving operators a recognizable signal (file path, bash command,
+    glob pattern, etc.). Falls back to the tool name when nothing matches.
+    """
+
+    if not isinstance(tool_input, dict):
+        return ""
+    # Common Claude Code tool input shapes.
+    for key in ("command", "file_path", "path", "pattern", "url", "query", "description"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return ""
+
+
+# Map Claude's stop_reason values into a stable Symphony exit_reason string.
+# `end_turn` is the normal completion; `tool_use` means the turn ended because
+# Claude wants a tool result (handled separately in the streaming loop, so by
+# the time we see it in the result event it's the terminal stop).
+_CLAUDE_STOP_REASON_MAP = {
+    "end_turn": "turn_completed",
+    "tool_use": "turn_completed",
+    "stop_sequence": "stop_sequence",
+    "max_tokens": "max_tokens",
+    "refusal": "safety_refusal",
+}
+
+
+def _claude_exit_reason(*, is_error: bool, subtype: str, stop_reason: str) -> str:
+    if is_error:
+        return subtype or "claude_error"
+    if subtype.startswith("error"):
+        return subtype
+    if stop_reason in _CLAUDE_STOP_REASON_MAP:
+        return _CLAUDE_STOP_REASON_MAP[stop_reason]
+    # subtype="success" with no stop_reason is the common success path —
+    # preserve the legacy `turn_completed` exit_reason for back-compat with
+    # `complete_worker_success` and dashboard counters keyed on it.
+    return "turn_completed"
 
 
 async def _drain_stderr(process: asyncio.subprocess.Process) -> None:
