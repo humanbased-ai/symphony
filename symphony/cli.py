@@ -1171,12 +1171,54 @@ def setup_environment_checks(
     return checks
 
 
+CHECK_WARN_PREFIX = "warn:"
+
+
 def print_setup_checks(title: str, checks: Sequence[tuple[bool, str, str]]) -> None:
+    """Render a tri-state status table (green=pass, yellow=warn, red=fail).
+
+    A check is rendered as a warning when ``ok=True`` and its detail starts with
+    the ``warn:`` prefix (the existing convention used by `claim guard`,
+    `failure state`, and similar doctor rows that are non-fatal but worth
+    surfacing). The prefix is stripped from the displayed detail so callers
+    do not need to format it themselves.
+    """
+
     print(f"\n{_bold(title)}:")
+    pass_count = 0
+    warn_count = 0
+    fail_count = 0
     for ok, label, detail in checks:
-        icon = _ok("✓") if ok else _fail("✗")
-        detail_text = _dim(detail) if ok else _warn(detail)
+        is_warn = bool(ok) and isinstance(detail, str) and detail.lstrip().lower().startswith(CHECK_WARN_PREFIX)
+        if is_warn:
+            stripped = detail.lstrip()[len(CHECK_WARN_PREFIX):].lstrip()
+            icon = _warn("⚠")
+            detail_text = _warn(stripped)
+            warn_count += 1
+        elif ok:
+            icon = _ok("✓")
+            detail_text = _dim(detail)
+            pass_count += 1
+        else:
+            icon = _fail("✗")
+            detail_text = _fail(detail)
+            fail_count += 1
         print(f"  {icon} {label:<20} {detail_text}")
+
+    # Single-line tally so the operator can see at a glance whether the
+    # configuration is ready before reading the per-row detail. Always
+    # emitted (even when the list is empty) so test harnesses can assert
+    # presence; suppressed for empty lists to avoid a stray line.
+    if checks:
+        parts = []
+        if pass_count:
+            parts.append(_ok(f"{pass_count} ok"))
+        if warn_count:
+            parts.append(_warn(f"{warn_count} warning{'' if warn_count == 1 else 's'}"))
+        if fail_count:
+            parts.append(_fail(f"{fail_count} missing"))
+        if parts:
+            print(_dim("  ") + " · ".join(parts))
 
 
 def _linear_setup_auth_source(

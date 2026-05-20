@@ -535,6 +535,39 @@ class PrintSetupChecksTests(unittest.TestCase):
             print_setup_checks("My Title", [])
         self.assertIn("My Title", out.getvalue())
 
+    def test_warn_prefix_renders_as_warning_state(self):
+        # IN-283: a check tuple (True, label, "warn: …") renders as a
+        # yellow warning (⚠) rather than a green pass, and the prefix is
+        # stripped from the displayed detail.
+        checks = [
+            (True, "linear auth", "LINEAR_API_KEY"),
+            (True, "claim guard", "warn: tracker.in_progress_state not set"),
+            (False, "gh command", "not found"),
+        ]
+        out = StringIO()
+        with redirect_stdout(out):
+            print_setup_checks("Environment scan", checks)
+        rendered = out.getvalue()
+        self.assertIn("⚠", rendered)
+        # warn: prefix is stripped in the rendered output
+        self.assertNotIn("warn: tracker", rendered)
+        self.assertIn("tracker.in_progress_state not set", rendered)
+
+    def test_summary_tally_reports_counts(self):
+        # IN-283: a single-line tally at the bottom of the table.
+        checks = [
+            (True, "linear auth", "LINEAR_API_KEY"),
+            (True, "claim guard", "warn: not set"),
+            (False, "gh command", "not found"),
+        ]
+        out = StringIO()
+        with redirect_stdout(out):
+            print_setup_checks("Environment scan", checks)
+        rendered = out.getvalue()
+        self.assertIn("1 ok", rendered)
+        self.assertIn("1 warning", rendered)
+        self.assertIn("1 missing", rendered)
+
 
 class OnboardAutoDetectTests(unittest.TestCase):
     def test_onboard_auto_fills_github_from_remote(self):
