@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Literal, Mapping
 
 import yaml
 
@@ -13,6 +15,22 @@ DEFAULT_WORKFLOW_PATH = "WORKFLOW.md"
 DEFAULT_ACTIVE_STATES = ("Todo", "In Progress")
 DEFAULT_TERMINAL_STATES = ("Done", "Canceled", "Duplicate")
 DEFAULT_RUNNER = "claude_code"
+
+# Monorepo signal files. Presence of any one of these at the repo root flips
+# detection from "single" to "monorepo" so the generated prompt can include
+# the self-scoping preamble (IN-284).
+_MONOREPO_SIGNAL_FILES = (
+    "pnpm-workspace.yaml",
+    "pnpm-workspace.yml",
+    "nx.json",
+    "lerna.json",
+    "rush.json",
+    "go.work",
+    "turbo.json",
+)
+
+RepoMode = Literal["new", "monorepo", "single"]
+DEFAULT_REPO_MODE: RepoMode = "single"
 
 
 @dataclass(frozen=True)
@@ -64,6 +82,7 @@ class InitConfig:
     runner: str = DEFAULT_RUNNER
     github_org: str = ""
     github_repo: str = ""
+    repo_mode: RepoMode = DEFAULT_REPO_MODE
 
 
 class OnboardingError(ValueError):
@@ -113,7 +132,45 @@ def generate_workflow(config: InitConfig) -> str:
         }
         prompt = _CODEX_PROMPT
 
+    preamble = _repo_mode_preamble(config.repo_mode, config.github_org, config.github_repo)
+    if preamble:
+        prompt = f"{preamble}\n\n{prompt}"
+
     return f"---\n{yaml.safe_dump(front_matter, sort_keys=False)}---\n\n{prompt}"
+
+
+_MONOREPO_PREAMBLE = """\
+## Monorepo scope (IN-284)
+
+This repository is a monorepo. Before implementing, identify the smallest
+subpackage that owns the change requested by the issue and treat that
+directory as your working scope. Avoid touching unrelated workspaces in
+the same commit. Reference the relevant subpackage paths in the PR body.
+"""
+
+_NEW_PROJECT_PREAMBLE = """\
+## New project scope (IN-284)
+
+No git remote is configured for this workspace. Before the dispatch flow
+below can run, an operator must create the GitHub repository:
+
+  gh repo create __GITHUB_ORG__/__GITHUB_REPO__ --public --source=. --remote=origin
+
+Or replace the clone step in the prompt with the equivalent push-to-new-repo
+sequence. Until a remote exists, the dispatch will fail at the clone step.
+"""
+
+
+def _repo_mode_preamble(mode: RepoMode, github_org: str, github_repo: str) -> str:
+    if mode == "monorepo":
+        return _MONOREPO_PREAMBLE
+    if mode == "new":
+        return (
+            _NEW_PROJECT_PREAMBLE
+            .replace("__GITHUB_ORG__", github_org or "YOUR_ORG")
+            .replace("__GITHUB_REPO__", github_repo or "YOUR_REPO")
+        )
+    return ""
 
 
 _CODEX_PROMPT = """You are working on Linear issue {{ issue.identifier }}.
@@ -189,6 +246,61 @@ def parse_state_list(raw: str | None, default: tuple[str, ...]) -> tuple[str, ..
 def default_workspace_root(project_slug: str) -> str:
     suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", project_slug.strip()).strip("-")
     return f"~/.symphony/workspaces/{suffix or 'linear'}"
+
+
+def detect_repo_shape(cwd: str | Path | None = None) -> RepoMode:
+    """Auto-detect the shape of the repository at ``cwd`` (IN-284).
+
+    Returns one of:
+
+    * ``"new"`` — no git directory or no remote configured. Operator likely
+      wants ``gh repo create`` flow; the workflow's clone step is replaced
+      with a project-creation hint.
+    * ``"monorepo"`` — root contains a recognized workspace signal file
+      (pnpm-workspace.yaml, nx.json, lerna.json, rush.json, go.work,
+      turbo.json) OR a top-level ``packages/`` directory OR an npm
+      ``package.json`` declaring ``workspaces``. The generated prompt
+      includes a self-scoping preamble.
+    * ``"single"`` — has a git remote and no monorepo signals. The default.
+    """
+
+    root = Path(cwd).expanduser().resolve() if cwd is not None else Path.cwd().resolve()
+
+    git_dir = root / ".git"
+    if not git_dir.exists():
+        return "new"
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "remote"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if result is None or result.returncode != 0 or not result.stdout.strip():
+        return "new"
+
+    for signal in _MONOREPO_SIGNAL_FILES:
+        if (root / signal).exists():
+            return "monorepo"
+
+    packages_dir = root / "packages"
+    if packages_dir.is_dir() and any(packages_dir.iterdir()):
+        return "monorepo"
+
+    package_json = root / "package.json"
+    if package_json.is_file():
+        try:
+            payload = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("workspaces"):
+            return "monorepo"
+
+    return "single"
 
 
 def _required(value: str, code: str) -> str:
