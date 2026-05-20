@@ -3,9 +3,16 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from symphony.auth import load_local_linear_token, save_local_linear_token
-from symphony.onboarding import InitConfig, default_workspace_root, generate_workflow, write_workflow
+from symphony.onboarding import (
+    InitConfig,
+    default_workspace_root,
+    detect_available_runners,
+    generate_workflow,
+    write_workflow,
+)
 from symphony.workflow import parse_workflow
 
 
@@ -68,6 +75,83 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual("lin_secret", load_local_linear_token(path=path))
             if os.name == "posix":
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+
+class RunnerPickerAndReviewStrategyTests(unittest.TestCase):
+    """IN-285: detect_available_runners + review block in generated workflow."""
+
+    def test_detect_available_runners_returns_both_when_present(self):
+        # shutil.which returns the path when found, None otherwise. Patch it
+        # to simulate both binaries installed.
+        with patch("symphony.onboarding.shutil.which", side_effect=lambda cmd: f"/usr/bin/{cmd}"):
+            self.assertEqual(
+                ("claude_code", "codex"),
+                detect_available_runners(),
+            )
+
+    def test_detect_available_runners_returns_only_claude_when_codex_missing(self):
+        def which(cmd: str) -> str | None:
+            return "/usr/bin/claude" if cmd == "claude" else None
+
+        with patch("symphony.onboarding.shutil.which", side_effect=which):
+            self.assertEqual(("claude_code",), detect_available_runners())
+
+    def test_detect_available_runners_empty_when_neither_present(self):
+        with patch("symphony.onboarding.shutil.which", return_value=None):
+            self.assertEqual((), detect_available_runners())
+
+    def test_cross_vendor_review_writes_other_vendor_as_reviewer(self):
+        content = generate_workflow(
+            InitConfig(
+                project_slug="x",
+                runner="claude_code",
+                workspace_root="/tmp/x",
+                review_strategy="cross-vendor",
+            )
+        )
+        workflow = parse_workflow(content)
+        review = workflow.config["review"]
+        self.assertEqual("cross-vendor", review["strategy"])
+        self.assertEqual("codex", review["reviewer"])
+        self.assertTrue(review["enabled"])
+
+    def test_cross_vendor_review_with_codex_primary_uses_claude_reviewer(self):
+        content = generate_workflow(
+            InitConfig(
+                project_slug="x",
+                runner="codex",
+                workspace_root="/tmp/x",
+                review_strategy="cross-vendor",
+            )
+        )
+        workflow = parse_workflow(content)
+        self.assertEqual("claude_code", workflow.config["review"]["reviewer"])
+
+    def test_single_vendor_review_uses_primary_as_reviewer(self):
+        content = generate_workflow(
+            InitConfig(
+                project_slug="x",
+                runner="claude_code",
+                workspace_root="/tmp/x",
+                review_strategy="single-vendor",
+            )
+        )
+        workflow = parse_workflow(content)
+        review = workflow.config["review"]
+        self.assertEqual("single-vendor", review["strategy"])
+        self.assertEqual("claude_code", review["reviewer"])
+
+    def test_skip_strategy_writes_no_review_block(self):
+        content = generate_workflow(
+            InitConfig(
+                project_slug="x",
+                runner="claude_code",
+                workspace_root="/tmp/x",
+                review_strategy="skip",
+            )
+        )
+        workflow = parse_workflow(content)
+        self.assertNotIn("review", workflow.config)
 
 
 if __name__ == "__main__":

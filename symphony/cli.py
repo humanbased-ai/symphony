@@ -35,6 +35,7 @@ from symphony.http_server import StatusAPI, WebhookAPI
 from symphony.onboarding import (
     DEFAULT_ACTIVE_STATES,
     DEFAULT_PRESET,
+    DEFAULT_REVIEW_STRATEGY,
     DEFAULT_RUNNER,
     DEFAULT_TERMINAL_STATES,
     DEFAULT_WORKFLOW_PATH,
@@ -42,6 +43,7 @@ from symphony.onboarding import (
     InitConfig,
     OnboardingError,
     default_workspace_root,
+    detect_available_runners,
     generate_workflow,
     parse_state_list,
     write_workflow,
@@ -231,6 +233,17 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--mode",
         choices=("interactive", "automated"),
         help="Setup mode. Defaults to interactive in a TTY and automated otherwise.",
+    )
+    parser.add_argument(
+        "--review-strategy",
+        choices=("cross-vendor", "single-vendor", "skip"),
+        help=(
+            "Code review strategy (IN-285). 'cross-vendor' = primary runner "
+            "implements, other vendor reviews via the crosscheck pipeline; "
+            "'single-vendor' = same runner reviews; 'skip' = no review block. "
+            "Defaults to interactive prompt when both runners are on PATH, "
+            "and 'skip' in automated mode."
+        ),
     )
     return parser
 
@@ -902,8 +915,44 @@ def _run_init_with_args(
             else _prompt_default("Workspace root directory", default_workspace_root(project_slug))
         )
 
-        # --- Step 2: GitHub org + repo (claude_code runner only) ---
+        # --- IN-285: Primary runner picker + review strategy ---
+        # When both runners are on PATH AND the user didn't pass --runner
+        # explicitly, present a picker instead of silently defaulting. The
+        # "explicit" signal is the runner being something other than the
+        # parser default — argparse can't distinguish "user passed
+        # --runner claude_code" from "argparse filled the default", so we
+        # also gate on the interactive mode (automated mode honors the
+        # default without prompting).
         runner = args.runner
+        available_runners = detect_available_runners()
+        if not automated and len(available_runners) >= 2 and runner == DEFAULT_RUNNER:
+            print("\nBoth Claude Code and Codex are installed.")
+            print("  1) claude_code (default)")
+            print("  2) codex")
+            choice = _prompt_default("Pick the primary runner [1/2]", "1").strip()
+            if choice in {"2", "codex"}:
+                runner = "codex"
+            else:
+                runner = "claude_code"
+
+        review_strategy = getattr(args, "review_strategy", None) or DEFAULT_REVIEW_STRATEGY
+        if not automated and not getattr(args, "review_strategy", None) and len(available_runners) >= 2:
+            other_runner = "codex" if runner == "claude_code" else "claude_code"
+            print("\nCode review strategy:")
+            print(f"  1) cross-vendor — {runner} implements, {other_runner} reviews via crosscheck (recommended)")
+            print(f"  2) single-vendor — {runner} reviews its own PRs")
+            print("  3) skip — no review block in WORKFLOW.md")
+            choice = _prompt_default("Pick a strategy [1/2/3]", "3").strip()
+            review_strategy = {
+                "1": "cross-vendor",
+                "cross-vendor": "cross-vendor",
+                "2": "single-vendor",
+                "single-vendor": "single-vendor",
+                "3": "skip",
+                "skip": "skip",
+            }.get(choice, "skip")
+
+        # --- Step 2: GitHub org + repo (claude_code runner only) ---
         github_org = args.github_org or ""
         github_repo = args.github_repo or ""
         if runner == "claude_code" and not automated:
@@ -964,6 +1013,7 @@ def _run_init_with_args(
                 runner=runner,
                 github_org=github_org,
                 github_repo=github_repo,
+                review_strategy=review_strategy,
             )
         )
         workflow_path = write_workflow(args.workflow_path, workflow, overwrite=args.overwrite)
