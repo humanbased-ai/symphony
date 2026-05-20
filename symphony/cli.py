@@ -825,7 +825,19 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
             port=args.port,
         )
     except StartupError as exc:
-        parser.exit(2, f"symphony: {exc}\n")
+        if "missing_workflow_file" in str(exc) and sys.stdin.isatty():
+            if not _run_first_run_wizard(Path(args.workflow_path)):
+                return 1
+            try:
+                context = load_startup_context(
+                    args.workflow_path,
+                    logs_root=args.logs_root,
+                    port=args.port,
+                )
+            except StartupError as exc2:
+                parser.exit(2, f"symphony: {exc2}\n")
+        else:
+            parser.exit(2, f"symphony: {exc}\n")
 
     configure_logging(args.log_level, logs_root=context.logs_root)
 
@@ -2294,6 +2306,93 @@ def _print_project_table(
         _dim("Stop:  ") + _cyan("Ctrl-C") + _dim("  ·  kill <PID>  ·  pkill -f 'symphony run'")
     )
     print(_dim("PID:   ps aux | grep 'symphony run'"))
+
+
+# ---------------------------------------------------------------------------
+# sy run first-run wizard — triggered when WORKFLOW.md is missing
+# ---------------------------------------------------------------------------
+
+def _run_first_run_wizard(workflow_path: Path) -> bool:
+    """Interactive setup wizard invoked by `sy run` when WORKFLOW.md is missing.
+
+    Collects project slug, runner, GitHub repo, and workspace root, then writes
+    the WORKFLOW.md. Returns True on success, False if the user aborts.
+    """
+    cli = _cli_name()
+    print(f"\n{_bold('No WORKFLOW.md found at')} {_cyan(str(workflow_path))}")
+    print(_dim("Let's set up this project. Press Ctrl-C at any time to cancel.\n"))
+
+    try:
+        answer = input(f"Set up a new project here? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if answer and answer not in ("y", "yes"):
+        return False
+
+    # Auto-detect GitHub org/repo from git remote
+    detected_org, detected_repo = _detect_github_from_remote()
+
+    try:
+        # Step 1: project slug
+        print(f"\n{_bold('Step 1/4')} — Linear project slug")
+        print(_dim("  Find it in the project URL: linear.app/YOUR-TEAM/project/NAME-") + _cyan("<slug>"))
+        project_slug = _prompt("Linear project slug").strip()
+        if not project_slug:
+            print(_fail("  Project slug is required."))
+            return False
+
+        # Step 2: runner
+        print(f"\n{_bold('Step 2/4')} — Agent runner")
+        runner_input = _prompt_default("Runner (claude_code / codex)", DEFAULT_RUNNER).strip()
+        runner = runner_input if runner_input in ("claude_code", "codex") else DEFAULT_RUNNER
+
+        # Step 3: GitHub repo (shown for claude_code; optional for codex)
+        github_org = detected_org or ""
+        github_repo = detected_repo or ""
+        print(f"\n{_bold('Step 3/4')} — GitHub repository")
+        if detected_org and detected_repo:
+            print(_dim(f"  Detected from git remote: {detected_org}/{detected_repo}"))
+        print(_dim("  Agents will clone this repo, push a branch, and open a PR."))
+        if detected_org:
+            github_org = _prompt_default("GitHub org/user", detected_org).strip()
+        else:
+            github_org = _prompt("GitHub org/user (blank to fill in later)").strip()
+        if detected_repo:
+            github_repo = _prompt_default("Repository name", detected_repo).strip()
+        else:
+            github_repo = _prompt("Repository name (blank to fill in later)").strip()
+
+        # Step 4: workspace root
+        print(f"\n{_bold('Step 4/4')} — Workspace root")
+        print(_dim("  Local directory where per-issue worktrees are created."))
+        workspace_root = _prompt_default(
+            "Workspace root", default_workspace_root(project_slug)
+        ).strip() or default_workspace_root(project_slug)
+
+    except (EOFError, KeyboardInterrupt):
+        print()
+        print(_dim("Setup cancelled."))
+        return False
+
+    # Write WORKFLOW.md
+    workflow_path.parent.mkdir(parents=True, exist_ok=True)
+    content = generate_workflow(
+        InitConfig(
+            project_slug=project_slug,
+            preset=DEFAULT_PRESET,
+            active_states=DEFAULT_ACTIVE_STATES,
+            terminal_states=DEFAULT_TERMINAL_STATES,
+            workspace_root=workspace_root,
+            runner=runner,
+            github_org=github_org,
+            github_repo=github_repo,
+        )
+    )
+    write_workflow(str(workflow_path), content, overwrite=False)
+    print(f"\n{_ok('✓')} Wrote {workflow_path}")
+    print(_dim(f"  Tip: run `{cli} doctor {workflow_path}` to validate before the loop starts.\n"))
+    return True
 
 
 if __name__ == "__main__":

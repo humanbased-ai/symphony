@@ -14,6 +14,7 @@ from symphony.cli import (
     StartupError,
     _check_claude_login,
     _detect_running_workflow_paths,
+    _run_first_run_wizard,
     _check_gh_auth,
     _check_github_token_scopes,
     _check_linear_key_valid,
@@ -1024,6 +1025,87 @@ class ProjectCommandTests(unittest.TestCase):
         self.assertIn("/abs/project-a/WORKFLOW.md", paths)
         self.assertIn("/abs/root/WORKFLOW.md", paths)
         self.assertNotIn("python", paths)
+
+
+class FirstRunWizardTests(unittest.TestCase):
+    """Tests for the sy run first-run setup wizard."""
+
+    def _wizard_inputs(self, *answers: str):
+        """Return a side_effect list that feeds answers then raises EOFError."""
+        return list(answers) + [EOFError()]
+
+    def test_wizard_writes_workflow_with_provided_inputs(self):
+        inputs = iter(["y", "my-project", "claude_code", "acme", "my-repo", ""])
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", side_effect=inputs), \
+                 patch("symphony.cli._detect_github_from_remote", return_value=(None, None)):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = _run_first_run_wizard(wf)
+            self.assertTrue(result)
+            content = wf.read_text()
+            self.assertIn("my-project", content)
+            self.assertIn("claude_code", content)
+
+    def test_wizard_aborts_on_n_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", return_value="n"):
+                result = _run_first_run_wizard(wf)
+            self.assertFalse(result)
+            self.assertFalse(wf.exists())
+
+    def test_wizard_aborts_on_empty_slug(self):
+        inputs = iter(["y", ""])  # confirm yes, then empty slug
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", side_effect=inputs), \
+                 patch("symphony.cli._detect_github_from_remote", return_value=(None, None)):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = _run_first_run_wizard(wf)
+            self.assertFalse(result)
+            self.assertFalse(wf.exists())
+
+    def test_wizard_prefills_github_from_remote(self):
+        inputs = iter(["y", "my-project", "", "", "", ""])
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", side_effect=inputs), \
+                 patch("symphony.cli._detect_github_from_remote", return_value=("myorg", "myrepo")):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = _run_first_run_wizard(wf)
+            self.assertTrue(result)
+            content = wf.read_text()
+            self.assertIn("myorg", content)
+            self.assertIn("myrepo", content)
+
+    def test_run_triggers_wizard_when_workflow_missing_in_tty(self):
+        """sy run on a missing WORKFLOW.md triggers wizard in TTY mode."""
+        inputs = iter(["y", "my-project", "", "", "", ""])
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", side_effect=inputs), \
+                 patch("symphony.cli._detect_github_from_remote", return_value=(None, None)), \
+                 patch("sys.stdin.isatty", return_value=True):
+                out = StringIO()
+                with redirect_stdout(out):
+                    # Wizard writes file, then load_startup_context fails on missing token → SystemExit(2)
+                    with self.assertRaises(SystemExit):
+                        main(["run", str(wf), "--log-level", "WARNING"])
+            # Wizard wrote the file before the token check failed
+            self.assertTrue(wf.exists())
+
+    def test_run_skips_wizard_when_workflow_missing_in_non_tty(self):
+        """sy run on a missing WORKFLOW.md exits with error in non-TTY mode."""
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("sys.stdin.isatty", return_value=False):
+                with self.assertRaises(SystemExit) as raised:
+                    main(["run", str(wf), "--log-level", "WARNING"])
+        self.assertEqual(2, raised.exception.code)
 
 
 if __name__ == "__main__":
