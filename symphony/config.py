@@ -30,6 +30,9 @@ class ConfigError(ValueError):
     """Raised when runtime config is missing or unsupported."""
 
 
+DEFAULT_REVIEW_STATE = "In Review"
+
+
 @dataclass(frozen=True)
 class TrackerConfig:
     kind: str
@@ -38,6 +41,9 @@ class TrackerConfig:
     project_slug: str | None = None
     active_states: tuple[str, ...] = field(default_factory=lambda: DEFAULT_ACTIVE_STATES)
     terminal_states: tuple[str, ...] = field(default_factory=lambda: DEFAULT_TERMINAL_STATES)
+    review_state: str = DEFAULT_REVIEW_STATE
+    done_state: str = "Done"
+    cancelled_state: str = "Cancelled"
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "TrackerConfig":
@@ -58,6 +64,9 @@ class TrackerConfig:
             project_slug=_string_value(tracker.get("project_slug")),
             active_states=_string_tuple(tracker.get("active_states"), DEFAULT_ACTIVE_STATES),
             terminal_states=_string_tuple(tracker.get("terminal_states"), DEFAULT_TERMINAL_STATES),
+            review_state=_string_value(tracker.get("review_state")) or DEFAULT_REVIEW_STATE,
+            done_state=_string_value(tracker.get("done_state")) or "Done",
+            cancelled_state=_string_value(tracker.get("cancelled_state")) or "Cancelled",
         )
 
 

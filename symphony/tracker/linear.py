@@ -63,12 +63,64 @@ query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first:
 ISSUE_COMMENTS_QUERY = """
 query SymphonyLinearIssueComments($issueId: String!, $first: Int!) {
   issue(id: $issueId) {
-    comments(first: $first) {
+    comments(first: $first, orderBy: createdAt) {
       nodes {
+        id
         body
+        createdAt
         user {
           name
         }
+      }
+    }
+  }
+}
+""".strip()
+
+WORKFLOW_STATES_QUERY = """
+query SymphonyWorkflowStates($teamId: String!) {
+  workflowStates(filter: {team: {id: {eq: $teamId}}}) {
+    nodes {
+      id
+      name
+    }
+  }
+}
+""".strip()
+
+TEAM_ID_QUERY = """
+query SymphonyTeamId($projectSlug: String!) {
+  projects(filter: {slugId: {containsIgnoreCase: $projectSlug}}) {
+    nodes {
+      teams {
+        nodes {
+          id
+        }
+      }
+    }
+  }
+}
+""".strip()
+
+CREATE_COMMENT_MUTATION = """
+mutation SymphonyCreateComment($issueId: String!, $body: String!) {
+  commentCreate(input: {issueId: $issueId, body: $body}) {
+    success
+    comment {
+      id
+    }
+  }
+}
+""".strip()
+
+UPDATE_ISSUE_STATE_MUTATION = """
+mutation SymphonyUpdateIssueState($issueId: String!, $stateId: String!) {
+  issueUpdate(id: $issueId, input: {stateId: $stateId}) {
+    success
+    issue {
+      id
+      state {
+        name
       }
     }
   }
@@ -235,6 +287,63 @@ class LinearClient:
             if isinstance(text, str) and text.strip():
                 comments.append(f"{author}: {text.strip()}")
         return comments
+
+    def fetch_issue_comment_ids(self, issue_id: str) -> list[str]:
+        """Return the Linear comment IDs for an issue, ordered by createdAt."""
+        body = self.graphql(ISSUE_COMMENTS_QUERY, {"issueId": issue_id, "first": 50})
+        nodes = _nested(body, "data", "issue", "comments", "nodes")
+        if not isinstance(nodes, list):
+            return []
+        return [node["id"] for node in nodes if isinstance(node, dict) and node.get("id")]
+
+    def create_comment(self, issue_id: str, body: str) -> bool:
+        """Post a comment on a Linear issue. Returns True on success."""
+        try:
+            resp = self.graphql(CREATE_COMMENT_MUTATION, {"issueId": issue_id, "body": body})
+            return bool(_nested(resp, "data", "commentCreate", "success"))
+        except LinearClientError:
+            return False
+
+    def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
+        """Transition a Linear issue to the state with the given name. Returns True on success."""
+        state_id = self._resolve_state_id(state_name)
+        if not state_id:
+            return False
+        try:
+            resp = self.graphql(UPDATE_ISSUE_STATE_MUTATION, {"issueId": issue_id, "stateId": state_id})
+            return bool(_nested(resp, "data", "issueUpdate", "success"))
+        except LinearClientError:
+            return False
+
+    def _resolve_state_id(self, state_name: str) -> str | None:
+        """Return the Linear workflow state ID for a given state name."""
+        team_id = self._resolve_team_id()
+        if not team_id:
+            return None
+        try:
+            resp = self.graphql(WORKFLOW_STATES_QUERY, {"teamId": team_id})
+            nodes = _nested(resp, "data", "workflowStates", "nodes") or []
+            for node in nodes:
+                if isinstance(node, dict) and node.get("name") == state_name:
+                    return node.get("id")
+        except LinearClientError:
+            pass
+        return None
+
+    def _resolve_team_id(self) -> str | None:
+        """Return the team ID for the configured project slug."""
+        if not self.tracker.project_slug:
+            return None
+        try:
+            resp = self.graphql(TEAM_ID_QUERY, {"projectSlug": self.tracker.project_slug})
+            projects = _nested(resp, "data", "projects", "nodes") or []
+            if projects:
+                teams = _nested(projects[0], "teams", "nodes") or []
+                if teams and isinstance(teams[0], dict):
+                    return teams[0].get("id")
+        except LinearClientError:
+            pass
+        return None
 
     def graphql_raw(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         variables = variables or {}

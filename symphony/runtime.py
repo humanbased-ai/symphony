@@ -24,6 +24,7 @@ from symphony.orchestrator import (
     should_dispatch,
     stalled_issue_ids,
 )
+from symphony.feedback import FeedbackSignal, detect_feedback_signal
 from symphony.tracker.models import Issue
 from symphony.workflow import WorkflowDefinition, render_prompt
 
@@ -79,6 +80,8 @@ class SymphonyRuntime:
         # first tick to seed this with the currently-active set, which makes
         # pre-existing issues invisible until they leave and re-enter active states.
         self._prev_candidate_ids: set[str] = set()
+        # Maps issue_id → frozenset of comment IDs already processed for feedback.
+        self._feedback_seen: dict[str, frozenset[str]] = {}
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -113,6 +116,7 @@ class SymphonyRuntime:
                 failed.append(issue.identifier)
                 errors[issue.identifier] = result.error or "worker_failed"
 
+        await self.poll_feedback()
         self._notify_state_change()
         return RuntimeTickResult(
             fetched=len(candidates),
@@ -312,6 +316,60 @@ class SymphonyRuntime:
         if self.on_event is not None:
             await self.on_event(event)
         self._notify_state_change()
+
+    async def poll_feedback(self) -> None:
+        """Check issues in the review state for human feedback signals and act on them."""
+        if not hasattr(self.tracker, "fetch_issues_by_states"):
+            return
+
+        review_state = self.config.tracker.review_state
+        try:
+            review_issues = list(await _call_sync(self.tracker.fetch_issues_by_states, [review_state]))
+        except Exception:  # noqa: BLE001 - feedback polling is best-effort; must not crash the tick.
+            return
+
+        for issue in review_issues:
+            try:
+                await self._handle_feedback_for_issue(issue)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _handle_feedback_for_issue(self, issue: Issue) -> None:
+        if not hasattr(self.tracker, "fetch_issue_comment_ids"):
+            return
+
+        current_ids = frozenset(await _call_sync(self.tracker.fetch_issue_comment_ids, issue.id))
+        seen = self._feedback_seen.get(issue.id, frozenset())
+        self._feedback_seen[issue.id] = current_ids
+
+        if not (current_ids - seen):
+            return
+
+        if not hasattr(self.tracker, "fetch_issue_comments"):
+            return
+
+        comments = list(await _call_sync(self.tracker.fetch_issue_comments, issue.id))
+        signal = detect_feedback_signal(comments)
+        if signal is None:
+            return
+
+        tracker_cfg = self.config.tracker
+        if signal == FeedbackSignal.APPROVE:
+            target_state = tracker_cfg.done_state
+        elif signal == FeedbackSignal.CHANGE_REQUEST:
+            active = tracker_cfg.active_states
+            target_state = active[0] if active else "Todo"
+        else:  # CLOSE
+            target_state = tracker_cfg.cancelled_state
+
+        LOGGER.info(
+            "Feedback signal %s on %s → transitioning to %s",
+            signal.value,
+            issue.identifier,
+            target_state,
+        )
+        if hasattr(self.tracker, "update_issue_state_by_name"):
+            await _call_sync(self.tracker.update_issue_state_by_name, issue.id, target_state)
 
     def _notify_state_change(self) -> None:
         if self.on_state_change is not None:

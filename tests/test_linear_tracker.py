@@ -305,5 +305,156 @@ class LinearTrackerTests(unittest.TestCase):
         self.assertNotIn("lin_secret", str(result))
 
 
+class FeedbackMethodTests(unittest.TestCase):
+    def client(self, transport):
+        tracker = TrackerConfig.from_mapping(
+            {
+                "tracker": {
+                    "kind": "linear",
+                    "project_slug": "symphony-abc123",
+                    "api_key": "$K",
+                }
+            }
+        )
+        return LinearClient(tracker, token_store=TokenStore(tracker, environ={"K": "lin_tok"}), transport=transport)
+
+    def test_fetch_issue_comment_ids_returns_ids_in_order(self):
+        transport = RecordingTransport(
+            [
+                GraphQLResponse(
+                    200,
+                    {
+                        "data": {
+                            "issue": {
+                                "comments": {
+                                    "nodes": [
+                                        {"id": "cmt-1", "body": "hello", "createdAt": "2026-05-01T00:00:00Z", "user": {"name": "Alice"}},
+                                        {"id": "cmt-2", "body": "world", "createdAt": "2026-05-02T00:00:00Z", "user": {"name": "Bob"}},
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                )
+            ]
+        )
+        client = self.client(transport)
+        ids = client.fetch_issue_comment_ids("issue-x")
+        self.assertEqual(["cmt-1", "cmt-2"], ids)
+
+    def test_fetch_issue_comment_ids_returns_empty_on_missing_issue(self):
+        transport = RecordingTransport([GraphQLResponse(200, {"data": {"issue": None}})])
+        client = self.client(transport)
+        ids = client.fetch_issue_comment_ids("no-such-issue")
+        self.assertEqual([], ids)
+
+    def test_create_comment_returns_true_on_success(self):
+        transport = RecordingTransport(
+            [GraphQLResponse(200, {"data": {"commentCreate": {"success": True, "comment": {"id": "c-new"}}}})]
+        )
+        client = self.client(transport)
+        result = client.create_comment("issue-x", "LGTM!")
+        self.assertTrue(result)
+        self.assertEqual(1, len(transport.calls))
+        payload = transport.calls[0]["payload"]
+        self.assertIn("commentCreate", payload["query"])
+        self.assertEqual("issue-x", payload["variables"]["issueId"])
+        self.assertEqual("LGTM!", payload["variables"]["body"])
+
+    def test_create_comment_returns_false_on_graphql_error(self):
+        transport = RecordingTransport([GraphQLResponse(200, {"data": None, "errors": [{"message": "oops"}]})])
+        client = self.client(transport)
+        result = client.create_comment("issue-x", "hello")
+        self.assertFalse(result)
+
+    def test_update_issue_state_by_name_resolves_state_and_updates(self):
+        team_resp = GraphQLResponse(
+            200, {"data": {"projects": {"nodes": [{"teams": {"nodes": [{"id": "team-1"}]}}]}}}
+        )
+        states_resp = GraphQLResponse(
+            200, {"data": {"workflowStates": {"nodes": [{"id": "state-done", "name": "Done"}, {"id": "state-todo", "name": "Todo"}]}}}
+        )
+        update_resp = GraphQLResponse(
+            200, {"data": {"issueUpdate": {"success": True, "issue": {"id": "issue-x", "state": {"name": "Done"}}}}}
+        )
+        transport = RecordingTransport([team_resp, states_resp, update_resp])
+        client = self.client(transport)
+        result = client.update_issue_state_by_name("issue-x", "Done")
+        self.assertTrue(result)
+        self.assertEqual(3, len(transport.calls))
+        update_vars = transport.calls[2]["payload"]["variables"]
+        self.assertEqual("issue-x", update_vars["issueId"])
+        self.assertEqual("state-done", update_vars["stateId"])
+
+    def test_update_issue_state_by_name_returns_false_when_state_not_found(self):
+        team_resp = GraphQLResponse(
+            200, {"data": {"projects": {"nodes": [{"teams": {"nodes": [{"id": "team-1"}]}}]}}}
+        )
+        states_resp = GraphQLResponse(
+            200, {"data": {"workflowStates": {"nodes": [{"id": "state-todo", "name": "Todo"}]}}}
+        )
+        transport = RecordingTransport([team_resp, states_resp])
+        client = self.client(transport)
+        result = client.update_issue_state_by_name("issue-x", "NonExistent")
+        self.assertFalse(result)
+
+    def test_update_issue_state_by_name_returns_false_when_team_not_found(self):
+        team_resp = GraphQLResponse(200, {"data": {"projects": {"nodes": []}}})
+        transport = RecordingTransport([team_resp])
+        client = self.client(transport)
+        result = client.update_issue_state_by_name("issue-x", "Done")
+        self.assertFalse(result)
+
+
+class FeedbackSignalTests(unittest.TestCase):
+    """Unit tests for the detect_feedback_signal function."""
+
+    def test_approve_patterns(self):
+        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+
+        for text in ["LGTM", "looks good", "looks good to me", "Approved", "ship it", "merge it", "good to go", "👍", "✅"]:
+            with self.subTest(text=text):
+                signal = detect_feedback_signal([f"Alice: {text}"])
+                self.assertEqual(FeedbackSignal.APPROVE, signal)
+
+    def test_change_request_patterns(self):
+        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+
+        for text in ["please change X", "please fix this", "change request", "needs changes", "request changes", "fix: the thing"]:
+            with self.subTest(text=text):
+                signal = detect_feedback_signal([f"Bob: {text}"])
+                self.assertEqual(FeedbackSignal.CHANGE_REQUEST, signal)
+
+    def test_close_patterns(self):
+        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+
+        for text in ["closed", "won't fix", "wontfix", "cancelled", "drop this", "not needed", "out of scope"]:
+            with self.subTest(text=text):
+                signal = detect_feedback_signal([f"Carol: {text}"])
+                self.assertEqual(FeedbackSignal.CLOSE, signal)
+
+    def test_most_recent_comment_wins(self):
+        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+
+        signal = detect_feedback_signal(["Alice: please fix this", "Bob: LGTM"])
+        self.assertEqual(FeedbackSignal.APPROVE, signal)
+
+    def test_no_signal_returns_none(self):
+        from symphony.feedback import detect_feedback_signal
+
+        self.assertIsNone(detect_feedback_signal(["Alice: this is interesting"]))
+
+    def test_empty_list_returns_none(self):
+        from symphony.feedback import detect_feedback_signal
+
+        self.assertIsNone(detect_feedback_signal([]))
+
+    def test_comment_without_author_prefix(self):
+        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+
+        signal = detect_feedback_signal(["LGTM"])
+        self.assertEqual(FeedbackSignal.APPROVE, signal)
+
+
 if __name__ == "__main__":
     unittest.main()

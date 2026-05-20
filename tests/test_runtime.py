@@ -398,5 +398,150 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(("IN-301",), result3.dispatched)
 
 
+class FeedbackTracker(FakeTracker):
+    """Extends FakeTracker with comment/state-transition stubs for feedback gate tests."""
+
+    def __init__(
+        self,
+        candidates: list[Issue],
+        *,
+        review_issues: list[Issue] | None = None,
+        comment_ids: dict[str, list[str]] | None = None,
+        comments: dict[str, list[str]] | None = None,
+    ) -> None:
+        super().__init__(candidates)
+        self._review_issues: list[Issue] = review_issues or []
+        self._comment_ids: dict[str, list[str]] = comment_ids or {}
+        self._comments: dict[str, list[str]] = comments or {}
+        self.state_transitions: list[tuple[str, str]] = []
+
+    def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
+        return list(self._review_issues)
+
+    def fetch_issue_comment_ids(self, issue_id: str) -> list[str]:
+        return list(self._comment_ids.get(issue_id, []))
+
+    def fetch_issue_comments(self, issue_id: str) -> list[str]:
+        return list(self._comments.get(issue_id, []))
+
+    def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
+        self.state_transitions.append((issue_id, state_name))
+        return True
+
+
+class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
+    def _make_runtime(self, tracker, temp_dir: str) -> SymphonyRuntime:
+        return SymphonyRuntime(
+            config=make_config(Path(temp_dir) / "workspaces"),
+            prompt_template="Work on {{ issue.identifier }}",
+            tracker=tracker,
+            workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+            runner=FakeSessionRunner(),
+        )
+
+    async def test_approve_signal_transitions_to_done(self):
+        review_issue = issue("r-1", "IN-500", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-1": ["c-1"]},
+            comments={"r-1": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            await runtime.poll_feedback()
+
+        self.assertEqual([("r-1", "Done")], tracker.state_transitions)
+
+    async def test_change_request_signal_transitions_to_first_active_state(self):
+        review_issue = issue("r-2", "IN-501", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-2": ["c-1"]},
+            comments={"r-2": ["Bob: Please fix the naming"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            await runtime.poll_feedback()
+
+        self.assertEqual([("r-2", "Todo")], tracker.state_transitions)
+
+    async def test_close_signal_transitions_to_cancelled(self):
+        review_issue = issue("r-3", "IN-502", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-3": ["c-1"]},
+            comments={"r-3": ["Carol: closed, not needed"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            await runtime.poll_feedback()
+
+        self.assertEqual([("r-3", "Cancelled")], tracker.state_transitions)
+
+    async def test_no_transition_when_no_new_comments(self):
+        review_issue = issue("r-4", "IN-503", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-4": ["c-1"]},
+            comments={"r-4": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            # First poll: marks c-1 as seen.
+            await runtime.poll_feedback()
+            tracker.state_transitions.clear()
+            # Second poll: same comment IDs → no new comments → no transition.
+            await runtime.poll_feedback()
+
+        self.assertEqual([], tracker.state_transitions)
+
+    async def test_no_transition_when_no_signal_in_comments(self):
+        review_issue = issue("r-5", "IN-504", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-5": ["c-1"]},
+            comments={"r-5": ["Dave: looks interesting"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            await runtime.poll_feedback()
+
+        self.assertEqual([], tracker.state_transitions)
+
+    async def test_no_review_issues_does_nothing(self):
+        tracker = FeedbackTracker([], review_issues=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            await runtime.poll_feedback()
+
+        self.assertEqual([], tracker.state_transitions)
+
+    async def test_poll_feedback_called_during_run_tick(self):
+        """poll_feedback is invoked as part of run_tick."""
+        review_issue = issue("r-6", "IN-505", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-6": ["c-1"]},
+            comments={"r-6": ["Eve: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = SymphonyRuntime(
+                config=make_config(Path(tmp) / "workspaces"),
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(tmp) / "workspaces"),
+                runner=FakeSessionRunner(),
+            )
+            await runtime.run_tick()
+
+        self.assertEqual([("r-6", "Done")], tracker.state_transitions)
+
+
 if __name__ == "__main__":
     unittest.main()
