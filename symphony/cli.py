@@ -55,6 +55,7 @@ from symphony.workspace import WorkspaceManager
 
 
 DEFAULT_PORT = 7337
+_LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 LOGGER = logging.getLogger(__name__)
 
 _LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
@@ -799,6 +800,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_main(raw_args[1:])
         if command == "webhooks":
             return webhooks_main(raw_args[1:])
+        if command == "project":
+            return project_main(raw_args[1:])
 
     parser = build_parser()
     args = parser.parse_args(raw_args)
@@ -1948,6 +1951,270 @@ def _content_length(raw: str | None) -> int:
         return max(int(raw), 0)
     except ValueError:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# sy project — dashboard listing all configured and unconfigured projects
+# ---------------------------------------------------------------------------
+
+_PROJECT_LIST_GQL = """
+query ProjectList {
+  projects(first: 50) {
+    nodes {
+      id
+      name
+      slugId
+    }
+  }
+}
+"""
+
+_PROJECT_ISSUES_GQL = """
+query ProjectIssues($projectId: ID!) {
+  project(id: $projectId) {
+    issues(first: 500) {
+      nodes {
+        state { type }
+      }
+    }
+  }
+}
+"""
+
+
+def build_project_parser() -> argparse.ArgumentParser:
+    cli = _cli_name()
+    parser = argparse.ArgumentParser(
+        prog=f"{cli} project",
+        description="List all Linear projects and their workflow status.",
+    )
+    parser.add_argument(
+        "--linear-api-key",
+        metavar="KEY",
+        default=None,
+        help="Linear personal API key. Defaults to LINEAR_API_KEY env var.",
+    )
+    return parser
+
+
+def project_main(argv: Sequence[str] | None = None) -> int:
+    parser = build_project_parser()
+    args = parser.parse_args(argv)
+
+    token: str | None = getattr(args, "linear_api_key", None) or os.environ.get("LINEAR_API_KEY")
+    if not token:
+        try:
+            from symphony.auth import TokenStore
+            from symphony.config import TrackerConfig
+            dummy = TrackerConfig(kind="linear")
+            token = TokenStore(dummy).resolve_linear_token()
+        except Exception:
+            pass
+    if not token:
+        print(_fail("No Linear API key found."))
+        print(_dim("  Set LINEAR_API_KEY or run: sy onboard"))
+        return 1
+
+    cwd = Path.cwd()
+
+    # --- find all WORKFLOW.md files up to depth 3 ---
+    workflow_files: list[Path] = []
+    for p in sorted(cwd.rglob("WORKFLOW.md")):
+        try:
+            rel = p.relative_to(cwd)
+        except ValueError:
+            continue
+        if len(rel.parts) <= 4:  # depth ≤ 3 dirs + filename
+            workflow_files.append(p)
+
+    # --- parse slugs from each WORKFLOW.md ---
+    slug_to_path: dict[str, str] = {}
+    for wf_path in workflow_files:
+        try:
+            wf_def = load_workflow(wf_path)
+            slug = WorkflowConfig.from_mapping(wf_def.config).tracker.project_slug
+            if slug:
+                rel_str = str(wf_path.relative_to(cwd))
+                display = "./" + rel_str if not rel_str.startswith("..") else rel_str
+                slug_to_path[slug] = display
+        except Exception:
+            pass
+
+    # --- detect running symphony processes ---
+    running_paths: set[str] = _detect_running_workflow_paths()
+
+    # --- fetch Linear data ---
+    import json as _json
+    import urllib.request as _req
+
+    def _gql(query: str, variables: dict | None = None) -> dict:
+        payload = _json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+        req = _req.Request(
+            _LINEAR_GRAPHQL_URL,
+            data=payload,
+            headers={"Authorization": token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with _req.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read())
+
+    try:
+        body = _gql(_PROJECT_LIST_GQL)
+    except Exception as exc:
+        print(_fail(f"Failed to reach Linear API: {exc}"))
+        return 1
+
+    linear_projects = (((body.get("data") or {}).get("projects") or {}).get("nodes") or [])
+
+    # --- build index: slug → linear project data ---
+    # WORKFLOW.md stores the full slug (name-shortid), but Linear's GraphQL slugId
+    # returns only the short ID portion. Match by exact or suffix.
+    linear_by_slug: dict[str, dict] = {p["slugId"]: p for p in linear_projects if p.get("slugId")}
+
+    def _find_linear_project(workflow_slug: str) -> dict | None:
+        if workflow_slug in linear_by_slug:
+            return linear_by_slug[workflow_slug]
+        for api_slug, proj in linear_by_slug.items():
+            if workflow_slug.endswith(api_slug):
+                return proj
+        return None
+
+    # Cache to avoid duplicate API calls for the same project
+    _issue_counts_cache: dict[str, tuple[int, int, int]] = {}
+
+    def _issue_counts(project_id: str) -> tuple[int, int, int]:
+        if project_id in _issue_counts_cache:
+            return _issue_counts_cache[project_id]
+        try:
+            resp = _gql(_PROJECT_ISSUES_GQL, {"projectId": project_id})
+            nodes = (((resp.get("data") or {}).get("project") or {}).get("issues") or {}).get("nodes") or []
+        except Exception:
+            nodes = []
+        done = active = open_ = 0
+        for issue in nodes:
+            t = (issue.get("state") or {}).get("type") or ""
+            if t in ("completed", "canceled"):
+                done += 1
+            elif t == "started":
+                active += 1
+            else:
+                open_ += 1
+        result = (done, active, open_)
+        _issue_counts_cache[project_id] = result
+        return result
+
+    def _is_running(display_path: str) -> bool:
+        norm = str(Path(display_path).resolve()) if not display_path.startswith("./") else display_path
+        for rp in running_paths:
+            if rp == display_path or rp == norm or rp.endswith(display_path.lstrip("./")):
+                return True
+        return False
+
+    # --- render configured projects ---
+    configured_rows: list[tuple[str, str, str, str, str]] = []
+    configured_slugs: set[str] = set()
+
+    for slug, wf_str in slug_to_path.items():
+        configured_slugs.add(slug)
+        linear_proj = _find_linear_project(slug)
+        if linear_proj:
+            configured_slugs.add(linear_proj["slugId"])
+        name = linear_proj["name"] if linear_proj else slug
+        if linear_proj:
+            done, active, open_ = _issue_counts(linear_proj["id"])
+            issues_str = f"{done} done · {active} active · {open_} open"
+        else:
+            issues_str = "project not found in Linear"
+
+        running = _is_running(wf_str)
+        status = _ok("▶ running") if running else _dim("○ stopped")
+        cli = _cli_name()
+        next_step = f"sy doctor {wf_str}" if running else f"{cli} run {wf_str}"
+        status_plain = "running" if running else "stopped"
+        configured_rows.append((name, wf_str, issues_str, status, next_step))
+
+    # --- unconfigured: Linear projects with no WORKFLOW.md ---
+    unconfigured_rows: list[tuple[str, str, str]] = []
+    for proj in linear_projects:
+        slug = proj.get("slugId") or ""
+        if slug and slug not in configured_slugs:
+            name = proj.get("name") or slug
+            done, active, open_ = _issue_counts(proj["id"])
+            total = done + active + open_
+            issues_str = f"{total} issues · no workflow"
+            cli = _cli_name()
+            next_step = f"{cli} run {slug}/WORKFLOW.md"
+            unconfigured_rows.append((name, issues_str, next_step))
+
+    # --- print ---
+    _print_project_table(configured_rows, unconfigured_rows)
+    return 0
+
+
+def _detect_running_workflow_paths() -> set[str]:
+    """Return set of WORKFLOW.md paths found in running symphony processes."""
+    try:
+        result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
+        paths: set[str] = set()
+        for line in result.stdout.splitlines():
+            if ("symphony" in line or "sy " in line) and "run" in line:
+                m = re.search(r'(?:symphony|sy)\s+run\s+(\S+\.md)', line)
+                if m:
+                    paths.add(m.group(1))
+                elif re.search(r'(?:symphony|sy)\s+run\b', line):
+                    paths.add("./WORKFLOW.md")
+        return paths
+    except Exception:
+        return set()
+
+
+def _print_project_table(
+    configured: list[tuple[str, str, str, str, str]],
+    unconfigured: list[tuple[str, str, str]],
+) -> None:
+    if not configured and not unconfigured:
+        print(_dim("No Linear projects found."))
+        return
+
+    COL_SEP = "  "
+    headers = ("LINEAR PROJECT", "WORKFLOW", "ISSUES", "STATUS", "NEXT STEP")
+
+    def _visible_len(s: str) -> int:
+        return len(re.sub(r'\033\[[0-9;]*m', '', s))
+
+    def _pad(s: str, width: int) -> str:
+        return s + " " * max(0, width - _visible_len(s))
+
+    if configured:
+        col_widths = [len(h) for h in headers]
+        for row in configured:
+            for i, cell in enumerate(row):
+                col_widths[i] = max(col_widths[i], _visible_len(cell))
+
+        header_line = COL_SEP.join(_pad(h, col_widths[i]) for i, h in enumerate(headers))
+        print(_dim(header_line))
+        for name, wf, issues, status, next_step in configured:
+            row_cells = [name, wf, issues, status, next_step]
+            print(COL_SEP.join(_pad(cell, col_widths[i]) for i, cell in enumerate(row_cells)))
+
+    if unconfigured:
+        separator = _dim("── Linear projects with no workflow configured ──")
+        if configured:
+            print()
+        print(separator)
+        unc_headers = ("LINEAR PROJECT", "ISSUES", "NEXT STEP")
+        unc_widths = [len(h) for h in unc_headers]
+        for row in unconfigured:
+            for i, cell in enumerate(row):
+                unc_widths[i] = max(unc_widths[i], _visible_len(cell))
+        for name, issues, next_step in unconfigured:
+            row_cells = [_warn("! ") + name, issues, next_step]
+            print(COL_SEP.join(_pad(cell, unc_widths[i]) for i, cell in enumerate(row_cells)))
+
+    print()
+    print(_dim("▶ running = dispatch loop active  ·  ○ stopped = configured, not running  ·  ! = no workflow"))
+    print(_dim("Stop:  Ctrl-C  ·  kill <PID>  ·  pkill -f 'symphony run'"))
+    print(_dim("PID:   ps aux | grep 'symphony run'"))
 
 
 if __name__ == "__main__":
