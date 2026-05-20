@@ -143,12 +143,13 @@ def _clr(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _use_color() else text
 
 
-def _ok(t: str) -> str:   return _clr(t, "32")   # green
-def _warn(t: str) -> str: return _clr(t, "33")   # yellow
-def _fail(t: str) -> str: return _clr(t, "31")   # red
-def _cyan(t: str) -> str: return _clr(t, "36")   # cyan
-def _bold(t: str) -> str: return _clr(t, "1")    # bold
-def _dim(t: str) -> str:  return _clr(t, "2")    # dim
+def _ok(t: str) -> str:     return _clr(t, "32")   # green
+def _warn(t: str) -> str:   return _clr(t, "33")   # yellow
+def _fail(t: str) -> str:   return _clr(t, "31")   # red
+def _cyan(t: str) -> str:   return _clr(t, "36")   # cyan
+def _purple(t: str) -> str: return _clr(t, "35")   # purple/magenta
+def _bold(t: str) -> str:   return _clr(t, "1")    # bold
+def _dim(t: str) -> str:    return _clr(t, "2")    # dim
 
 
 def _cli_name() -> str:
@@ -2110,8 +2111,19 @@ def project_main(argv: Sequence[str] | None = None) -> int:
                 return True
         return False
 
+    def _fmt_issue_counts(done: int, active: int, open_: int) -> str:
+        parts = [_ok(f"{done} done")]
+        sep = _dim(" · ")
+        if active:
+            parts.append(_purple(f"{active} active"))
+        else:
+            parts.append(_dim(f"{active} active"))
+        parts.append(_cyan(f"{open_} open"))
+        return sep.join(parts)
+
     # --- render configured projects ---
-    configured_rows: list[tuple[str, str, str, str, str]] = []
+    # Each row: (indicator, name, workflow, issues, status, next_step)
+    configured_rows: list[tuple[str, str, str, str, str, str]] = []
     configured_slugs: set[str] = set()
 
     for slug, wf_str in slug_to_path.items():
@@ -2119,19 +2131,28 @@ def project_main(argv: Sequence[str] | None = None) -> int:
         linear_proj = _find_linear_project(slug)
         if linear_proj:
             configured_slugs.add(linear_proj["slugId"])
-        name = linear_proj["name"] if linear_proj else slug
+        raw_name = linear_proj["name"] if linear_proj else slug
         if linear_proj:
             done, active, open_ = _issue_counts(linear_proj["id"])
-            issues_str = f"{done} done · {active} active · {open_} open"
+            issues_str = _fmt_issue_counts(done, active, open_)
         else:
-            issues_str = "project not found in Linear"
+            issues_str = _dim("project not found in Linear")
 
         running = _is_running(wf_str)
-        status = _ok("▶ running") if running else _dim("○ stopped")
         cli = _cli_name()
-        next_step = f"sy doctor {wf_str}" if running else f"{cli} run {wf_str}"
-        status_plain = "running" if running else "stopped"
-        configured_rows.append((name, wf_str, issues_str, status, next_step))
+        if running:
+            indicator = _ok("▶")
+            name = _bold(raw_name)
+            wf_col = _dim(wf_str)
+            status = _ok("running")
+            next_step = _dim(f"sy doctor {wf_str}")
+        else:
+            indicator = _dim("○")
+            name = _dim(raw_name)
+            wf_col = _dim(wf_str)
+            status = _dim("stopped")
+            next_step = _dim(f"{cli} run {wf_str}")
+        configured_rows.append((indicator, name, wf_col, issues_str, status, next_step))
 
     # --- unconfigured: Linear projects with no WORKFLOW.md ---
     unconfigured_rows: list[tuple[str, str, str]] = []
@@ -2141,9 +2162,9 @@ def project_main(argv: Sequence[str] | None = None) -> int:
             name = proj.get("name") or slug
             done, active, open_ = _issue_counts(proj["id"])
             total = done + active + open_
-            issues_str = f"{total} issues · no workflow"
+            issues_str = _dim(f"{total} issues · no workflow")
             cli = _cli_name()
-            next_step = f"{cli} run {slug}/WORKFLOW.md"
+            next_step = _dim(f"{cli} run {slug}/WORKFLOW.md")
             unconfigured_rows.append((name, issues_str, next_step))
 
     # --- print ---
@@ -2169,7 +2190,7 @@ def _detect_running_workflow_paths() -> set[str]:
 
 
 def _print_project_table(
-    configured: list[tuple[str, str, str, str, str]],
+    configured: list[tuple[str, str, str, str, str, str]],
     unconfigured: list[tuple[str, str, str]],
 ) -> None:
     if not configured and not unconfigured:
@@ -2177,43 +2198,52 @@ def _print_project_table(
         return
 
     COL_SEP = "  "
-    headers = ("LINEAR PROJECT", "WORKFLOW", "ISSUES", "STATUS", "NEXT STEP")
+    # Columns: indicator | name | workflow | issues | status | next_step
+    headers = ("", "LINEAR PROJECT", "WORKFLOW", "ISSUES", "STATUS", "NEXT STEP")
 
-    def _visible_len(s: str) -> int:
+    def _vis(s: str) -> int:
         return len(re.sub(r'\033\[[0-9;]*m', '', s))
 
     def _pad(s: str, width: int) -> str:
-        return s + " " * max(0, width - _visible_len(s))
+        return s + " " * max(0, width - _vis(s))
 
     if configured:
         col_widths = [len(h) for h in headers]
         for row in configured:
             for i, cell in enumerate(row):
-                col_widths[i] = max(col_widths[i], _visible_len(cell))
+                col_widths[i] = max(col_widths[i], _vis(cell))
 
-        header_line = COL_SEP.join(_pad(h, col_widths[i]) for i, h in enumerate(headers))
-        print(_dim(header_line))
-        for name, wf, issues, status, next_step in configured:
-            row_cells = [name, wf, issues, status, next_step]
-            print(COL_SEP.join(_pad(cell, col_widths[i]) for i, cell in enumerate(row_cells)))
+        # Print header (skip indicator column)
+        header_cells = [_pad(h, col_widths[i]) for i, h in enumerate(headers)]
+        print(_dim(COL_SEP.join(header_cells)))
+
+        for indicator, name, wf, issues, status, next_step in configured:
+            cells = [indicator, name, wf, issues, status, next_step]
+            print(COL_SEP.join(_pad(cell, col_widths[i]) for i, cell in enumerate(cells)))
 
     if unconfigured:
-        separator = _dim("── Linear projects with no workflow configured ──")
         if configured:
             print()
-        print(separator)
-        unc_headers = ("LINEAR PROJECT", "ISSUES", "NEXT STEP")
-        unc_widths = [len(h) for h in unc_headers]
-        for row in unconfigured:
+        print(_dim("── Linear projects with no workflow configured ──"))
+        unc_widths = [2, 20, 20, 20]  # icon+name | issues | next_step
+        rows_display = [(_warn("! ") + name, issues, next_step) for name, issues, next_step in unconfigured]
+        widths = [0] * 3
+        for row in rows_display:
             for i, cell in enumerate(row):
-                unc_widths[i] = max(unc_widths[i], _visible_len(cell))
-        for name, issues, next_step in unconfigured:
-            row_cells = [_warn("! ") + name, issues, next_step]
-            print(COL_SEP.join(_pad(cell, unc_widths[i]) for i, cell in enumerate(row_cells)))
+                widths[i] = max(widths[i], _vis(cell))
+        for row in rows_display:
+            print(COL_SEP.join(_pad(cell, widths[i]) for i, cell in enumerate(row)))
 
     print()
-    print(_dim("▶ running = dispatch loop active  ·  ○ stopped = configured, not running  ·  ! = no workflow"))
-    print(_dim("Stop:  Ctrl-C  ·  kill <PID>  ·  pkill -f 'symphony run'"))
+    legend = (
+        _ok("▶ running") + _dim(" = dispatch loop active  ·  ") +
+        _dim("○ stopped") + _dim(" = configured, not running  ·  ") +
+        _warn("! not configured") + _dim(" = first run opens setup wizard")
+    )
+    print(legend)
+    print(
+        _dim("Stop:  ") + _cyan("Ctrl-C") + _dim("  ·  kill <PID>  ·  pkill -f 'symphony run'")
+    )
     print(_dim("PID:   ps aux | grep 'symphony run'"))
 
 

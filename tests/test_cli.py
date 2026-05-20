@@ -1,4 +1,5 @@
 import asyncio
+import re
 import urllib.request
 import tempfile
 import unittest
@@ -967,14 +968,16 @@ class ProjectCommandTests(unittest.TestCase):
                     result = project_main(["--linear-api-key", "lin_api_test"])
 
         self.assertEqual(0, result)
-        output = out.getvalue()
-        self.assertIn("Symphony", output)
-        self.assertIn("WORKFLOW.md", output)
-        self.assertIn("2 done", output)
-        self.assertIn("1 active", output)
-        self.assertIn("3 open", output)
-        self.assertIn("Other Project", output)
-        self.assertIn("no workflow", output)
+        # Strip ANSI codes for plain-text assertions
+        plain = re.sub(r'\033\[[0-9;]*m', '', out.getvalue())
+        self.assertIn("Symphony", plain)
+        self.assertIn("WORKFLOW.md", plain)
+        self.assertIn("2 done", plain)
+        self.assertIn("1 active", plain)
+        self.assertIn("3 open", plain)
+        self.assertIn("Other Project", plain)
+        self.assertIn("no workflow", plain)
+        self.assertIn("stopped", plain)
 
     def test_running_project_shows_running_status(self):
         workflow_content = (
