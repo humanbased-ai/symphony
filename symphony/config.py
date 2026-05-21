@@ -43,7 +43,7 @@ class TrackerConfig:
     terminal_states: tuple[str, ...] = field(default_factory=lambda: DEFAULT_TERMINAL_STATES)
     review_state: str = DEFAULT_REVIEW_STATE
     done_state: str = "Done"
-    cancelled_state: str = "Cancelled"
+    cancelled_state: str = "Canceled"
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "TrackerConfig":
@@ -66,7 +66,7 @@ class TrackerConfig:
             terminal_states=_string_tuple(tracker.get("terminal_states"), DEFAULT_TERMINAL_STATES),
             review_state=_string_value(tracker.get("review_state")) or DEFAULT_REVIEW_STATE,
             done_state=_string_value(tracker.get("done_state")) or "Done",
-            cancelled_state=_string_value(tracker.get("cancelled_state")) or "Cancelled",
+            cancelled_state=_string_value(tracker.get("cancelled_state")) or "Canceled",
         )
 
 

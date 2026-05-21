@@ -343,7 +343,6 @@ class SymphonyRuntime:
         )
         current_ids = frozenset(cid for cid, _ in pairs)
         seen = self._feedback_seen.get(issue.id, frozenset())
-        self._feedback_seen[issue.id] = current_ids
 
         new_ids = current_ids - seen
         if not new_ids:
@@ -352,6 +351,7 @@ class SymphonyRuntime:
         new_comments = [text for cid, text in pairs if cid in new_ids]
         signal = detect_feedback_signal(new_comments)
         if signal is None:
+            self._feedback_seen[issue.id] = current_ids
             return
 
         tracker_cfg = self.config.tracker
@@ -370,7 +370,17 @@ class SymphonyRuntime:
             target_state,
         )
         if hasattr(self.tracker, "update_issue_state_by_name"):
-            await _call_sync(self.tracker.update_issue_state_by_name, issue.id, target_state)
+            success = await _call_sync(self.tracker.update_issue_state_by_name, issue.id, target_state)
+            if success:
+                self._feedback_seen[issue.id] = current_ids
+            else:
+                LOGGER.warning(
+                    "Failed to transition %s to %s, will retry next poll",
+                    issue.identifier,
+                    target_state,
+                )
+        else:
+            self._feedback_seen[issue.id] = current_ids
 
     def _notify_state_change(self) -> None:
         if self.on_state_change is not None:
