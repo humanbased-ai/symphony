@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import time
 import dataclasses
 from collections.abc import Callable
@@ -24,7 +25,7 @@ from symphony.orchestrator import (
     should_dispatch,
     stalled_issue_ids,
 )
-from symphony.feedback import FeedbackSignal, detect_feedback_signal
+from symphony.feedback import FeedbackSignal, classify_feedback
 from symphony.tracker.models import Issue
 from symphony.workflow import WorkflowDefinition, render_prompt
 
@@ -349,7 +350,11 @@ class SymphonyRuntime:
             return
 
         new_comments = [text for cid, text in pairs if cid in new_ids]
-        signal = detect_feedback_signal(new_comments)
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            LOGGER.warning("ANTHROPIC_API_KEY not set; feedback classification skipped")
+            return
+        signal = await asyncio.to_thread(classify_feedback, new_comments, api_key=api_key)
         if signal is None:
             self._feedback_seen[issue.id] = current_ids
             return
