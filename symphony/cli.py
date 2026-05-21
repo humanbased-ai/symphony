@@ -152,6 +152,52 @@ def _bold(t: str) -> str:   return _clr(t, "1")    # bold
 def _dim(t: str) -> str:    return _clr(t, "2")    # dim
 
 
+class _ColoredFormatter(logging.Formatter):
+    """Colored console log formatter — respects NO_COLOR / FORCE_COLOR."""
+
+    _LEVELS: dict[str, tuple[str, str]] = {
+        "DEBUG":    ("2",    "DBUG"),
+        "INFO":     ("36",   "INFO"),
+        "WARNING":  ("33",   "WARN"),
+        "ERROR":    ("31",   "ERR "),
+        "CRITICAL": ("1;31", "CRIT"),
+    }
+
+    def __init__(self, *, use_color: bool) -> None:
+        super().__init__()
+        self._use_color = use_color
+
+    def _c(self, text: str, code: str) -> str:
+        return f"\033[{code}m{text}\033[0m" if self._use_color else text
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = self.formatTime(record, "%H:%M:%S")
+        code, label = self._LEVELS.get(record.levelname, ("", record.levelname[:4].ljust(4)))
+        # Strip the "symphony." package prefix so names stay compact
+        name = record.name.removeprefix("symphony.")
+
+        msg = record.getMessage()
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            msg = f"{msg}\n{record.exc_text}"
+        if record.stack_info:
+            msg = f"{msg}\n{self.formatStack(record.stack_info)}"
+
+        msg_colored = (
+            self._c(msg, "31") if record.levelno >= logging.ERROR
+            else self._c(msg, "33") if record.levelno >= logging.WARNING
+            else msg
+        )
+
+        return (
+            f"{self._c(ts, '2')} "
+            f"{self._c(label, code)} "
+            f"{self._c(f'{name:<22}', '2')} "
+            f"{msg_colored}"
+        )
+
+
 def _cli_name() -> str:
     """Return the name used to invoke this CLI (e.g. 'symphony' or 'sy')."""
     if not sys.argv:
@@ -393,24 +439,28 @@ def validate_dispatch_config(config: WorkflowConfig, *, environ: Mapping[str, st
 
 
 def configure_logging(level: str, logs_root: Path | None = None) -> None:
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     root = logging.getLogger()
     root.setLevel(getattr(logging, level))
 
     if not root.handlers:
+        use_color = (
+            not os.environ.get("NO_COLOR")
+            and (bool(os.environ.get("FORCE_COLOR")) or sys.stderr.isatty())
+        )
         stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(fmt)
+        stream_handler.setFormatter(_ColoredFormatter(use_color=use_color))
         root.addHandler(stream_handler)
 
     if logs_root is not None and not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
         logs_root.mkdir(parents=True, exist_ok=True)
+        plain_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         file_handler = logging.handlers.RotatingFileHandler(
             logs_root / "symphony.log",
             maxBytes=10 * 1024 * 1024,
             backupCount=5,
             encoding="utf-8",
         )
-        file_handler.setFormatter(fmt)
+        file_handler.setFormatter(plain_fmt)
         root.addHandler(file_handler)
 
 
@@ -493,6 +543,22 @@ async def _startup_workspace_sweep(workspace_manager: WorkspaceManager) -> None:
         LOGGER.info("Startup workspace sweep removed %d stale per-run director%s.", removed, "y" if removed == 1 else "ies")
 
 
+def _log_tick(result) -> None:
+    parts = [f"fetched={result.fetched}"]
+    if result.dispatched:
+        parts.append(f"dispatched={','.join(result.dispatched)}")
+    if result.completed:
+        parts.append(f"completed={','.join(result.completed)}")
+    if result.failed:
+        parts.append(f"failed={','.join(result.failed)}")
+    if result.released:
+        parts.append(f"released={','.join(result.released)}")
+    if result.failed:
+        LOGGER.warning("Tick  %s", "  ".join(parts))
+    else:
+        LOGGER.info("Tick  %s", "  ".join(parts))
+
+
 async def run_poll_loop(
     runtime: SymphonyRuntime,
     *,
@@ -528,14 +594,7 @@ async def run_poll_loop(
             LOGGER.error("Unexpected error during poll tick, will retry next interval: %s", exc, exc_info=True)
             await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
             continue
-        LOGGER.info(
-            "Tick completed: fetched=%s dispatched=%s completed=%s failed=%s released=%s",
-            result.fetched,
-            ",".join(result.dispatched) or "-",
-            ",".join(result.completed) or "-",
-            ",".join(result.failed) or "-",
-            ",".join(result.released) or "-",
-        )
+        _log_tick(result)
         await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
 
 
