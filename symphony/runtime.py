@@ -335,21 +335,22 @@ class SymphonyRuntime:
                 pass
 
     async def _handle_feedback_for_issue(self, issue: Issue) -> None:
-        if not hasattr(self.tracker, "fetch_issue_comment_ids"):
+        if not hasattr(self.tracker, "fetch_issue_comments_with_ids"):
             return
 
-        current_ids = frozenset(await _call_sync(self.tracker.fetch_issue_comment_ids, issue.id))
+        pairs: list[tuple[str, str]] = list(
+            await _call_sync(self.tracker.fetch_issue_comments_with_ids, issue.id)
+        )
+        current_ids = frozenset(cid for cid, _ in pairs)
         seen = self._feedback_seen.get(issue.id, frozenset())
         self._feedback_seen[issue.id] = current_ids
 
-        if not (current_ids - seen):
+        new_ids = current_ids - seen
+        if not new_ids:
             return
 
-        if not hasattr(self.tracker, "fetch_issue_comments"):
-            return
-
-        comments = list(await _call_sync(self.tracker.fetch_issue_comments, issue.id))
-        signal = detect_feedback_signal(comments)
+        new_comments = [text for cid, text in pairs if cid in new_ids]
+        signal = detect_feedback_signal(new_comments)
         if signal is None:
             return
 

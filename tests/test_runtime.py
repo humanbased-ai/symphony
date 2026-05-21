@@ -411,6 +411,7 @@ class FeedbackTracker(FakeTracker):
     ) -> None:
         super().__init__(candidates)
         self._review_issues: list[Issue] = review_issues or []
+        # comment_ids[issue_id] and comments[issue_id] are parallel lists (same length)
         self._comment_ids: dict[str, list[str]] = comment_ids or {}
         self._comments: dict[str, list[str]] = comments or {}
         self.state_transitions: list[tuple[str, str]] = []
@@ -418,11 +419,10 @@ class FeedbackTracker(FakeTracker):
     def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
         return list(self._review_issues)
 
-    def fetch_issue_comment_ids(self, issue_id: str) -> list[str]:
-        return list(self._comment_ids.get(issue_id, []))
-
-    def fetch_issue_comments(self, issue_id: str) -> list[str]:
-        return list(self._comments.get(issue_id, []))
+    def fetch_issue_comments_with_ids(self, issue_id: str) -> list[tuple[str, str]]:
+        ids = self._comment_ids.get(issue_id, [])
+        texts = self._comments.get(issue_id, [])
+        return list(zip(ids, texts))
 
     def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
         self.state_transitions.append((issue_id, state_name))
@@ -509,6 +509,28 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
+            await runtime.poll_feedback()
+
+        self.assertEqual([], tracker.state_transitions)
+
+    async def test_old_signal_not_refired_on_new_non_signal_comment(self):
+        """Re-open scenario: old LGTM must not re-fire when a new non-signal comment arrives."""
+        review_issue = issue("r-x", "IN-510", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-x": ["c-1"]},
+            comments={"r-x": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            # First poll: c-1 (LGTM) fires → Done transition.
+            await runtime.poll_feedback()
+            tracker.state_transitions.clear()
+            # Simulate re-open: a new non-signal comment arrives (c-2).
+            tracker._comment_ids["r-x"] = ["c-1", "c-2"]
+            tracker._comments["r-x"] = ["Alice: LGTM", "Bob: re-opened for discussion"]
+            # Second poll: only c-2 is new; it carries no signal → no transition.
             await runtime.poll_feedback()
 
         self.assertEqual([], tracker.state_transitions)
