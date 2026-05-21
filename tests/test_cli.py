@@ -11,8 +11,12 @@ from unittest.mock import patch
 from symphony.cli import (
     RuntimeWorkflowReloader,
     StartupError,
-    _detect_github_from_remote,
+    _check_claude_login,
     _check_gh_auth,
+    _check_github_token_scopes,
+    _check_linear_key_valid,
+    _detect_github_from_remote,
+    _run_starter_mission,
     create_runtime,
     create_status_api,
     create_status_http_server,
@@ -161,17 +165,18 @@ Body
 
             stdout = StringIO()
             with redirect_stdout(stdout):
-                result = main(
-                    [
-                        "onboard",
-                        "--mode",
-                        "automated",
-                        "--workflow-path",
-                        str(workflow_path),
-                        "--runner",
-                        "codex",
-                    ]
-                )
+                with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
+                    result = main(
+                        [
+                            "onboard",
+                            "--mode",
+                            "automated",
+                            "--workflow-path",
+                            str(workflow_path),
+                            "--runner",
+                            "codex",
+                        ]
+                    )
 
             self.assertEqual(0, result)
             self.assertIn("Onboarding already complete", stdout.getvalue())
@@ -284,7 +289,8 @@ Body
             with _socket.socket() as _s:
                 _s.bind(("127.0.0.1", 0))
                 free_port = _s.getsockname()[1]
-            checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
+            with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
+                checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
 
             self.assertTrue(all(ok for ok, _, _ in checks))
 
@@ -569,6 +575,173 @@ class PrintSetupChecksTests(unittest.TestCase):
         self.assertIn("1 missing", rendered)
 
 
+class CheckClaudeLoginTests(unittest.TestCase):
+    def test_returns_true_when_config_dir_exists_and_non_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".config" / "claude"
+            config_dir.mkdir(parents=True)
+            (config_dir / "settings.json").write_text("{}", encoding="utf-8")
+            with patch("symphony.cli.Path.home", return_value=Path(tmp)):
+                ok, detail = _check_claude_login()
+        self.assertTrue(ok)
+        self.assertIn("config dir found", detail)
+
+    def test_returns_true_when_dot_claude_json_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude.json").write_text("{}", encoding="utf-8")
+            with patch("symphony.cli.Path.home", return_value=Path(tmp)):
+                ok, detail = _check_claude_login()
+        self.assertTrue(ok)
+        self.assertIn("~/.claude.json", detail)
+
+    def test_returns_false_when_no_config_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("symphony.cli.Path.home", return_value=Path(tmp)):
+                ok, detail = _check_claude_login()
+        self.assertFalse(ok)
+        self.assertIn("claude login", detail)
+
+
+class CheckLinearKeyValidTests(unittest.TestCase):
+    def _make_response(self, body: dict, status: int = 200):
+        import json as _json
+        import io
+        raw = _json.dumps(body).encode()
+        resp = type("R", (), {
+            "read": lambda self: raw,
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        return resp
+
+    def test_returns_true_with_viewer_name(self):
+        resp = self._make_response({"data": {"viewer": {"id": "u1", "name": "Alice"}}})
+        with patch("urllib.request.urlopen", return_value=resp):
+            ok, detail = _check_linear_key_valid("lin_api_key")
+        self.assertTrue(ok)
+        self.assertIn("Alice", detail)
+
+    def test_returns_false_on_401(self):
+        import urllib.error
+        exc = urllib.error.HTTPError(url="", code=401, msg="Unauthorized", hdrs=None, fp=None)
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_linear_key_valid("bad_key")
+        self.assertFalse(ok)
+        self.assertIn("invalid key", detail)
+
+    def test_returns_true_on_network_error(self):
+        import urllib.error
+        exc = urllib.error.URLError("connection refused")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_linear_key_valid("lin_key")
+        self.assertTrue(ok)
+        self.assertIn("network check skipped", detail)
+
+    def test_returns_true_on_non_auth_http_error(self):
+        import urllib.error
+        exc = urllib.error.HTTPError(url="", code=500, msg="Server Error", hdrs=None, fp=None)
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_linear_key_valid("lin_key")
+        self.assertTrue(ok)
+        self.assertIn("http 500", detail)
+
+
+class CheckGithubTokenScopesTests(unittest.TestCase):
+    def _make_response(self, scopes_header: str):
+        resp = type("R", (), {
+            "headers": {"X-OAuth-Scopes": scopes_header},
+            "read": lambda self: b"{}",
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        return resp
+
+    def test_returns_true_when_repo_scope_present(self):
+        with patch("urllib.request.urlopen", return_value=self._make_response("repo, read:user")):
+            ok, detail = _check_github_token_scopes("ghp_token")
+        self.assertTrue(ok)
+        self.assertIn("write scopes confirmed", detail)
+
+    def test_returns_true_for_fine_grained_pat_empty_scopes(self):
+        with patch("urllib.request.urlopen", return_value=self._make_response("")):
+            ok, detail = _check_github_token_scopes("github_pat_token")
+        self.assertTrue(ok)
+        self.assertIn("fine-grained PAT", detail)
+
+    def test_returns_false_when_repo_scope_missing(self):
+        with patch("urllib.request.urlopen", return_value=self._make_response("read:user, gist")):
+            ok, detail = _check_github_token_scopes("ghp_token")
+        self.assertFalse(ok)
+        self.assertIn("missing repo write scope", detail)
+
+    def test_returns_false_on_401(self):
+        import urllib.error
+        exc = urllib.error.HTTPError(url="", code=401, msg="Unauthorized", hdrs=None, fp=None)
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_github_token_scopes("bad_token")
+        self.assertFalse(ok)
+        self.assertIn("invalid token", detail)
+
+    def test_returns_true_on_network_error(self):
+        import urllib.error
+        exc = urllib.error.URLError("timeout")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_github_token_scopes("ghp_token")
+        self.assertTrue(ok)
+        self.assertIn("network check skipped", detail)
+
+
+class SetupEnvironmentChecksAuthTests(unittest.TestCase):
+    def _make_args(self, tmp_dir: str, **kwargs):
+        defaults = {
+            "workflow_path": str(Path(tmp_dir) / "WORKFLOW.md"),
+            "linear_api_key": None,
+            "github_token": None,
+            "credentials_path": None,
+            "runner": "codex",
+            "codex_command": "python --version",
+            "github_org": None,
+            "github_repo": None,
+        }
+        defaults.update(kwargs)
+        return type("Args", (), defaults)()
+
+    def test_includes_linear_key_validity_when_token_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, linear_api_key="lin_key")
+            with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")) as mock_valid:
+                checks = setup_environment_checks(args, environ={})
+        mock_valid.assert_called_once_with("lin_key")
+        self.assertTrue(any(label == "linear key validity" for _, label, _ in checks))
+
+    def test_includes_claude_login_check_when_claude_command_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, runner="claude_code", github_token="ghp_tok")
+            with (
+                patch("symphony.cli._check_command", return_value=(True, "/usr/bin/claude")),
+                patch("symphony.cli._check_gh_auth", return_value=(True, "authenticated")),
+                patch("symphony.cli._check_claude_login", return_value=(True, "config found")) as mock_login,
+                patch("symphony.cli._check_github_token_scopes", return_value=(True, "ok")),
+                patch("symphony.cli._check_linear_key_valid", return_value=(True, "ok")),
+            ):
+                setup_environment_checks(args, environ={})
+        mock_login.assert_called_once()
+
+    def test_includes_github_scope_check_when_token_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, runner="claude_code", github_token="ghp_tok")
+            with (
+                patch("symphony.cli._check_command", return_value=(True, "/usr/bin/claude")),
+                patch("symphony.cli._check_gh_auth", return_value=(True, "authenticated")),
+                patch("symphony.cli._check_claude_login", return_value=(True, "ok")),
+                patch("symphony.cli._check_github_token_scopes", return_value=(True, "scopes ok")) as mock_scope,
+                patch("symphony.cli._check_linear_key_valid", return_value=(True, "ok")),
+            ):
+                checks = setup_environment_checks(args, environ={"GITHUB_TOKEN": "ghp_tok"})
+        mock_scope.assert_called_once_with("ghp_tok")
+        self.assertTrue(any(label == "github token scopes" for _, label, _ in checks))
+
+
 class OnboardAutoDetectTests(unittest.TestCase):
     def test_onboard_auto_fills_github_from_remote(self):
         """onboard pre-populates --github-org/repo from git remote when absent."""
@@ -602,6 +775,136 @@ class OnboardAutoDetectTests(unittest.TestCase):
             self.assertEqual(0, result)
             content = workflow_path.read_text()
             self.assertIn("my-project", content)
+
+
+class StarterMissionTests(unittest.TestCase):
+    def _make_args(self, tmp_dir: str, **kwargs):
+        defaults = {
+            "workflow_path": str(Path(tmp_dir) / "WORKFLOW.md"),
+            "linear_api_key": "lin_test",
+            "github_token": None,
+            "credentials_path": None,
+            "runner": "codex",
+            "codex_command": "python --version",
+            "github_org": "",
+            "github_repo": "",
+            "yes": True,
+            "mode": None,
+        }
+        defaults.update(kwargs)
+        return type("Args", (), defaults)()
+
+    def _make_gql_responses(self):
+        """Sequence of JSON responses for the 4 GraphQL calls made by _run_starter_mission."""
+        import json as _json
+        import io
+
+        responses = [
+            # viewer teams
+            {"data": {"viewer": {"teams": {"nodes": [{"id": "team-1", "name": "Acme"}]}}}},
+            # workflowStates
+            {"data": {"workflowStates": {"nodes": [{"id": "state-1", "name": "Todo"}]}}},
+            # find project (not found)
+            {"data": {"projects": {"nodes": []}}},
+            # projectCreate
+            {"data": {"projectCreate": {"success": True, "project": {"id": "proj-1", "name": "symphony-hello-world", "slugId": "symphony-hello-world-abc"}}}},
+            # find issue (not found)
+            {"data": {"issues": {"nodes": []}}},
+            # issueCreate
+            {"data": {"issueCreate": {"success": True, "issue": {"id": "i1", "identifier": "HW-1"}}}},
+        ]
+
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None):
+            idx = call_count[0]
+            call_count[0] += 1
+            body = _json.dumps(responses[idx]).encode()
+            resp = type("R", (), {
+                "read": lambda self: body,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *a: False,
+            })()
+            return resp
+
+        return fake_urlopen
+
+    def test_creates_project_and_issues_and_workflow_md(self):
+        import os as _os
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            orig = _os.getcwd()
+            _os.chdir(tmp)
+            try:
+                with (
+                    patch("urllib.request.urlopen", side_effect=self._make_gql_responses()),
+                    patch("symphony.cli.main", return_value=0),
+                ):
+                    result = _run_starter_mission(args, environ={"LINEAR_API_KEY": "lin_test"})
+            finally:
+                _os.chdir(orig)
+
+            self.assertTrue(result)
+            demo_workflow = Path(tmp) / "symphony-hello-world" / "WORKFLOW.md"
+            self.assertTrue(demo_workflow.exists())
+            content = demo_workflow.read_text()
+            self.assertIn("symphony-hello-world-abc", content)
+
+    def test_returns_false_when_no_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, linear_api_key="")
+            with patch("symphony.cli.load_local_linear_token", return_value=None):
+                result = _run_starter_mission(args, environ={})
+        self.assertFalse(result)
+
+    def test_returns_false_when_project_create_fails(self):
+        import json as _json
+        call_count = [0]
+        responses = [
+            {"data": {"viewer": {"teams": {"nodes": [{"id": "team-1", "name": "Acme"}]}}}},
+            {"data": {"workflowStates": {"nodes": []}}},
+            {"data": {"projectCreate": {"success": False}}},
+        ]
+
+        def fake_urlopen(req, timeout=None):
+            body = _json.dumps(responses[call_count[0]]).encode()
+            call_count[0] += 1
+            resp = type("R", (), {
+                "read": lambda self: body,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *a: False,
+            })()
+            return resp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                result = _run_starter_mission(args, environ={"LINEAR_API_KEY": "lin_test"})
+        self.assertFalse(result)
+
+    def test_records_done_in_tutorials_json(self):
+        import os as _os
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            history_path = Path(tmp) / "tutorials.json"
+            orig = _os.getcwd()
+            _os.chdir(tmp)
+            try:
+                with (
+                    patch("urllib.request.urlopen", side_effect=self._make_gql_responses()),
+                    patch("symphony.cli.main", return_value=0),
+                ):
+                    _run_starter_mission(
+                        args,
+                        environ={"LINEAR_API_KEY": "lin_test"},
+                        history_path=history_path,
+                    )
+            finally:
+                _os.chdir(orig)
+
+            payload = _json.loads(history_path.read_text())
+            self.assertTrue(payload["tutorials"]["hello-world-mission"]["done"])
 
 
 if __name__ == "__main__":

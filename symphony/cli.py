@@ -56,6 +56,72 @@ from symphony.workspace import WorkspaceManager
 
 DEFAULT_PORT = 7337
 LOGGER = logging.getLogger(__name__)
+
+_LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
+
+_STARTER_VIEWER_TEAMS_QUERY = """
+query SymphonyStarterTeams {
+  viewer { teams(first: 10) { nodes { id name } } }
+}
+""".strip()
+
+_STARTER_FIND_PROJECT_QUERY = """
+query SymphonyStarterFindProject($name: String!) {
+  projects(filter: {name: {eq: $name}}, first: 1) {
+    nodes { id name slugId }
+  }
+}
+""".strip()
+
+_STARTER_TEAM_STATES_QUERY = """
+query SymphonyStarterStates($teamId: ID!) {
+  workflowStates(
+    filter: {team: {id: {eq: $teamId}}, type: {eq: "unstarted"}}
+    first: 10
+  ) { nodes { id name } }
+}
+""".strip()
+
+_STARTER_CREATE_PROJECT_MUTATION = """
+mutation SymphonyStarterCreateProject($name: String!, $teamIds: [String!]!) {
+  projectCreate(input: {name: $name, teamIds: $teamIds}) {
+    success
+    project { id name slugId }
+  }
+}
+""".strip()
+
+_STARTER_FIND_ISSUE_QUERY = """
+query SymphonyStarterFindIssue($projectId: ID!, $title: String!) {
+  issues(filter: {project: {id: {eq: $projectId}}, title: {eq: $title}}, first: 1) {
+    nodes { id identifier }
+  }
+}
+""".strip()
+
+_STARTER_CREATE_ISSUE_MUTATION = """
+mutation SymphonyStarterCreateIssue(
+  $title: String!, $description: String,
+  $teamId: String!, $projectId: String!, $stateId: String
+) {
+  issueCreate(input: {
+    title: $title, description: $description,
+    teamId: $teamId, projectId: $projectId, stateId: $stateId
+  }) {
+    success
+    issue { id identifier }
+  }
+}
+""".strip()
+
+_STARTER_ISSUE_DESCRIPTION = """\
+Create a `hello_world.py` file in the repository root that prints `Hello, World!` when run.
+
+Steps:
+1. Create `hello_world.py` with `print("Hello, World!")`
+2. Verify it runs: `python hello_world.py`
+3. Push the branch and open a PR
+"""
 TickHook = Callable[[], Any]
 StatusServer = Callable[[StatusAPI, int], Awaitable[None]]
 
@@ -859,6 +925,7 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
             print(f"\nOnboarding already complete: {workflow_path}")
             print("Skipped init because WORKFLOW.md and local prerequisites validated.")
             _offer_tutorial(args)
+            _offer_starter_mission(args)
             return 0
 
         message = (
@@ -1034,6 +1101,7 @@ def _run_init_with_args(
 
     if not automated and not show_tutorial_before:
         _offer_tutorial(args)
+        _offer_starter_mission(args)
 
     return 0
 
@@ -1055,6 +1123,190 @@ def _offer_tutorial(args: argparse.Namespace) -> None:
         return
     if answer in {"", "y", "yes"}:
         run_init_tutorial_once(force=True)
+
+
+def _offer_starter_mission(
+    args: argparse.Namespace,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Prompt for the optional hello-world demo; only runs in interactive TTY mode."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        mode = _resolve_init_mode(args)
+    except OnboardingError:
+        return
+    if mode == "automated":
+        return
+
+    from symphony.onboarding_tutorial import should_show_starter_mission  # noqa: PLC0415
+
+    if not should_show_starter_mission(environ=environ):
+        return
+
+    print("\n★  Starter Mission (optional, runs once)")
+    print("   Symphony creates a sample Linear project with 1 ticket and dispatches")
+    print("   an agent on it — so you can see the full delivery loop.")
+    try:
+        answer = input("\nRun the demo? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if answer in {"", "y", "yes"}:
+        _run_starter_mission(args, environ=environ)
+
+
+def _run_starter_mission(
+    args: argparse.Namespace,
+    *,
+    environ: Mapping[str, str] | None = None,
+    history_path: str | Path | None = None,
+) -> bool:
+    """Create the hello-world Linear project, issues, WORKFLOW.md, and run --once.
+
+    Returns True if the mission completed (project + issues created).
+    """
+    import json as _json
+    import urllib.request as _req
+    import urllib.error as _urlerr
+
+    env = environ if environ is not None else os.environ
+
+    token = (
+        (getattr(args, "linear_api_key", None) or "").strip()
+        or env.get("LINEAR_API_KEY", "").strip()
+        or load_local_linear_token(path=getattr(args, "credentials_path", None), environ=env)
+        or ""
+    )
+    if not token:
+        print("  No Linear API key — Starter Mission requires a Linear token.")
+        return False
+
+    runner = getattr(args, "runner", DEFAULT_RUNNER) or DEFAULT_RUNNER
+    github_org = getattr(args, "github_org", None) or ""
+    github_repo = getattr(args, "github_repo", None) or ""
+
+    def _gql(query: str, variables: dict | None = None) -> dict:
+        payload = _json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+        req = _req.Request(
+            _LINEAR_GRAPHQL_URL,
+            data=payload,
+            headers={"Authorization": token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with _req.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read())
+
+    try:
+        # Step 1: resolve team
+        print("\nSetting up Starter Mission on Linear...")
+        body = _gql(_STARTER_VIEWER_TEAMS_QUERY)
+        teams = (((body.get("data") or {}).get("viewer") or {}).get("teams") or {}).get("nodes") or []
+        if not teams:
+            print("  No Linear teams found — Starter Mission requires at least one team.")
+            return False
+        team_id: str = teams[0]["id"]
+        team_name: str = teams[0].get("name", "")
+        print(f"  Using team: {team_name}")
+
+        # Step 2: find a Todo-like state (unstarted)
+        body = _gql(_STARTER_TEAM_STATES_QUERY, {"teamId": team_id})
+        states = ((body.get("data") or {}).get("workflowStates") or {}).get("nodes") or []
+        state_id: str | None = states[0]["id"] if states else None
+        state_name: str | None = states[0].get("name") if states else None
+
+        # Step 3: find or create project
+        body = _gql(_STARTER_FIND_PROJECT_QUERY, {"name": "symphony-hello-world"})
+        existing = ((body.get("data") or {}).get("projects") or {}).get("nodes") or []
+        if existing:
+            project = existing[0]
+            project_id: str = project["id"]
+            project_slug: str = project.get("slugId") or "symphony-hello-world"
+            print(f"  Using existing project (slug: {project_slug})")
+        else:
+            print("  Creating Linear project: symphony-hello-world …")
+            body = _gql(
+                _STARTER_CREATE_PROJECT_MUTATION,
+                {"name": "symphony-hello-world", "teamIds": [team_id]},
+            )
+            project_result = (body.get("data") or {}).get("projectCreate") or {}
+            if not project_result.get("success"):
+                errors = body.get("errors") or []
+                msg = errors[0].get("message") if errors else "unknown error"
+                print(f"  Failed to create project: {msg}")
+                return False
+            project = project_result.get("project") or {}
+            project_id = project["id"]
+            project_slug = project.get("slugId") or "symphony-hello-world"
+            print(f"  Project created (slug: {project_slug})")
+
+        # Step 4: find or create sample issue
+        issue_title = "write hello world app"
+        body = _gql(_STARTER_FIND_ISSUE_QUERY, {"projectId": project_id, "title": issue_title})
+        existing_issues = ((body.get("data") or {}).get("issues") or {}).get("nodes") or []
+        if existing_issues:
+            print(f"  Using existing issue: {issue_title}")
+        else:
+            print("  Creating sample issue …")
+            issue_body = _gql(
+                _STARTER_CREATE_ISSUE_MUTATION,
+                {
+                    "title": issue_title,
+                    "description": _STARTER_ISSUE_DESCRIPTION,
+                    "teamId": team_id,
+                    "projectId": project_id,
+                    "stateId": state_id,
+                },
+            )
+            issue_result = (issue_body.get("data") or {}).get("issueCreate") or {}
+            if not issue_result.get("success"):
+                errors = issue_body.get("errors") or []
+                msg = errors[0].get("message") if errors else "unknown error"
+                print(f"  Failed to create issue: {msg}")
+                return False
+            print(f"    ✓ {issue_title}")
+
+        # Step 5: generate WORKFLOW.md
+        demo_dir = Path("symphony-hello-world")
+        demo_dir.mkdir(exist_ok=True)
+        demo_workflow = demo_dir / "WORKFLOW.md"
+        demo_config = InitConfig(
+            project_slug=project_slug,
+            runner=runner,
+            github_org=github_org,
+            github_repo=github_repo,
+            active_states=(state_name,) if state_name else DEFAULT_ACTIVE_STATES,
+        )
+        import re as _re
+        demo_content = _re.sub(
+            r"(max_turns:\s*)\d+", r"\g<1>5", generate_workflow(demo_config)
+        )
+        write_workflow(demo_workflow, demo_content, overwrite=True)
+        print(f"  Generated: {demo_workflow}")
+
+        # Step 6: run --once if runner and repo are ready
+        if runner == "claude_code" and github_org and github_repo:
+            print(f"\nDispatching agent on first issue (runner: {runner}) …")
+            print(_dim("This may take a few minutes. Press Ctrl-C to cancel."))
+            main([str(demo_workflow), "--once"])
+        else:
+            print(f"\nDemo project ready. Run the agent with:")
+            print(f"  {_cyan(_cli_name() + ' run ' + str(demo_workflow) + ' --once')}")
+
+        # Step 7: record done
+        from symphony.onboarding_tutorial import record_starter_mission_done  # noqa: PLC0415
+
+        record_starter_mission_done(path=history_path, environ=environ)
+        print("\nStarter Mission recorded — won't repeat on future onboard runs.")
+        return True
+
+    except _urlerr.HTTPError as exc:
+        print(f"  Linear API error {exc.code}: {exc.read().decode('utf-8', errors='replace')[:200]}")
+        return False
+    except Exception as exc:
+        print(f"  Starter Mission failed: {exc}")
+        return False
 
 
 def _resolve_init_mode(args: argparse.Namespace) -> str:
@@ -1137,11 +1389,24 @@ def setup_environment_checks(
             or "not found — pass --linear-api-key, set LINEAR_API_KEY, or run interactive setup",
         )
     )
+    if linear_source is not None:
+        linear_token = (
+            (getattr(args, "linear_api_key", None) or "").strip()
+            or env.get("LINEAR_API_KEY", "").strip()
+            or load_local_linear_token(path=getattr(args, "credentials_path", None), environ=env)
+            or ""
+        )
+        if linear_token:
+            valid_ok, valid_detail = _check_linear_key_valid(linear_token)
+            checks.append((valid_ok, "linear key validity", valid_detail))
 
     runner = getattr(args, "runner", DEFAULT_RUNNER)
     if runner == "claude_code":
         command_ok, command_detail = _check_command("claude")
         checks.append((command_ok, "claude command", command_detail))
+        if command_ok:
+            login_ok, login_detail = _check_claude_login()
+            checks.append((login_ok, "claude login", login_detail))
         gh_ok, gh_detail = _check_command("gh")
         checks.append((gh_ok, "gh command", gh_detail if gh_ok else f"{gh_detail} — install from cli.github.com"))
         github_source = _github_auth_source(
@@ -1157,6 +1422,16 @@ def setup_environment_checks(
                 or "not found — run: gh auth login, pass --github-token, or set GITHUB_TOKEN",
             )
         )
+        if github_source is not None:
+            github_token = (
+                (getattr(args, "github_token", None) or "").strip()
+                or env.get("GITHUB_TOKEN", "").strip()
+                or load_local_github_token(path=getattr(args, "credentials_path", None), environ=env)
+                or ""
+            )
+            if github_token:
+                scope_ok, scope_detail = _check_github_token_scopes(github_token)
+                checks.append((scope_ok, "github token scopes", scope_detail))
         github_org = getattr(args, "github_org", None) or ""
         github_repo = getattr(args, "github_repo", None) or ""
         if github_org and github_repo:
@@ -1317,15 +1592,26 @@ def doctor_checks(
 
     checks.append((True, "workflow", str(context.workflow_path)))
     checks.append((True, "linear auth", _linear_runtime_auth_source(context.config, environ=environ)))
+    linear_token = _resolve_linear_token(context.config)
+    if linear_token:
+        valid_ok, valid_detail = _check_linear_key_valid(linear_token)
+        checks.append((valid_ok, "linear key validity", valid_detail))
 
     if context.config.agent.runner == "claude_code":
         command_ok, command_check = _check_command(context.config.claude_code.command)
         checks.append((command_ok, "claude command", command_check))
+        if command_ok:
+            login_ok, login_detail = _check_claude_login()
+            checks.append((login_ok, "claude login", login_detail))
         gh_ok, gh_check = _check_command("gh")
         checks.append((gh_ok, "gh command", gh_check if gh_ok else f"{gh_check} — install from cli.github.com"))
         github_source = _github_auth_source(None, credentials_path=None, environ=environ)
         if github_source:
             checks.append((True, "github auth", github_source))
+            github_token = _resolve_github_token(environ=environ)
+            if github_token:
+                scope_ok, scope_detail = _check_github_token_scopes(github_token)
+                checks.append((scope_ok, "github token scopes", scope_detail))
         else:
             checks.append(
                 (
@@ -1566,6 +1852,82 @@ def _check_command(command: str) -> tuple[bool, str]:
     if executable is None:
         return False, f"missing executable: {parts[0]}"
     return True, executable
+
+
+def _check_claude_login() -> tuple[bool, str]:
+    """Heuristic: check if Claude CLI has been configured by looking for its config directory."""
+    home = Path.home()
+    candidates = [home / ".config" / "claude", home / ".claude"]
+    for config_dir in candidates:
+        if config_dir.is_dir() and any(config_dir.iterdir()):
+            return True, f"config dir found ({config_dir})"
+    if (home / ".claude.json").exists():
+        return True, "config found (~/.claude.json)"
+    return False, "not configured — run: claude login"
+
+
+def _check_linear_key_valid(token: str, endpoint: str = "https://api.linear.app/graphql") -> tuple[bool, str]:
+    """Validate Linear API key by calling viewer { id name }. Only fails on auth errors, not network errors."""
+    import json as _json
+    import urllib.request as _req
+    import urllib.error as _urlerr
+
+    payload = _json.dumps({"query": "query { viewer { id name } }"}).encode("utf-8")
+    request = _req.Request(
+        endpoint,
+        data=payload,
+        headers={"Authorization": token, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _req.urlopen(request, timeout=10) as resp:
+            data = _json.loads(resp.read())
+            viewer = (data.get("data") or {}).get("viewer")
+            if not viewer:
+                return False, "invalid key — check LINEAR_API_KEY or run: symphony init --linear-api-key"
+            name = viewer.get("name") or viewer.get("id") or "authenticated"
+            return True, f"valid (logged in as {name})"
+    except _urlerr.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, "invalid key — check LINEAR_API_KEY or run: symphony init --linear-api-key"
+        return True, f"key present (http {exc.code} — could not verify)"
+    except Exception:
+        return True, "key present (network check skipped)"
+
+
+def _check_github_token_scopes(token: str) -> tuple[bool, str]:
+    """Check GitHub token has repo write scopes via X-OAuth-Scopes header.
+
+    Fine-grained PATs return an empty scopes header — treated as passing since
+    scope verification is not available for them via this endpoint.
+    Only fails when classic token scopes are present and repo write is absent.
+    """
+    import urllib.request as _req
+    import urllib.error as _urlerr
+
+    request = _req.Request(
+        "https://api.github.com/user",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with _req.urlopen(request, timeout=10) as resp:
+            scopes_raw = resp.headers.get("X-OAuth-Scopes", "")
+            scopes = {s.strip() for s in scopes_raw.split(",") if s.strip()}
+            if not scopes:
+                return True, "fine-grained PAT — scopes not verifiable via API"
+            if "repo" in scopes or "public_repo" in scopes:
+                return True, f"write scopes confirmed ({', '.join(sorted(scopes))})"
+            return (
+                False,
+                f"missing repo write scope — found: {', '.join(sorted(scopes))}; "
+                "token needs 'repo' (classic) or Contents + Pull-requests write (fine-grained)",
+            )
+    except _urlerr.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, "invalid token"
+        return True, f"token present (http {exc.code} — scope check skipped)"
+    except Exception:
+        return True, "token present (network check skipped)"
 
 
 def _check_workspace_root(path: Path) -> tuple[bool, str]:
