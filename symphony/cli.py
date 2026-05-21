@@ -2395,7 +2395,10 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
     )
     try:
         write_workflow(str(workflow_path), content, overwrite=False)
-    except Exception as exc:
+    except OnboardingError:
+        print(_fail(f"  {workflow_path} already exists."))
+        return False
+    except OSError as exc:
         print(_fail(f"  Failed to write {workflow_path}: {exc}"))
         return False
     print(f"\n{_ok('✓')} Wrote {workflow_path}")

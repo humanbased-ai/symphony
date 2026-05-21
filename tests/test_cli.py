@@ -1088,10 +1088,10 @@ class FirstRunWizardTests(unittest.TestCase):
                  patch("sys.stdin.isatty", return_value=True):
                 out = StringIO()
                 with redirect_stdout(out):
-                    # Wizard writes file, then load_startup_context fails on missing token → SystemExit(2)
+                    # Wizard writes the file; subsequent startup fails (missing token or port) → SystemExit
                     with self.assertRaises(SystemExit):
                         main(["run", str(wf), "--log-level", "WARNING"])
-            # Wizard wrote the file before the token check failed
+            # Wizard wrote the file before the startup error
             self.assertTrue(wf.exists())
 
     def test_run_skips_wizard_when_workflow_missing_in_non_tty(self):
