@@ -1858,6 +1858,44 @@ def _prompt_default(label: str, default: str) -> str:
     return value or default
 
 
+def _parse_github_input(value: str) -> tuple[str, str]:
+    """Extract (org, repo) from a raw user input string.
+
+    Handles full HTTPS URLs, SSH remote URLs, and 'org/repo' shorthand.
+    Returns ('', '') when nothing useful can be parsed.
+    """
+    import re
+    v = value.strip().rstrip("/").removesuffix(".git")
+    # https://github.com/org  or  https://github.com/org/repo
+    m = re.match(r"https?://(?:www\.)?github\.com/([^/]+)(?:/([^/]+))?", v, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2) or ""
+    # git@github.com:org/repo
+    m = re.match(r"git@github\.com:([^/]+)/([^/]+)", v, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+    # org/repo shorthand
+    if "/" in v:
+        parts = v.split("/", 1)
+        return parts[0], parts[1]
+    return v, ""
+
+
+def _parse_linear_slug(value: str) -> str:
+    """Extract a project slug from a raw user input string.
+
+    Handles full Linear project URLs like:
+      https://linear.app/team/project/name-abc123def
+    Returns the slug portion (last path segment) or the value unchanged.
+    """
+    import re
+    v = value.strip().rstrip("/")
+    m = re.match(r"https?://linear\.app/[^/]+/project/(.+)", v, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return v
+
+
 def _check_command(command: str) -> tuple[bool, str]:
     try:
         parts = shlex.split(command)
@@ -2338,7 +2376,7 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
         # Step 1: project slug
         print(f"\n{_bold('Step 1/4')} — Linear project slug")
         print(_dim("  Find it in the project URL: linear.app/YOUR-TEAM/project/NAME-") + _cyan("<slug>"))
-        project_slug = _prompt("Linear project slug").strip()
+        project_slug = _parse_linear_slug(_prompt("Linear project slug"))
         if not project_slug:
             print(_fail("  Project slug is required."))
             return False
@@ -2359,13 +2397,22 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
             print(_dim(f"  Detected from git remote: {detected_org}/{detected_repo}"))
         print(_dim("  Agents will clone this repo, push a branch, and open a PR."))
         if detected_org:
-            github_org = _prompt_default("GitHub org/user", detected_org).strip()
+            raw_org = _prompt_default("GitHub org/user", detected_org)
         else:
-            github_org = _prompt("GitHub org/user (blank to fill in later)").strip()
-        if detected_repo:
-            github_repo = _prompt_default("Repository name", detected_repo).strip()
+            raw_org = _prompt("GitHub org/user (blank to fill in later)")
+        parsed_org, parsed_repo_from_org = _parse_github_input(raw_org)
+        github_org = parsed_org
+        # If user pasted a full URL containing the repo too, carry it forward as default.
+        if parsed_repo_from_org:
+            github_repo = parsed_repo_from_org
+
+        repo_default = github_repo or detected_repo or ""
+        if repo_default:
+            raw_repo = _prompt_default("Repository name", repo_default)
         else:
-            github_repo = _prompt("Repository name (blank to fill in later)").strip()
+            raw_repo = _prompt("Repository name (blank to fill in later)")
+        _, parsed_repo = _parse_github_input(raw_repo)
+        github_repo = parsed_repo or raw_repo
 
         # Step 4: workspace root
         print(f"\n{_bold('Step 4/4')} — Workspace root")
