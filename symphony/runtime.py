@@ -103,6 +103,9 @@ class SymphonyRuntime:
             dispatch_issue(issue, self.state, now_ms=now_ms)
             dispatched_issues.append(issue)
 
+        for issue in dispatched_issues:
+            LOGGER.info("Dispatching  %s — %s", issue.identifier, issue.title)
+
         completed: list[str] = []
         failed: list[str] = []
         errors: dict[str, str] = {}
@@ -112,9 +115,12 @@ class SymphonyRuntime:
         for issue, result in zip(dispatched_issues, worker_results, strict=True):
             if result.success:
                 completed.append(issue.identifier)
+                LOGGER.info("Completed    %s", issue.identifier)
             else:
+                error = result.error or "worker_failed"
                 failed.append(issue.identifier)
-                errors[issue.identifier] = result.error or "worker_failed"
+                errors[issue.identifier] = error
+                LOGGER.warning("Failed       %s — %s", issue.identifier, error)
 
         await self.poll_feedback()
         self._notify_state_change()
