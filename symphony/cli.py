@@ -2323,7 +2323,7 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
     print(_dim("Let's set up this project. Press Ctrl-C at any time to cancel.\n"))
 
     try:
-        answer = input(f"Set up a new project here? [Y/n] ").strip().lower()
+        answer = input("Set up a new project here? [Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return False
@@ -2345,7 +2345,10 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
         # Step 2: runner
         print(f"\n{_bold('Step 2/4')} — Agent runner")
         runner_input = _prompt_default("Runner (claude_code / codex)", DEFAULT_RUNNER).strip()
-        runner = runner_input if runner_input in ("claude_code", "codex") else DEFAULT_RUNNER
+        if runner_input not in ("claude_code", "codex"):
+            print(_warn(f"  Unknown runner '{runner_input}', using {DEFAULT_RUNNER}."))
+            runner_input = DEFAULT_RUNNER
+        runner = runner_input
 
         # Step 3: GitHub repo (shown for claude_code; optional for codex)
         github_org = detected_org or ""
@@ -2389,7 +2392,11 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
             github_repo=github_repo,
         )
     )
-    write_workflow(str(workflow_path), content, overwrite=False)
+    try:
+        write_workflow(str(workflow_path), content, overwrite=False)
+    except Exception as exc:
+        print(_fail(f"  Failed to write {workflow_path}: {exc}"))
+        return False
     print(f"\n{_ok('✓')} Wrote {workflow_path}")
     print(_dim(f"  Tip: run `{cli} doctor {workflow_path}` to validate before the loop starts.\n"))
     return True

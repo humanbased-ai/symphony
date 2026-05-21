@@ -1030,10 +1030,6 @@ class ProjectCommandTests(unittest.TestCase):
 class FirstRunWizardTests(unittest.TestCase):
     """Tests for the sy run first-run setup wizard."""
 
-    def _wizard_inputs(self, *answers: str):
-        """Return a side_effect list that feeds answers then raises EOFError."""
-        return list(answers) + [EOFError()]
-
     def test_wizard_writes_workflow_with_provided_inputs(self):
         inputs = iter(["y", "my-project", "claude_code", "acme", "my-repo", ""])
         with tempfile.TemporaryDirectory() as tmp:
