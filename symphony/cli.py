@@ -1886,14 +1886,15 @@ def _parse_linear_slug(value: str) -> str:
 
     Handles full Linear project URLs like:
       https://linear.app/team/project/name-abc123def
-    Returns the slug portion (last path segment) or the value unchanged.
+    Strips surrounding whitespace and internal spaces so accidental
+    copy-paste padding does not produce an invalid slug.
+    Returns the slug portion (last path segment) or the cleaned value.
     """
     import re
     v = value.strip().rstrip("/")
     m = re.match(r"https?://linear\.app/[^/]+/project/(.+)", v, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    return v
+    slug = m.group(1) if m else v
+    return slug.replace(" ", "")
 
 
 def _check_command(command: str) -> tuple[bool, str]:
@@ -2383,7 +2384,7 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
 
         # Step 2: runner
         print(f"\n{_bold('Step 2/4')} — Agent runner")
-        runner_input = _prompt_default("Runner (claude_code / codex)", DEFAULT_RUNNER).strip()
+        runner_input = _prompt_default("Runner (claude_code / codex)", DEFAULT_RUNNER).strip().lower().replace("-", "_")
         if runner_input not in ("claude_code", "codex"):
             print(_warn(f"  Unknown runner '{runner_input}', using {DEFAULT_RUNNER}."))
             runner_input = DEFAULT_RUNNER
@@ -2411,8 +2412,8 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
             raw_repo = _prompt_default("Repository name", repo_default)
         else:
             raw_repo = _prompt("Repository name (blank to fill in later)")
-        _, parsed_repo = _parse_github_input(raw_repo)
-        github_repo = parsed_repo or raw_repo
+        org_or_name, parsed_repo = _parse_github_input(raw_repo)
+        github_repo = parsed_repo or org_or_name or raw_repo
 
         # Step 4: workspace root
         print(f"\n{_bold('Step 4/4')} — Workspace root")
