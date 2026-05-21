@@ -31,6 +31,10 @@ Comments (most recent last):
 Classification:"""
 
 
+class ClassifyError(Exception):
+    """Raised when the Anthropic API call fails (network error, auth error, etc.)."""
+
+
 class FeedbackSignal(Enum):
     APPROVE = "approve"
     CHANGE_REQUEST = "change_request"
@@ -78,5 +82,5 @@ def classify_feedback(comments: list[str], *, api_key: str, model: str = _CLASSI
             response = json.loads(resp.read().decode())
         label = response["content"][0]["text"].strip().upper()
         return _SIGNAL_MAP.get(label)
-    except (urllib.error.URLError, KeyError, json.JSONDecodeError, IndexError):
-        return None
+    except (urllib.error.URLError, KeyError, json.JSONDecodeError, IndexError) as exc:
+        raise ClassifyError(str(exc)) from exc

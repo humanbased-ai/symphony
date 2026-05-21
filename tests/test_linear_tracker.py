@@ -470,14 +470,14 @@ class FeedbackSignalTests(unittest.TestCase):
             result = classify_feedback(["Dave: interesting"], api_key="test-key")
         self.assertIsNone(result)
 
-    def test_http_error_returns_none(self):
+    def test_http_error_raises_classify_error(self):
         import urllib.error
-        from symphony.feedback import classify_feedback
+        from symphony.feedback import ClassifyError, classify_feedback
         from unittest.mock import patch
 
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
-            result = classify_feedback(["Alice: LGTM"], api_key="test-key")
-        self.assertIsNone(result)
+        with self.assertRaises(ClassifyError):
+            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
+                classify_feedback(["Alice: LGTM"], api_key="test-key")
 
     def test_label_is_case_insensitive(self):
         from symphony.feedback import FeedbackSignal, classify_feedback

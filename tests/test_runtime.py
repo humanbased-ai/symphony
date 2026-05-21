@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 from symphony.agents.base import AgentEvent, AgentEventType, AgentSession, TaskResult, TokenUsage, TurnResult
 from symphony.config import WorkflowConfig
-from symphony.feedback import FeedbackSignal
+from symphony.feedback import ClassifyError, FeedbackSignal
 from symphony.http_server import build_state_snapshot
 from symphony.orchestrator import RetryEntry
 from symphony.runtime import SymphonyRuntime
@@ -580,6 +581,50 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.poll_feedback()  # second poll: retries and succeeds
 
         self.assertEqual([("r-f", "Done")], tracker.state_transitions)
+
+    async def test_classify_error_not_marked_seen_retried_next_poll(self):
+        """ClassifyError (API failure) must leave _feedback_seen unset so the signal is retried."""
+        review_issue = issue("r-e", "IN-530", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-e": ["c-1"]},
+            comments={"r-e": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+                with patch("symphony.runtime.classify_feedback", side_effect=ClassifyError("timeout")):
+                    await runtime.poll_feedback()  # fails: _feedback_seen NOT updated
+                self.assertEqual([], tracker.state_transitions)
+                self.assertNotIn("r-e", runtime._feedback_seen)
+
+                with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                    await runtime.poll_feedback()  # retries and succeeds
+
+        self.assertEqual([("r-e", "Done")], tracker.state_transitions)
+
+    async def test_no_api_key_disables_feedback_gate(self):
+        """When ANTHROPIC_API_KEY is absent, poll_feedback must skip without calling classify."""
+        review_issue = issue("r-k", "IN-540", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-k": ["c-1"]},
+            comments={"r-k": ["Alice: LGTM"]},
+        )
+        # Build an env dict without ANTHROPIC_API_KEY
+        env_no_key = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch.dict("os.environ", env_no_key, clear=True):
+                with patch("symphony.runtime.classify_feedback") as mock_classify:
+                    await runtime.poll_feedback()
+                    await runtime.poll_feedback()  # second call: flag already set, no duplicate warn
+
+        self.assertEqual([], tracker.state_transitions)
+        mock_classify.assert_not_called()
+        self.assertTrue(runtime._warned_no_api_key)
 
     async def test_no_review_issues_does_nothing(self):
         tracker = FeedbackTracker([], review_issues=[])
