@@ -407,53 +407,89 @@ class FeedbackMethodTests(unittest.TestCase):
 
 
 class FeedbackSignalTests(unittest.TestCase):
-    """Unit tests for the detect_feedback_signal function."""
+    """Unit tests for the classify_feedback function."""
 
-    def test_approve_patterns(self):
-        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+    def _make_response(self, label: str) -> bytes:
+        import json
+        return json.dumps({"content": [{"text": label}]}).encode()
 
-        for text in ["LGTM", "looks good", "looks good to me", "Approved", "ship it", "merge it", "good to go", "👍", "✅"]:
-            with self.subTest(text=text):
-                signal = detect_feedback_signal([f"Alice: {text}"])
-                self.assertEqual(FeedbackSignal.APPROVE, signal)
+    def test_empty_list_returns_none_without_http_call(self):
+        from symphony.feedback import classify_feedback
+        from unittest.mock import patch
 
-    def test_change_request_patterns(self):
-        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+        with patch("urllib.request.urlopen") as mock_open:
+            result = classify_feedback([], api_key="test-key")
+        self.assertIsNone(result)
+        mock_open.assert_not_called()
 
-        for text in ["please change X", "please fix this", "change request", "needs changes", "request changes", "fix: the thing"]:
-            with self.subTest(text=text):
-                signal = detect_feedback_signal([f"Bob: {text}"])
-                self.assertEqual(FeedbackSignal.CHANGE_REQUEST, signal)
+    def test_approve_label_parsed(self):
+        from symphony.feedback import FeedbackSignal, classify_feedback
+        from unittest.mock import MagicMock, patch
 
-    def test_close_patterns(self):
-        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("APPROVE")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Alice: LGTM"], api_key="test-key")
+        self.assertEqual(FeedbackSignal.APPROVE, result)
 
-        for text in ["closed", "won't fix", "wontfix", "cancelled", "drop this", "not needed", "out of scope"]:
-            with self.subTest(text=text):
-                signal = detect_feedback_signal([f"Carol: {text}"])
-                self.assertEqual(FeedbackSignal.CLOSE, signal)
+    def test_change_request_label_parsed(self):
+        from symphony.feedback import FeedbackSignal, classify_feedback
+        from unittest.mock import MagicMock, patch
 
-    def test_most_recent_comment_wins(self):
-        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("CHANGE_REQUEST")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Bob: please fix this"], api_key="test-key")
+        self.assertEqual(FeedbackSignal.CHANGE_REQUEST, result)
 
-        signal = detect_feedback_signal(["Alice: please fix this", "Bob: LGTM"])
-        self.assertEqual(FeedbackSignal.APPROVE, signal)
+    def test_close_label_parsed(self):
+        from symphony.feedback import FeedbackSignal, classify_feedback
+        from unittest.mock import MagicMock, patch
 
-    def test_no_signal_returns_none(self):
-        from symphony.feedback import detect_feedback_signal
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("CLOSE")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Carol: not needed"], api_key="test-key")
+        self.assertEqual(FeedbackSignal.CLOSE, result)
 
-        self.assertIsNone(detect_feedback_signal(["Alice: this is interesting"]))
+    def test_none_label_returns_none(self):
+        from symphony.feedback import classify_feedback
+        from unittest.mock import MagicMock, patch
 
-    def test_empty_list_returns_none(self):
-        from symphony.feedback import detect_feedback_signal
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("NONE")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Dave: interesting"], api_key="test-key")
+        self.assertIsNone(result)
 
-        self.assertIsNone(detect_feedback_signal([]))
+    def test_http_error_raises_classify_error(self):
+        import urllib.error
+        from symphony.feedback import ClassifyError, classify_feedback
+        from unittest.mock import patch
 
-    def test_comment_without_author_prefix(self):
-        from symphony.feedback import FeedbackSignal, detect_feedback_signal
+        with self.assertRaises(ClassifyError):
+            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
+                classify_feedback(["Alice: LGTM"], api_key="test-key")
 
-        signal = detect_feedback_signal(["LGTM"])
-        self.assertEqual(FeedbackSignal.APPROVE, signal)
+    def test_label_is_case_insensitive(self):
+        from symphony.feedback import FeedbackSignal, classify_feedback
+        from unittest.mock import MagicMock, patch
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("approve")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Alice: LGTM"], api_key="test-key")
+        self.assertEqual(FeedbackSignal.APPROVE, result)
 
 
 if __name__ == "__main__":

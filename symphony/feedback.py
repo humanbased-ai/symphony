@@ -1,8 +1,38 @@
 """Human Feedback Gate — comment signal detection for the In Review state."""
 from __future__ import annotations
 
-import re
+import json
+import urllib.error
+import urllib.request
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass
+
+_ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_VERSION = "2023-06-01"
+_CLASSIFICATION_MODEL = "claude-haiku-4-5-20251001"
+_MAX_TOKENS = 16
+
+_SYSTEM_PROMPT = """\
+You classify human feedback comments left on a code review issue.
+Reply with exactly one word — no punctuation, no explanation:
+  APPROVE         reviewer approves; changes are good, ready to merge or mark done
+  CHANGE_REQUEST  reviewer wants changes made before the issue can be closed
+  CLOSE           reviewer wants to close, cancel, or mark the issue won't-be-fixed
+  NONE            no clear feedback signal in the comments
+"""
+
+_USER_TEMPLATE = """\
+Comments (most recent last):
+{comments}
+
+Classification:"""
+
+
+class ClassifyError(Exception):
+    """Raised when the Anthropic API call fails (network error, auth error, etc.)."""
 
 
 class FeedbackSignal(Enum):
@@ -11,36 +41,46 @@ class FeedbackSignal(Enum):
     CLOSE = "close"
 
 
-_APPROVE_PATTERNS = re.compile(
-    r"(?:\b(?:lgtm|looks good(?: to me)?|approved?|ship it|merge it|good to go)\b|👍|✅)",
-    re.IGNORECASE,
-)
-
-_CHANGE_PATTERNS = re.compile(
-    r"(?:\b(?:please (?:change|fix|update|revise|redo)|change request|needs? (?:changes?|work|revision)|request changes?)\b|fix:|change:)",
-    re.IGNORECASE,
-)
-
-_CLOSE_PATTERNS = re.compile(
-    r"\b(close[ds]?|won'?t fix|wontfix|cancel(led|ed)?|drop( this)?|not needed|out of scope)\b",
-    re.IGNORECASE,
-)
+_SIGNAL_MAP = {
+    "APPROVE": FeedbackSignal.APPROVE,
+    "CHANGE_REQUEST": FeedbackSignal.CHANGE_REQUEST,
+    "CLOSE": FeedbackSignal.CLOSE,
+}
 
 
-def detect_feedback_signal(comments: list[str]) -> FeedbackSignal | None:
-    """Scan comments for the first human feedback signal.
+def classify_feedback(comments: list[str], *, api_key: str, model: str = _CLASSIFICATION_MODEL) -> FeedbackSignal | None:
+    """Use Claude to classify the feedback intent in a list of comments.
 
-    Comments are expected in the format "Author: body" as returned by
-    LinearClient.fetch_issue_comments(). Only the body portion is matched.
-    Returns the first signal found in reverse order (most recent first), or
-    None if no signal is detected.
+    Comments should be in "Author: body" format as returned by LinearClient.
+    Returns None if no signal is detected or the API call fails.
     """
-    for comment in reversed(comments):
-        body = comment.split(": ", 1)[1] if ": " in comment else comment
-        if _CLOSE_PATTERNS.search(body):
-            return FeedbackSignal.CLOSE
-        if _CHANGE_PATTERNS.search(body):
-            return FeedbackSignal.CHANGE_REQUEST
-        if _APPROVE_PATTERNS.search(body):
-            return FeedbackSignal.APPROVE
-    return None
+    if not comments:
+        return None
+
+    body_text = "\n".join(f"- {c}" for c in comments)
+    user_content = _USER_TEMPLATE.format(comments=body_text)
+
+    payload = json.dumps({
+        "model": model,
+        "max_tokens": _MAX_TOKENS,
+        "system": _SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_content}],
+    }).encode()
+
+    req = urllib.request.Request(
+        _ANTHROPIC_ENDPOINT,
+        data=payload,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": _ANTHROPIC_VERSION,
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            response = json.loads(resp.read().decode())
+        label = response["content"][0]["text"].strip().upper()
+        return _SIGNAL_MAP.get(label)
+    except (urllib.error.URLError, KeyError, json.JSONDecodeError, IndexError) as exc:
+        raise ClassifyError(str(exc)) from exc
