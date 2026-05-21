@@ -55,6 +55,7 @@ from symphony.workspace import WorkspaceManager
 
 
 DEFAULT_PORT = 7337
+_LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 LOGGER = logging.getLogger(__name__)
 
 _LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
@@ -142,12 +143,13 @@ def _clr(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _use_color() else text
 
 
-def _ok(t: str) -> str:   return _clr(t, "32")   # green
-def _warn(t: str) -> str: return _clr(t, "33")   # yellow
-def _fail(t: str) -> str: return _clr(t, "31")   # red
-def _cyan(t: str) -> str: return _clr(t, "36")   # cyan
-def _bold(t: str) -> str: return _clr(t, "1")    # bold
-def _dim(t: str) -> str:  return _clr(t, "2")    # dim
+def _ok(t: str) -> str:     return _clr(t, "32")   # green
+def _warn(t: str) -> str:   return _clr(t, "33")   # yellow
+def _fail(t: str) -> str:   return _clr(t, "31")   # red
+def _cyan(t: str) -> str:   return _clr(t, "36")   # cyan
+def _purple(t: str) -> str: return _clr(t, "35")   # purple/magenta
+def _bold(t: str) -> str:   return _clr(t, "1")    # bold
+def _dim(t: str) -> str:    return _clr(t, "2")    # dim
 
 
 def _cli_name() -> str:
@@ -799,6 +801,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_main(raw_args[1:])
         if command == "webhooks":
             return webhooks_main(raw_args[1:])
+        if command == "project":
+            return project_main(raw_args[1:])
 
     parser = build_parser()
     args = parser.parse_args(raw_args)
@@ -1948,6 +1952,348 @@ def _content_length(raw: str | None) -> int:
         return max(int(raw), 0)
     except ValueError:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# sy project — dashboard listing all configured and unconfigured projects
+# ---------------------------------------------------------------------------
+
+_PROJECT_LIST_GQL = """
+query ProjectList($cursor: String) {
+  projects(first: 50, after: $cursor) {
+    nodes {
+      id
+      name
+      slugId
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"""
+
+_PROJECT_ISSUES_GQL = """
+query ProjectIssues($projectId: ID!, $cursor: String) {
+  project(id: $projectId) {
+    issues(first: 500, after: $cursor) {
+      nodes {
+        state { type }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"""
+
+
+def build_project_parser() -> argparse.ArgumentParser:
+    cli = _cli_name()
+    parser = argparse.ArgumentParser(
+        prog=f"{cli} project",
+        description="List all Linear projects and their workflow status.",
+    )
+    parser.add_argument(
+        "--linear-api-key",
+        metavar="KEY",
+        default=None,
+        help="Linear personal API key. Defaults to LINEAR_API_KEY env var.",
+    )
+    return parser
+
+
+def project_main(argv: Sequence[str] | None = None) -> int:
+    parser = build_project_parser()
+    args = parser.parse_args(argv)
+
+    token: str | None = getattr(args, "linear_api_key", None) or os.environ.get("LINEAR_API_KEY")
+    if not token:
+        try:
+            from symphony.auth import TokenStore
+            from symphony.config import TrackerConfig
+            dummy = TrackerConfig(kind="linear")
+            token = TokenStore(dummy).resolve_linear_token()
+        except Exception:
+            pass
+    if not token:
+        print(_fail("No Linear API key found."))
+        print(_dim("  Set LINEAR_API_KEY or run: sy onboard"))
+        return 1
+
+    cwd = Path.cwd()
+
+    # --- find all WORKFLOW.md files up to depth 3 ---
+    workflow_files: list[Path] = []
+    seen: set[Path] = set()
+    for pat in ("WORKFLOW.md", "*/WORKFLOW.md", "*/*/WORKFLOW.md", "*/*/*/WORKFLOW.md"):
+        for p in cwd.glob(pat):
+            if p not in seen:
+                seen.add(p)
+                workflow_files.append(p)
+    workflow_files.sort()
+
+    # --- parse slugs from each WORKFLOW.md ---
+    slug_to_path: dict[str, str] = {}
+    for wf_path in workflow_files:
+        try:
+            wf_def = load_workflow(wf_path)
+            slug = WorkflowConfig.from_mapping(wf_def.config).tracker.project_slug
+            if slug:
+                rel_str = str(wf_path.relative_to(cwd))
+                display = "./" + rel_str if not rel_str.startswith("..") else rel_str
+                slug_to_path[slug] = display
+        except Exception:
+            pass
+
+    # --- detect running symphony processes ---
+    running_paths: set[str] = _detect_running_workflow_paths()
+
+    # --- fetch Linear data ---
+    import json as _json
+    import urllib.request as _req
+
+    def _gql(query: str, variables: dict | None = None) -> dict:
+        payload = _json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+        req = _req.Request(
+            _LINEAR_GRAPHQL_URL,
+            data=payload,
+            headers={"Authorization": token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with _req.urlopen(req, timeout=15) as resp:
+            body = _json.loads(resp.read())
+        if "errors" in body:
+            msgs = "; ".join(e.get("message", str(e)) for e in body["errors"])
+            raise RuntimeError(f"Linear API error: {msgs}")
+        return body
+
+    try:
+        linear_projects: list[dict] = []
+        cursor: str | None = None
+        while True:
+            body = _gql(_PROJECT_LIST_GQL, {"cursor": cursor})
+            page = (body.get("data") or {}).get("projects") or {}
+            linear_projects.extend(page.get("nodes") or [])
+            page_info = page.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+    except Exception as exc:
+        print(_fail(f"Failed to reach Linear API: {exc}"))
+        return 1
+
+    # --- build index: slug → linear project data ---
+    # WORKFLOW.md stores the full slug (name-shortid), but Linear's GraphQL slugId
+    # returns only the short ID portion. Match by exact or suffix.
+    linear_by_slug: dict[str, dict] = {p["slugId"]: p for p in linear_projects if p.get("slugId")}
+
+    def _find_linear_project(workflow_slug: str) -> dict | None:
+        if workflow_slug in linear_by_slug:
+            return linear_by_slug[workflow_slug]
+        for api_slug, proj in linear_by_slug.items():
+            if workflow_slug.endswith(api_slug):
+                return proj
+        return None
+
+    # Cache to avoid duplicate API calls for the same project
+    _issue_counts_cache: dict[str, tuple[int, int, int]] = {}
+
+    def _issue_counts(project_id: str) -> tuple[int, int, int]:
+        if project_id in _issue_counts_cache:
+            return _issue_counts_cache[project_id]
+        done = active = open_ = 0
+        page_cursor: str | None = None
+        while True:
+            try:
+                resp = _gql(_PROJECT_ISSUES_GQL, {"projectId": project_id, "cursor": page_cursor})
+                issues_data = (((resp.get("data") or {}).get("project") or {}).get("issues") or {})
+                nodes = issues_data.get("nodes") or []
+            except Exception:
+                break
+            for issue in nodes:
+                t = (issue.get("state") or {}).get("type") or ""
+                if t in ("completed", "canceled"):
+                    done += 1
+                elif t == "started":
+                    active += 1
+                else:
+                    open_ += 1
+            page_info = issues_data.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            page_cursor = page_info.get("endCursor")
+        result = (done, active, open_)
+        _issue_counts_cache[project_id] = result
+        return result
+
+    def _is_running(display_path: str) -> bool:
+        abs_path = str((cwd / display_path).resolve())
+        return abs_path in running_paths
+
+    def _fmt_issue_counts(done: int, active: int, open_: int) -> str:
+        parts = [_ok(f"{done} done")]
+        sep = _dim(" · ")
+        if active:
+            parts.append(_purple(f"{active} active"))
+        else:
+            parts.append(_dim(f"{active} active"))
+        parts.append(_cyan(f"{open_} open"))
+        return sep.join(parts)
+
+    # --- render configured projects ---
+    # Each row: (indicator, name, workflow, issues, status, next_step)
+    configured_rows: list[tuple[str, str, str, str, str, str]] = []
+    configured_slugs: set[str] = set()
+
+    for slug, wf_str in slug_to_path.items():
+        configured_slugs.add(slug)
+        linear_proj = _find_linear_project(slug)
+        if linear_proj:
+            configured_slugs.add(linear_proj["slugId"])
+        raw_name = linear_proj["name"] if linear_proj else slug
+        if linear_proj:
+            done, active, open_ = _issue_counts(linear_proj["id"])
+            issues_str = _fmt_issue_counts(done, active, open_)
+        else:
+            issues_str = _dim("project not found in Linear")
+
+        running = _is_running(wf_str)
+        cli = _cli_name()
+        if running:
+            indicator = _ok("▶")
+            name = _bold(raw_name)
+            wf_col = _dim(wf_str)
+            status = _ok("running")
+            next_step = _dim(f"sy doctor {wf_str}")
+        else:
+            indicator = _dim("○")
+            name = _dim(raw_name)
+            wf_col = _dim(wf_str)
+            status = _dim("stopped")
+            next_step = _dim(f"{cli} run {wf_str}")
+        configured_rows.append((indicator, name, wf_col, issues_str, status, next_step))
+
+    # --- unconfigured: Linear projects with no WORKFLOW.md ---
+    unconfigured_rows: list[tuple[str, str, str]] = []
+    for proj in linear_projects:
+        slug = proj.get("slugId") or ""
+        if slug and slug not in configured_slugs:
+            name = proj.get("name") or slug
+            done, active, open_ = _issue_counts(proj["id"])
+            total = done + active + open_
+            issues_str = _dim(f"{total} issues · no workflow")
+            cli = _cli_name()
+            next_step = _dim(f"{cli} run {slug}/WORKFLOW.md")
+            unconfigured_rows.append((name, issues_str, next_step))
+
+    # --- print ---
+    _print_project_table(configured_rows, unconfigured_rows)
+    return 0
+
+
+def _proc_cwd(pid: str) -> str | None:
+    """Return the working directory of a process by PID (Linux /proc or macOS lsof)."""
+    try:
+        link = Path(f"/proc/{pid}/cwd")
+        if link.is_symlink():
+            return str(link.resolve())
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(
+            ["lsof", "-p", pid, "-a", "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+        for ln in out.splitlines():
+            if ln.startswith("n"):
+                return ln[1:]
+    except Exception:
+        pass
+    return None
+
+
+def _detect_running_workflow_paths() -> set[str]:
+    """Return set of absolute WORKFLOW.md paths found in running symphony processes."""
+    try:
+        result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
+        paths: set[str] = set()
+        for line in result.stdout.splitlines():
+            if ("symphony" in line or "sy " in line) and "run" in line:
+                pid_m = re.match(r'\S+\s+(\d+)', line)
+                pid = pid_m.group(1) if pid_m else None
+                m = re.search(r'(?:symphony|sy)\s+run\s+(\S+\.md)', line)
+                wf_arg = m.group(1) if m else "WORKFLOW.md"
+                if os.path.isabs(wf_arg):
+                    paths.add(wf_arg)
+                elif pid:
+                    proc_dir = _proc_cwd(pid)
+                    if proc_dir:
+                        paths.add(str(Path(proc_dir).joinpath(wf_arg).resolve()))
+        return paths
+    except Exception:
+        return set()
+
+
+def _print_project_table(
+    configured: list[tuple[str, str, str, str, str, str]],
+    unconfigured: list[tuple[str, str, str]],
+) -> None:
+    if not configured and not unconfigured:
+        print(_dim("No Linear projects found."))
+        return
+
+    COL_SEP = "  "
+    # Columns: indicator | name | workflow | issues | status | next_step
+    headers = ("", "LINEAR PROJECT", "WORKFLOW", "ISSUES", "STATUS", "NEXT STEP")
+
+    def _vis(s: str) -> int:
+        return len(re.sub(r'\033\[[0-9;]*m', '', s))
+
+    def _pad(s: str, width: int) -> str:
+        return s + " " * max(0, width - _vis(s))
+
+    if configured:
+        col_widths = [len(h) for h in headers]
+        for row in configured:
+            for i, cell in enumerate(row):
+                col_widths[i] = max(col_widths[i], _vis(cell))
+
+        # Print header (skip indicator column)
+        header_cells = [_pad(h, col_widths[i]) for i, h in enumerate(headers)]
+        print(_dim(COL_SEP.join(header_cells)))
+
+        for indicator, name, wf, issues, status, next_step in configured:
+            cells = [indicator, name, wf, issues, status, next_step]
+            print(COL_SEP.join(_pad(cell, col_widths[i]) for i, cell in enumerate(cells)))
+
+    if unconfigured:
+        if configured:
+            print()
+        print(_dim("── Linear projects with no workflow configured ──"))
+        unc_widths = [2, 20, 20, 20]  # icon+name | issues | next_step
+        rows_display = [(_warn("! ") + name, issues, next_step) for name, issues, next_step in unconfigured]
+        widths = [0] * 3
+        for row in rows_display:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], _vis(cell))
+        for row in rows_display:
+            print(COL_SEP.join(_pad(cell, widths[i]) for i, cell in enumerate(row)))
+
+    print()
+    legend = (
+        _ok("▶ running") + _dim(" = dispatch loop active  ·  ") +
+        _dim("○ stopped") + _dim(" = configured, not running  ·  ") +
+        _warn("! not configured") + _dim(" = first run opens setup wizard")
+    )
+    print(legend)
+    print(
+        _dim("Stop:  ") + _cyan("Ctrl-C") + _dim("  ·  kill <PID>  ·  pkill -f 'symphony run'")
+    )
+    print(_dim("PID:   ps aux | grep 'symphony run'"))
 
 
 if __name__ == "__main__":

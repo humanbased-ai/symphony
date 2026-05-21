@@ -1,4 +1,5 @@
 import asyncio
+import re
 import urllib.request
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from symphony.cli import (
     RuntimeWorkflowReloader,
     StartupError,
     _check_claude_login,
+    _detect_running_workflow_paths,
     _check_gh_auth,
     _check_github_token_scopes,
     _check_linear_key_valid,
@@ -24,6 +26,7 @@ from symphony.cli import (
     load_startup_context,
     main,
     print_setup_checks,
+    project_main,
     run_once,
     setup_environment_checks,
 )
@@ -905,6 +908,122 @@ class StarterMissionTests(unittest.TestCase):
 
             payload = _json.loads(history_path.read_text())
             self.assertTrue(payload["tutorials"]["hello-world-mission"]["done"])
+
+
+class ProjectCommandTests(unittest.TestCase):
+    """Tests for `sy project` dashboard command."""
+
+    _FAKE_PROJECTS = [
+        {"id": "proj-1", "name": "Symphony", "slugId": "abc123"},
+        {"id": "proj-2", "name": "Other Project", "slugId": "def456"},
+    ]
+
+    _FAKE_ISSUES = [
+        {"state": {"type": "completed"}},
+        {"state": {"type": "completed"}},
+        {"state": {"type": "started"}},
+        {"state": {"type": "unstarted"}},
+        {"state": {"type": "unstarted"}},
+        {"state": {"type": "unstarted"}},
+    ]
+
+    def _make_gql_response(self, query, variables=None):
+        _no_next = {"hasNextPage": False, "endCursor": None}
+        if "ProjectList" in query:
+            return {"data": {"projects": {"nodes": self._FAKE_PROJECTS, "pageInfo": _no_next}}}
+        if "ProjectIssues" in query:
+            return {"data": {"project": {"issues": {"nodes": self._FAKE_ISSUES, "pageInfo": _no_next}}}}
+        return {"data": {}}
+
+    def test_no_token_returns_error(self):
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("symphony.auth.TokenStore") as mock_store:
+            mock_store.return_value.resolve_linear_token.side_effect = Exception("no token")
+            out = StringIO()
+            with redirect_stdout(out):
+                result = project_main([])
+        self.assertEqual(1, result)
+
+    def test_shows_configured_and_unconfigured_projects(self):
+        workflow_content = (
+            "---\ntracker:\n  kind: linear\n  project_slug: symphony-abc123\n---\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            wf.write_text(workflow_content)
+
+            def fake_urlopen(req, timeout=15):
+                import json
+                body = json.loads(req.data.decode())
+                resp_data = self._make_gql_response(body["query"], body.get("variables"))
+                resp_bytes = json.dumps(resp_data).encode()
+                import io
+                return io.BytesIO(resp_bytes)
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("symphony.cli._detect_running_workflow_paths", return_value=set()), \
+                 patch("os.getcwd", return_value=tmp), \
+                 patch("pathlib.Path.cwd", return_value=Path(tmp)):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = project_main(["--linear-api-key", "lin_api_test"])
+
+        self.assertEqual(0, result)
+        # Strip ANSI codes for plain-text assertions
+        plain = re.sub(r'\033\[[0-9;]*m', '', out.getvalue())
+        self.assertIn("Symphony", plain)
+        self.assertIn("WORKFLOW.md", plain)
+        self.assertIn("2 done", plain)
+        self.assertIn("1 active", plain)
+        self.assertIn("3 open", plain)
+        self.assertIn("Other Project", plain)
+        self.assertIn("no workflow", plain)
+        self.assertIn("stopped", plain)
+
+    def test_running_project_shows_running_status(self):
+        workflow_content = (
+            "---\ntracker:\n  kind: linear\n  project_slug: symphony-abc123\n---\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            wf.write_text(workflow_content)
+
+            def fake_urlopen(req, timeout=15):
+                import json
+                body = json.loads(req.data.decode())
+                resp_data = self._make_gql_response(body["query"], body.get("variables"))
+                resp_bytes = json.dumps(resp_data).encode()
+                import io
+                return io.BytesIO(resp_bytes)
+
+            abs_wf = str((Path(tmp) / "WORKFLOW.md").resolve())
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("symphony.cli._detect_running_workflow_paths", return_value={abs_wf}), \
+                 patch("os.getcwd", return_value=tmp), \
+                 patch("pathlib.Path.cwd", return_value=Path(tmp)):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = project_main(["--linear-api-key", "lin_api_test"])
+
+        self.assertEqual(0, result)
+        output = out.getvalue()
+        self.assertIn("running", output)
+        self.assertIn("sy doctor", output)
+
+    def test_detect_running_workflow_paths_parses_ps_output(self):
+        fake_ps = type("R", (), {
+            "stdout": (
+                "user  123  0.0  sy run /abs/project-a/WORKFLOW.md\n"
+                "user  456  0.0  symphony run /abs/root/WORKFLOW.md\n"
+                "user  789  0.0  python something else\n"
+            ),
+            "returncode": 0,
+        })()
+        with patch("subprocess.run", return_value=fake_ps):
+            paths = _detect_running_workflow_paths()
+        self.assertIn("/abs/project-a/WORKFLOW.md", paths)
+        self.assertIn("/abs/root/WORKFLOW.md", paths)
+        self.assertNotIn("python", paths)
 
 
 if __name__ == "__main__":
