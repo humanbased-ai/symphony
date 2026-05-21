@@ -21,8 +21,10 @@ _CHANGE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_APOSTROPHE = r"['‘’ʼ]"  # straight, left/right curly, modifier letter
+
 _CLOSE_PATTERNS = re.compile(
-    r"\b(close[ds]?|won'?t fix|wontfix|cancel(led|ed)?|drop( this)?|not needed|out of scope)\b",
+    r"\b(close[ds]?|won" + _APOSTROPHE + r"?t fix|wontfix|cancel(led|ed)?|drop( this)?|not needed|out of scope)\b",
     re.IGNORECASE,
 )
 
