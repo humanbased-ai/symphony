@@ -836,6 +836,7 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
                 )
             except StartupError as exc2:
                 parser.exit(2, f"symphony: {exc2}\n")
+                return 1
         else:
             parser.exit(2, f"symphony: {exc}\n")
 
