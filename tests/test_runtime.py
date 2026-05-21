@@ -479,7 +479,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
             runtime = self._make_runtime(tracker, tmp)
             await runtime.poll_feedback()
 
-        self.assertEqual([("r-3", "Cancelled")], tracker.state_transitions)
+        self.assertEqual([("r-3", "Canceled")], tracker.state_transitions)
 
     async def test_no_transition_when_no_new_comments(self):
         review_issue = issue("r-4", "IN-503", state="In Review")
@@ -534,6 +534,35 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
             await runtime.poll_feedback()
 
         self.assertEqual([], tracker.state_transitions)
+
+    async def test_signal_retried_when_state_update_fails(self):
+        """If update_issue_state_by_name returns False, the signal must be retried next poll."""
+        review_issue = issue("r-f", "IN-520", state="In Review")
+
+        class FailThenSucceedTracker(FeedbackTracker):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._call_count = 0
+
+            def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
+                self._call_count += 1
+                if self._call_count == 1:
+                    return False  # first attempt fails
+                self.state_transitions.append((issue_id, state_name))
+                return True
+
+        tracker = FailThenSucceedTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-f": ["c-1"]},
+            comments={"r-f": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            await runtime.poll_feedback()  # first poll: update fails, not marked seen
+            await runtime.poll_feedback()  # second poll: retries and succeeds
+
+        self.assertEqual([("r-f", "Done")], tracker.state_transitions)
 
     async def test_no_review_issues_does_nothing(self):
         tracker = FeedbackTracker([], review_issues=[])
