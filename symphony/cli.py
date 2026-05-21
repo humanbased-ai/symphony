@@ -1959,23 +1959,31 @@ def _content_length(raw: str | None) -> int:
 # ---------------------------------------------------------------------------
 
 _PROJECT_LIST_GQL = """
-query ProjectList {
-  projects(first: 50) {
+query ProjectList($cursor: String) {
+  projects(first: 50, after: $cursor) {
     nodes {
       id
       name
       slugId
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
     }
   }
 }
 """
 
 _PROJECT_ISSUES_GQL = """
-query ProjectIssues($projectId: ID!) {
+query ProjectIssues($projectId: ID!, $cursor: String) {
   project(id: $projectId) {
-    issues(first: 500) {
+    issues(first: 500, after: $cursor) {
       nodes {
         state { type }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
       }
     }
   }
@@ -2020,13 +2028,13 @@ def project_main(argv: Sequence[str] | None = None) -> int:
 
     # --- find all WORKFLOW.md files up to depth 3 ---
     workflow_files: list[Path] = []
-    for p in sorted(cwd.rglob("WORKFLOW.md")):
-        try:
-            rel = p.relative_to(cwd)
-        except ValueError:
-            continue
-        if len(rel.parts) <= 4:  # depth ≤ 3 dirs + filename
-            workflow_files.append(p)
+    seen: set[Path] = set()
+    for pat in ("WORKFLOW.md", "*/WORKFLOW.md", "*/*/WORKFLOW.md", "*/*/*/WORKFLOW.md"):
+        for p in cwd.glob(pat):
+            if p not in seen:
+                seen.add(p)
+                workflow_files.append(p)
+    workflow_files.sort()
 
     # --- parse slugs from each WORKFLOW.md ---
     slug_to_path: dict[str, str] = {}
@@ -2057,15 +2065,26 @@ def project_main(argv: Sequence[str] | None = None) -> int:
             method="POST",
         )
         with _req.urlopen(req, timeout=15) as resp:
-            return _json.loads(resp.read())
+            body = _json.loads(resp.read())
+        if "errors" in body:
+            msgs = "; ".join(e.get("message", str(e)) for e in body["errors"])
+            raise RuntimeError(f"Linear API error: {msgs}")
+        return body
 
     try:
-        body = _gql(_PROJECT_LIST_GQL)
+        linear_projects: list[dict] = []
+        cursor: str | None = None
+        while True:
+            body = _gql(_PROJECT_LIST_GQL, {"cursor": cursor})
+            page = (body.get("data") or {}).get("projects") or {}
+            linear_projects.extend(page.get("nodes") or [])
+            page_info = page.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
     except Exception as exc:
         print(_fail(f"Failed to reach Linear API: {exc}"))
         return 1
-
-    linear_projects = (((body.get("data") or {}).get("projects") or {}).get("nodes") or [])
 
     # --- build index: slug → linear project data ---
     # WORKFLOW.md stores the full slug (name-shortid), but Linear's GraphQL slugId
@@ -2086,30 +2105,34 @@ def project_main(argv: Sequence[str] | None = None) -> int:
     def _issue_counts(project_id: str) -> tuple[int, int, int]:
         if project_id in _issue_counts_cache:
             return _issue_counts_cache[project_id]
-        try:
-            resp = _gql(_PROJECT_ISSUES_GQL, {"projectId": project_id})
-            nodes = (((resp.get("data") or {}).get("project") or {}).get("issues") or {}).get("nodes") or []
-        except Exception:
-            nodes = []
         done = active = open_ = 0
-        for issue in nodes:
-            t = (issue.get("state") or {}).get("type") or ""
-            if t in ("completed", "canceled"):
-                done += 1
-            elif t == "started":
-                active += 1
-            else:
-                open_ += 1
+        page_cursor: str | None = None
+        while True:
+            try:
+                resp = _gql(_PROJECT_ISSUES_GQL, {"projectId": project_id, "cursor": page_cursor})
+                issues_data = (((resp.get("data") or {}).get("project") or {}).get("issues") or {})
+                nodes = issues_data.get("nodes") or []
+            except Exception:
+                break
+            for issue in nodes:
+                t = (issue.get("state") or {}).get("type") or ""
+                if t in ("completed", "canceled"):
+                    done += 1
+                elif t == "started":
+                    active += 1
+                else:
+                    open_ += 1
+            page_info = issues_data.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            page_cursor = page_info.get("endCursor")
         result = (done, active, open_)
         _issue_counts_cache[project_id] = result
         return result
 
     def _is_running(display_path: str) -> bool:
-        norm = str(Path(display_path).resolve()) if not display_path.startswith("./") else display_path
-        for rp in running_paths:
-            if rp == display_path or rp == norm or rp.endswith(display_path.lstrip("./")):
-                return True
-        return False
+        abs_path = str((cwd / display_path).resolve())
+        return abs_path in running_paths
 
     def _fmt_issue_counts(done: int, active: int, open_: int) -> str:
         parts = [_ok(f"{done} done")]
@@ -2172,18 +2195,44 @@ def project_main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def _proc_cwd(pid: str) -> str | None:
+    """Return the working directory of a process by PID (Linux /proc or macOS lsof)."""
+    try:
+        link = Path(f"/proc/{pid}/cwd")
+        if link.is_symlink():
+            return str(link.resolve())
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(
+            ["lsof", "-p", pid, "-a", "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+        for ln in out.splitlines():
+            if ln.startswith("n"):
+                return ln[1:]
+    except Exception:
+        pass
+    return None
+
+
 def _detect_running_workflow_paths() -> set[str]:
-    """Return set of WORKFLOW.md paths found in running symphony processes."""
+    """Return set of absolute WORKFLOW.md paths found in running symphony processes."""
     try:
         result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
         paths: set[str] = set()
         for line in result.stdout.splitlines():
             if ("symphony" in line or "sy " in line) and "run" in line:
+                pid_m = re.match(r'\S+\s+(\d+)', line)
+                pid = pid_m.group(1) if pid_m else None
                 m = re.search(r'(?:symphony|sy)\s+run\s+(\S+\.md)', line)
-                if m:
-                    paths.add(m.group(1))
-                elif re.search(r'(?:symphony|sy)\s+run\b', line):
-                    paths.add("./WORKFLOW.md")
+                wf_arg = m.group(1) if m else "WORKFLOW.md"
+                if os.path.isabs(wf_arg):
+                    paths.add(wf_arg)
+                elif pid:
+                    proc_dir = _proc_cwd(pid)
+                    if proc_dir:
+                        paths.add(str(Path(proc_dir).joinpath(wf_arg).resolve()))
         return paths
     except Exception:
         return set()

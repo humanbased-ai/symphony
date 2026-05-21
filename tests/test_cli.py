@@ -928,10 +928,11 @@ class ProjectCommandTests(unittest.TestCase):
     ]
 
     def _make_gql_response(self, query, variables=None):
+        _no_next = {"hasNextPage": False, "endCursor": None}
         if "ProjectList" in query:
-            return {"data": {"projects": {"nodes": self._FAKE_PROJECTS}}}
+            return {"data": {"projects": {"nodes": self._FAKE_PROJECTS, "pageInfo": _no_next}}}
         if "ProjectIssues" in query:
-            return {"data": {"project": {"issues": {"nodes": self._FAKE_ISSUES}}}}
+            return {"data": {"project": {"issues": {"nodes": self._FAKE_ISSUES, "pageInfo": _no_next}}}}
         return {"data": {}}
 
     def test_no_token_returns_error(self):
@@ -995,8 +996,9 @@ class ProjectCommandTests(unittest.TestCase):
                 import io
                 return io.BytesIO(resp_bytes)
 
+            abs_wf = str((Path(tmp) / "WORKFLOW.md").resolve())
             with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-                 patch("symphony.cli._detect_running_workflow_paths", return_value={"./WORKFLOW.md"}), \
+                 patch("symphony.cli._detect_running_workflow_paths", return_value={abs_wf}), \
                  patch("os.getcwd", return_value=tmp), \
                  patch("pathlib.Path.cwd", return_value=Path(tmp)):
                 out = StringIO()
@@ -1011,15 +1013,16 @@ class ProjectCommandTests(unittest.TestCase):
     def test_detect_running_workflow_paths_parses_ps_output(self):
         fake_ps = type("R", (), {
             "stdout": (
-                "user  123  0.0  sy run project-a/WORKFLOW.md\n"
-                "user  456  0.0  symphony run ./WORKFLOW.md\n"
+                "user  123  0.0  sy run /abs/project-a/WORKFLOW.md\n"
+                "user  456  0.0  symphony run /abs/root/WORKFLOW.md\n"
                 "user  789  0.0  python something else\n"
-            )
+            ),
+            "returncode": 0,
         })()
         with patch("subprocess.run", return_value=fake_ps):
             paths = _detect_running_workflow_paths()
-        self.assertIn("project-a/WORKFLOW.md", paths)
-        self.assertIn("./WORKFLOW.md", paths)
+        self.assertIn("/abs/project-a/WORKFLOW.md", paths)
+        self.assertIn("/abs/root/WORKFLOW.md", paths)
         self.assertNotIn("python", paths)
 
 
