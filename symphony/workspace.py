@@ -538,11 +538,14 @@ class WorkspaceManager:
 
         # Use a unique local branch name to avoid conflicts with the original branch
         # that may still be registered in the bare repo from the initial run.
+        # In a bare clone, git fetch stores branches as refs/heads/* (not
+        # refs/remotes/origin/*), so we reference the branch directly without
+        # the "origin/" prefix.
         local_branch = f"{branch_name}-fb-{run_id}"
         try:
             await _run_git(
                 bare,
-                ["worktree", "add", "-b", local_branch, str(run_path), f"origin/{branch_name}"],
+                ["worktree", "add", "-b", local_branch, str(run_path), branch_name],
             )
         except GitCommandError as exc:
             shutil.rmtree(run_path, ignore_errors=True)
