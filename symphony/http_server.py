@@ -109,7 +109,6 @@ class StatusAPI:
 
 
 WEBHOOK_LINEAR_ROUTE = f"{API_PREFIX}/webhooks/linear"
-WEBHOOK_GITHUB_ROUTE = f"{API_PREFIX}/webhooks/github"
 
 # Imported lazily to avoid circular imports at module load time.
 _LinearWebhookEvent = None
@@ -175,61 +174,6 @@ class WebhookAPI:
                 # Schedule the tick in the background so Linear's POST receives
                 # 200 immediately. Awaiting run_tick() here would keep the
                 # connection open for the full agent turn timeout.
-                asyncio.create_task(result)
-
-        return _json_response(200, {"ok": True})
-
-
-@dataclass
-class GitHubWebhookAPI:
-    """Handles POST /api/v1/webhooks/github.
-
-    webhook_secret — when set, every request must carry a valid X-Hub-Signature-256.
-    on_event — async callable invoked for each recognized GitHubEvent.
-    """
-
-    webhook_secret: str | None = None
-    on_event: EventCallback | None = field(default=None, compare=False)
-
-    async def async_handle_request(
-        self,
-        method: str,
-        path: str,
-        body: bytes | None,
-        headers: Mapping[str, str] | None = None,
-    ) -> HTTPResponse:
-        method = method.upper()
-        route = _normalized_path(path)
-
-        if route != WEBHOOK_GITHUB_ROUTE:
-            return _error_response(404, "route_not_found", f"unknown API route: {route}")
-        if method != "POST":
-            return _error_response(405, "method_not_allowed", "POST is required for this endpoint")
-
-        raw_body = body if body is not None else b""
-        headers = headers or {}
-
-        if self.webhook_secret is not None:
-            signature = _header_value(headers, "x-hub-signature-256")
-            if not signature:
-                return _error_response(401, "missing_signature", "X-Hub-Signature-256 header is required")
-            from symphony.github.webhooks import verify_signature as _gh_verify  # noqa: PLC0415
-            if not _gh_verify(raw_body, signature, self.webhook_secret):
-                return _error_response(401, "invalid_signature", "HMAC-SHA256 signature mismatch")
-
-        event_type = _header_value(headers, "x-github-event")
-        if not event_type:
-            return _error_response(400, "missing_event_type", "X-GitHub-Event header is required")
-
-        from symphony.github.webhooks import parse_github_payload  # noqa: PLC0415
-        event = parse_github_payload(raw_body, event_type)
-        if event is None:
-            # Unrecognized but not an error — GitHub sends many event types we ignore
-            return _json_response(200, {"ok": True, "skipped": True})
-
-        if self.on_event is not None:
-            result = self.on_event(event)
-            if inspect.isawaitable(result):
                 asyncio.create_task(result)
 
         return _json_response(200, {"ok": True})

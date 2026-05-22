@@ -99,6 +99,13 @@ def generate_workflow(config: InitConfig) -> str:
         },
     }
 
+    if config.github_org and config.github_repo:
+        front_matter["github"] = {
+            "token": "$GITHUB_TOKEN",
+            "owner": config.github_org,
+            "repo": config.github_repo,
+        }
+
     if runner == "claude_code":
         prompt = (
             _CLAUDE_PR_PROMPT

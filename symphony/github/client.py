@@ -44,6 +44,124 @@ class GitHubClient:
         except GitHubClientError:
             return ""
 
+    def get_pr(self, pr_number: int) -> dict[str, Any] | None:
+        """Return PR data (state, merged, etc.) or None on failure."""
+        try:
+            return self._request("GET", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}")
+        except GitHubClientError:
+            return None
+
+    def find_open_pr_for_branch(self, branch: str) -> int | None:
+        """Return the PR number of the first open PR with the given head branch, or None."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls"
+                f"?head={self.owner}:{branch}&state=open&per_page=1",
+            )
+            if isinstance(result, list) and result:
+                return int(result[0]["number"])
+            return None
+        except (GitHubClientError, KeyError, TypeError, ValueError):
+            return None
+
+    def list_pr_review_comments(self, pr_number: int) -> list[dict]:
+        """List inline review comments (pull_request_review_comment) on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/comments?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def list_pr_issue_comments(self, pr_number: int) -> list[dict]:
+        """List general PR comments (issue-level) on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/comments?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def list_pr_reviews(self, pr_number: int) -> list[dict]:
+        """List review submissions on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/reviews?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def get_authenticated_login(self) -> str | None:
+        """Return the GitHub login for the current token, or None on failure."""
+        try:
+            result = self._request("GET", "/user")
+            login = result.get("login")
+            return str(login) if login else None
+        except GitHubClientError:
+            return None
+
+    def list_webhooks(self) -> list[dict]:
+        """List all webhooks registered for the repository."""
+        result = self._request("GET", f"/repos/{self.owner}/{self.repo}/hooks")
+        if isinstance(result, list):
+            return result
+        return []
+
+    def delete_webhook(self, webhook_id: int) -> None:
+        """Delete a webhook by its ID."""
+        try:
+            self._request("DELETE", f"/repos/{self.owner}/{self.repo}/hooks/{webhook_id}")
+        except GitHubClientError as exc:
+            # 404 means it's already gone — treat as success
+            if "github_http_error:404" in str(exc):
+                return
+            raise
+
+    def register_webhook(
+        self,
+        url: str,
+        secret: str,
+        events: list[str] | None = None,
+    ) -> str:
+        """Register a webhook, returning the webhook id as a string.
+
+        If a webhook with the same URL already exists it is deleted first so
+        the secret is guaranteed to be up-to-date.
+        """
+        if events is None:
+            events = ["pull_request", "pull_request_review", "pull_request_review_comment"]
+
+        # Remove any existing webhook pointing at the same URL
+        try:
+            existing = self.list_webhooks()
+            for hook in existing:
+                config_block = hook.get("config") or {}
+                if config_block.get("url") == url:
+                    self.delete_webhook(int(hook["id"]))
+        except GitHubClientError:
+            pass
+
+        payload = {
+            "name": "web",
+            "active": True,
+            "events": events,
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        }
+        result = self._request("POST", f"/repos/{self.owner}/{self.repo}/hooks", payload)
+        return str(result["id"])
+
     # ------------------------------------------------------------------
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
