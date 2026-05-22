@@ -51,6 +51,14 @@ class GitHubClient:
         except GitHubClientError:
             return None
 
+    def close_pr(self, pr_number: int) -> bool:
+        """Close an open PR. Returns True on success."""
+        try:
+            self._request("PATCH", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}", {"state": "closed"})
+            return True
+        except GitHubClientError:
+            return False
+
     def find_open_pr_for_branch(self, branch: str) -> int | None:
         """Return the PR number of the first open PR with the given head branch, or None."""
         try:

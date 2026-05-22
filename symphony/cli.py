@@ -555,6 +555,8 @@ async def _startup_workspace_sweep(workspace_manager: WorkspaceManager) -> None:
 
 def _log_tick(result) -> None:
     parts = [f"fetched={result.fetched}"]
+    if getattr(result, "active", 0):
+        parts.append(f"active={result.active}")
     if result.dispatched:
         parts.append(f"dispatched={','.join(result.dispatched)}")
     if result.completed:
@@ -563,6 +565,9 @@ def _log_tick(result) -> None:
         parts.append(f"failed={','.join(result.failed)}")
     if result.released:
         parts.append(f"released={','.join(result.released)}")
+    if result.errors:
+        for ident, reason in result.errors.items():
+            parts.append(f"error[{ident}]={reason}")
     if result.failed:
         LOGGER.warning("Tick  %s", "  ".join(parts))
     else:
