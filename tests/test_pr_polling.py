@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from symphony.config import WorkflowConfig
-from symphony.github.webhooks import PRClosedEvent
+from symphony.github.webhooks import PRClosedEvent, PROpenedEvent
 from symphony.runtime import SymphonyRuntime
 from symphony.tracker.models import Issue
 
@@ -433,3 +433,52 @@ class TestPRClosedDetection(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(branch, runtime._branch_pr_numbers)
             await runtime.poll_github_pr_feedback()
             self.assertEqual(runtime._branch_pr_numbers[branch], 99)
+
+    async def test_pr_discovery_transitions_issue_to_in_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, tracker, _, github = make_runtime(Path(tmp))
+            issue = make_issue()
+            branch = "feat/sym-42-run1"
+            runtime._branch_to_issue[branch] = issue
+            github.add_open_pr(branch, 7)
+
+            await runtime.poll_github_pr_feedback()
+
+            self.assertIn((issue.id, "In Review"), tracker.state_updates)
+
+
+# ---------------------------------------------------------------------------
+# PROpenedEvent transitions issue to "In Review"
+# ---------------------------------------------------------------------------
+
+class TestPROpenedEvent(unittest.IsolatedAsyncioTestCase):
+    async def test_pr_opened_event_transitions_to_in_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, tracker, _, _ = make_runtime(Path(tmp))
+            issue = make_issue()
+            branch = "feat/sym-42-run1"
+            runtime._branch_to_issue[branch] = issue
+
+            event = PROpenedEvent(
+                pr_number=42,
+                pr_head_branch=branch,
+                repo_owner="org",
+                repo_name="repo",
+            )
+            await runtime.handle_github_pr_event(event)
+
+            self.assertEqual(tracker.state_updates, [(issue.id, "In Review")])
+
+    async def test_pr_opened_unknown_branch_does_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, tracker, _, _ = make_runtime(Path(tmp))
+
+            event = PROpenedEvent(
+                pr_number=42,
+                pr_head_branch="unknown-branch",
+                repo_owner="org",
+                repo_name="repo",
+            )
+            await runtime.handle_github_pr_event(event)
+
+            self.assertEqual(tracker.state_updates, [])

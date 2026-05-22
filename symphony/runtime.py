@@ -13,7 +13,7 @@ from typing import Any
 
 from symphony.agents.base import AgentEvent, AgentEventCallback, TokenUsage
 from symphony.config import WorkflowConfig
-from symphony.github.webhooks import GitHubEvent, PRClosedEvent, PRCommentEvent, PRReviewEvent
+from symphony.github.webhooks import GitHubEvent, PRClosedEvent, PRCommentEvent, PROpenedEvent, PRReviewEvent
 from symphony.orchestrator import (
     OrchestratorState,
     complete_worker_failure,
@@ -274,6 +274,11 @@ class SymphonyRuntime:
                 self._branch_to_issue[branch_name] = issue
             await _maybe_await(self.workspace_manager.before_run(workspace))
 
+            if hasattr(self.tracker, "update_issue_state_by_name"):
+                in_progress = self.config.tracker.in_progress_state
+                LOGGER.info("Claiming %s → transitioning to %s", issue.identifier, in_progress)
+                await _call_sync(self.tracker.update_issue_state_by_name, issue.id, in_progress)
+
             enriched_issue = await self._enrich_with_comments(issue)
             prompt = render_prompt(self.prompt_template, issue=enriched_issue, attempt=entry.retry_attempt)
             if _is_api_runner(self.runner):
@@ -412,6 +417,13 @@ class SymphonyRuntime:
                 return
             pr_number = pr_number_found
             self._branch_pr_numbers[branch] = pr_number
+            review_state = self.config.tracker.review_state
+            LOGGER.info(
+                "PR #%d discovered for %s → transitioning to %s",
+                pr_number, issue.identifier, review_state,
+            )
+            if hasattr(self.tracker, "update_issue_state_by_name"):
+                await _call_sync(self.tracker.update_issue_state_by_name, issue.id, review_state)
 
         review_comments, issue_comments, reviews = await asyncio.gather(
             asyncio.to_thread(gh.list_pr_review_comments, pr_number),
@@ -473,7 +485,9 @@ class SymphonyRuntime:
 
     async def handle_github_pr_event(self, event: GitHubEvent) -> None:
         """Route a GitHub PR event to the appropriate handler."""
-        if isinstance(event, PRClosedEvent):
+        if isinstance(event, PROpenedEvent):
+            await self._handle_pr_opened(event)
+        elif isinstance(event, PRClosedEvent):
             await self._handle_pr_closed(event)
         elif isinstance(event, PRCommentEvent):
             await self._handle_pr_feedback(
@@ -488,6 +502,20 @@ class SymphonyRuntime:
             )
         elif isinstance(event, PRReviewEvent) and event.review_state == "approved":
             LOGGER.info("PR #%d approved — waiting for merge to close the issue.", event.pr_number)
+
+    async def _handle_pr_opened(self, event: PROpenedEvent) -> None:
+        issue = self._branch_to_issue.get(event.pr_head_branch)
+        if issue is None:
+            LOGGER.debug("PR #%d opened on unknown branch %r — ignoring.", event.pr_number, event.pr_head_branch)
+            return
+
+        review_state = self.config.tracker.review_state
+        LOGGER.info(
+            "PR #%d opened for %s → transitioning to %s",
+            event.pr_number, issue.identifier, review_state,
+        )
+        if hasattr(self.tracker, "update_issue_state_by_name"):
+            await _call_sync(self.tracker.update_issue_state_by_name, issue.id, review_state)
 
     async def _handle_pr_closed(self, event: PRClosedEvent) -> None:
         issue = self._branch_to_issue.get(event.pr_head_branch)

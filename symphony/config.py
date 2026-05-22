@@ -43,6 +43,7 @@ class TrackerConfig:
     active_states: tuple[str, ...] = field(default_factory=lambda: DEFAULT_ACTIVE_STATES)
     terminal_states: tuple[str, ...] = field(default_factory=lambda: DEFAULT_TERMINAL_STATES)
     review_state: str = DEFAULT_REVIEW_STATE
+    in_progress_state: str = "In Progress"
     done_state: str = "Done"
     cancelled_state: str = "Canceled"
 
@@ -66,6 +67,7 @@ class TrackerConfig:
             active_states=_string_tuple(tracker.get("active_states"), DEFAULT_ACTIVE_STATES),
             terminal_states=_string_tuple(tracker.get("terminal_states"), DEFAULT_TERMINAL_STATES),
             review_state=_string_value(tracker.get("review_state")) or DEFAULT_REVIEW_STATE,
+            in_progress_state=_string_value(tracker.get("in_progress_state")) or "In Progress",
             done_state=_string_value(tracker.get("done_state")) or "Done",
             cancelled_state=_string_value(tracker.get("cancelled_state")) or "Canceled",
         )

@@ -39,4 +39,13 @@ class PRClosedEvent:
     repo_name: str
 
 
-GitHubEvent = PRCommentEvent | PRReviewEvent | PRClosedEvent
+@dataclass(frozen=True)
+class PROpenedEvent:
+    """A pull request was opened."""
+    pr_number: int
+    pr_head_branch: str
+    repo_owner: str
+    repo_name: str
+
+
+GitHubEvent = PRCommentEvent | PRReviewEvent | PRClosedEvent | PROpenedEvent

@@ -400,6 +400,67 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(("IN-301",), result3.dispatched)
 
 
+class TrackerWithStateUpdates(FakeTracker):
+    """FakeTracker that also records update_issue_state_by_name calls."""
+
+    def __init__(self, candidates: list[Issue]) -> None:
+        super().__init__(candidates)
+        self.state_updates: list[tuple[str, str]] = []
+
+    async def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
+        self.state_updates.append((issue_id, state_name))
+        return True
+
+
+class InProgressTransitionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_start_transitions_issue_to_in_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            tracker = TrackerWithStateUpdates([target])
+            runner = FakeSessionRunner()
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+            )
+
+            await runtime.run_tick()
+
+        self.assertIn(("issue-1", "In Progress"), tracker.state_updates)
+
+    async def test_in_progress_transition_uses_configured_state_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = issue()
+            tracker = TrackerWithStateUpdates([target])
+            runner = FakeSessionRunner()
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                        "in_progress_state": "Working",
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 2},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = SymphonyRuntime(
+                config=config,
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=runner,
+            )
+
+            await runtime.run_tick()
+
+        self.assertIn(("issue-1", "Working"), tracker.state_updates)
+
+
 class FeedbackTracker(FakeTracker):
     """Extends FakeTracker with comment/state-transition stubs for feedback gate tests."""
 
