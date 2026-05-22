@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 from symphony.auth import MissingLinearTokenError, TokenStore, redact_secret
 from symphony.config import TrackerConfig
@@ -82,7 +85,7 @@ query SymphonyLinearIssueComments($issueId: String!, $first: Int!, $cursor: Stri
 """.strip()
 
 WORKFLOW_STATES_QUERY = """
-query SymphonyWorkflowStates($teamId: String!) {
+query SymphonyWorkflowStates($teamId: ID!) {
   workflowStates(filter: {team: {id: {eq: $teamId}}}) {
     nodes {
       id
@@ -338,18 +341,29 @@ class LinearClient:
         if state_name in self._state_id_cache:
             return self._state_id_cache[state_name]
         team_id = self._resolve_team_id()
+        if not team_id:
+            LOGGER.debug("Cannot resolve state ID for %r: team ID unavailable", state_name)
+            return None
         result: str | None = None
-        if team_id:
-            try:
-                resp = self.graphql(WORKFLOW_STATES_QUERY, {"teamId": team_id})
-                nodes = _nested(resp, "data", "workflowStates", "nodes") or []
-                for node in nodes:
-                    if isinstance(node, dict) and node.get("name") == state_name:
-                        result = node.get("id")
-                        break
-            except LinearClientError:
-                pass
-        self._state_id_cache[state_name] = result
+        try:
+            resp = self.graphql(WORKFLOW_STATES_QUERY, {"teamId": team_id})
+            nodes = _nested(resp, "data", "workflowStates", "nodes") or []
+            for node in nodes:
+                if isinstance(node, dict) and node.get("name") == state_name:
+                    result = node.get("id")
+                    break
+            if result is None:
+                available = [n.get("name") for n in nodes if isinstance(n, dict)]
+                LOGGER.warning(
+                    "State %r not found in Linear workflow states; available: %s",
+                    state_name,
+                    available,
+                )
+        except LinearClientError as exc:
+            LOGGER.warning("Failed to fetch workflow states for team %s: %s", team_id, exc)
+            return None
+        if result is not None:
+            self._state_id_cache[state_name] = result
         return result
 
     def _resolve_team_id(self) -> str | None:
@@ -358,16 +372,23 @@ class LinearClient:
             return self._team_id_cache
         if not self.tracker.project_slug:
             return None
-        result: str | None = None
         try:
             resp = self.graphql(TEAM_ID_QUERY, {"projectSlug": self.tracker.project_slug})
             projects = _nested(resp, "data", "projects", "nodes") or []
-            if projects:
-                teams = _nested(projects[0], "teams", "nodes") or []
-                if teams and isinstance(teams[0], dict):
-                    result = teams[0].get("id")
-        except LinearClientError:
-            pass
+            if not projects:
+                LOGGER.warning(
+                    "No Linear project found for slugId %r; state transitions will be skipped",
+                    self.tracker.project_slug,
+                )
+                return None
+            teams = _nested(projects[0], "teams", "nodes") or []
+            if not teams:
+                LOGGER.warning("Project %r has no teams; state transitions will be skipped", self.tracker.project_slug)
+                return None
+            result = teams[0].get("id") if isinstance(teams[0], dict) else None
+        except LinearClientError as exc:
+            LOGGER.warning("Failed to resolve team ID for project %r: %s", self.tracker.project_slug, exc)
+            return None
         self._team_id_cache = result
         return result
 
