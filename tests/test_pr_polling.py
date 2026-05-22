@@ -9,7 +9,7 @@ from pathlib import Path
 
 from symphony.config import WorkflowConfig
 from symphony.github.webhooks import PRClosedEvent
-from symphony.runtime import SymphonyRuntime
+from symphony.runtime import SYMPHONY_BOT_MARKER, SymphonyRuntime
 from symphony.tracker.models import Issue
 
 
@@ -355,8 +355,8 @@ class TestBotCommentFiltering(unittest.IsolatedAsyncioTestCase):
             branch = "feat/sym-42-run1"
             runtime._branch_to_issue[branch] = issue
             github.add_open_pr(branch, 7)
-            # Bot posts its own comment
-            github.add_issue_comment(7, 999, github._bot_login, "I addressed your feedback")
+            # Bot posts its own comment (identified by the Symphony marker, not by login)
+            github.add_issue_comment(7, 999, "any-login", f"{SYMPHONY_BOT_MARKER}\nI addressed your feedback")
 
             await runtime.poll_github_pr_feedback()
 
