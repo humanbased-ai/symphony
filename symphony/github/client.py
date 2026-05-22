@@ -73,6 +73,49 @@ class GitHubClient:
         except (GitHubClientError, KeyError, TypeError, ValueError):
             return None
 
+    def find_open_pr_for_issue(self, issue_identifier: str) -> int | None:
+        """Search for an open PR mentioning the issue identifier. Returns PR number or None."""
+        try:
+            result = self._request(
+                "GET",
+                f"/search/issues?q=is:pr+is:open+{issue_identifier}"
+                f"+repo:{self.owner}/{self.repo}&per_page=1",
+            )
+            items = (result or {}).get("items", [])
+            if items:
+                return int(items[0]["number"])
+            return None
+        except (GitHubClientError, KeyError, TypeError, ValueError):
+            return None
+
+    def get_pr_failed_check_runs(self, pr_number: int) -> list[dict]:
+        """Return failed check runs for a PR's HEAD commit as list of {id, name, details_url}."""
+        try:
+            pr_data = self.get_pr(pr_number)
+            if not pr_data:
+                return []
+            sha = (pr_data.get("head") or {}).get("sha")
+            if not sha:
+                return []
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/commits/{sha}/check-runs"
+                f"?filter=latest&per_page=100",
+            )
+            runs = result.get("check_runs", []) if isinstance(result, dict) else []
+            return [
+                {
+                    "id": int(r["id"]),
+                    "name": str(r.get("name") or ""),
+                    "details_url": str(r.get("details_url") or r.get("html_url") or ""),
+                    "summary": str((r.get("output") or {}).get("summary") or ""),
+                }
+                for r in runs
+                if str(r.get("conclusion") or "") == "failure"
+            ]
+        except (GitHubClientError, KeyError, TypeError, ValueError):
+            return []
+
     def list_pr_review_comments(self, pr_number: int) -> list[dict]:
         """List inline review comments (pull_request_review_comment) on a PR."""
         try:
