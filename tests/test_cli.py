@@ -24,6 +24,7 @@ from symphony.cli import (
     create_status_api,
     create_status_http_server,
     doctor_checks,
+    hello_main,
     load_startup_context,
     main,
     print_setup_checks,
@@ -36,6 +37,20 @@ from symphony.orchestrator import OrchestratorState
 
 
 class CLITests(unittest.TestCase):
+    def test_hello_main_prints_message_and_returns_zero(self):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            rc = hello_main()
+        self.assertEqual(0, rc)
+        self.assertEqual("Hello from Symphony!\n", stdout.getvalue())
+
+    def test_hello_subcommand_via_main_prints_message_and_returns_zero(self):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            rc = main(["hello"])
+        self.assertEqual(0, rc)
+        self.assertEqual("Hello from Symphony!\n", stdout.getvalue())
+
     def test_help_exits_successfully_without_workflow_file(self):
         with redirect_stdout(StringIO()):
             with self.assertRaises(SystemExit) as raised:

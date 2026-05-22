@@ -930,10 +930,17 @@ def apply_runtime_workflow(runtime: SymphonyRuntime, effective: EffectiveWorkflo
     runtime._notify_state_change()
 
 
+def hello_main() -> int:
+    print("Hello from Symphony!")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(argv) if argv is not None else sys.argv[1:]
     if raw_args:
         command = raw_args[0]
+        if command == "hello":
+            return hello_main()
         if command == "init":
             return init_main(raw_args[1:])
         if command == "onboard":
