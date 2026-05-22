@@ -1132,7 +1132,7 @@ def _run_init_with_args(
             print("  The short identifier for your Linear project.")
             print("  Find it at: your project → Settings, or in the project URL:")
             print("    linear.app/YOUR-TEAM/project/NAME-<slug>")
-        project_slug = args.project_slug or ("" if automated else _prompt("Linear project slug"))
+        project_slug = _parse_linear_slug(args.project_slug or ("" if automated else _prompt("Linear project slug")))
         if not project_slug and not automated:
             raise OnboardingError("missing_project_slug — pass --project-slug your-linear-project-slug")
 
@@ -2036,7 +2036,7 @@ def _parse_linear_slug(value: str) -> str:
     """
     import re
     v = value.strip().rstrip("/")
-    m = re.match(r"https?://linear\.app/[^/]+/project/(.+)", v, re.IGNORECASE)
+    m = re.match(r"https?://linear\.app/[^/]+/project/([^/]+)", v, re.IGNORECASE)
     slug = m.group(1) if m else v
     return slug.replace(" ", "")
 
