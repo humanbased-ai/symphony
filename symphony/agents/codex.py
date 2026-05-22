@@ -231,6 +231,7 @@ class CodexRunner(CLIAgentRunner):
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=4 * 1024 * 1024,  # 4 MB; default 64 KB triggers LimitOverrunError on large JSON lines
             )
         except FileNotFoundError as exc:
             raise AgentRunnerError("codex_not_found") from exc

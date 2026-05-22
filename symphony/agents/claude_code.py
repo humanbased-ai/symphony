@@ -103,6 +103,7 @@ class ClaudeCodeRunner(CLIAgentRunner):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(session.workspace),
                 env=env,
+                limit=4 * 1024 * 1024,  # 4 MB; default 64 KB triggers LimitOverrunError on large JSON lines
             )
         except FileNotFoundError as exc:
             raise AgentRunnerError("claude_not_found") from exc
