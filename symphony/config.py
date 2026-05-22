@@ -62,7 +62,7 @@ class TrackerConfig:
             kind=kind,
             endpoint=_string_value(tracker.get("endpoint")) or DEFAULT_LINEAR_ENDPOINT,
             api_key=_string_value(tracker.get("api_key")),
-            project_slug=_string_value(tracker.get("project_slug")),
+            project_slug=_normalize_linear_slug(_string_value(tracker.get("project_slug"))),
             active_states=_string_tuple(tracker.get("active_states"), DEFAULT_ACTIVE_STATES),
             terminal_states=_string_tuple(tracker.get("terminal_states"), DEFAULT_TERMINAL_STATES),
             review_state=_string_value(tracker.get("review_state")) or DEFAULT_REVIEW_STATE,
@@ -342,6 +342,16 @@ class WorkflowConfig:
             webhook=WebhookConfig.from_mapping(config, environ=environ),
             github=GitHubConfig.from_mapping(config, environ=environ),
         )
+
+
+def _normalize_linear_slug(value: str | None) -> str | None:
+    """Extract the slugId from a full Linear project URL, or return value as-is."""
+    import re
+    if value is None:
+        return None
+    v = value.strip().rstrip("/")
+    m = re.match(r"https?://linear\.app/[^/]+/project/([^/]+)", v, re.IGNORECASE)
+    return m.group(1) if m else v
 
 
 def resolve_env_reference(value: str, environ: Mapping[str, str] | None = None) -> str:
