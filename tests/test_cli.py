@@ -7,7 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from symphony.cli import (
     RuntimeWorkflowReloader,
@@ -29,6 +29,7 @@ from symphony.cli import (
     print_setup_checks,
     project_main,
     run_once,
+    run_poll_loop,
     setup_environment_checks,
 )
 from symphony import __version__
@@ -1145,6 +1146,20 @@ class FirstRunWizardTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:
                     main(["run", str(wf), "--log-level", "WARNING"])
         self.assertEqual(2, raised.exception.code)
+
+    def test_run_poll_loop_prints_hello_world_on_startup(self):
+        runtime = MagicMock()
+        runtime.state.poll_interval_ms = 100
+        runtime.record_startup_issues = AsyncMock()
+        runtime.run_tick = AsyncMock(side_effect=asyncio.CancelledError())
+
+        stdout = StringIO()
+        with patch("symphony.cli._startup_workspace_sweep", new_callable=AsyncMock):
+            with redirect_stdout(stdout):
+                with self.assertRaises(asyncio.CancelledError):
+                    asyncio.run(run_poll_loop(runtime))
+
+        self.assertIn("Hello, World! Symphony is starting...", stdout.getvalue())
 
 
 if __name__ == "__main__":

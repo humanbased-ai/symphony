@@ -590,6 +590,7 @@ async def run_poll_loop(
     else:
         await _startup_workspace_sweep(runtime.workspace_manager)
         await runtime.record_startup_issues()
+    print("Hello, World! Symphony is starting...")
     while True:
         try:
             if before_tick is not None:
