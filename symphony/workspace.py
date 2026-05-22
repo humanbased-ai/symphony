@@ -156,6 +156,61 @@ class WorkspaceManager:
 
         return await self.prepare_for_run(issue, run_id=run_id)
 
+    async def prepare_for_pr_feedback(
+        self,
+        issue: Issue,
+        existing_branch: str,
+        *,
+        run_id: str | None = None,
+    ) -> Workspace:
+        """Materialize a workspace on an already-pushed branch for PR feedback runs.
+
+        Unlike prepare_for_run, this checks out *existing_branch* from the remote
+        rather than creating a new branch, so the agent can push changes back to
+        the same PR branch.
+        """
+        workspace_key = sanitize_workspace_key(issue.identifier)
+        run_id_value = self._normalize_run_id(run_id)
+        root = self._ensure_root()
+        run_path = self._run_path(workspace_key, run_id_value)
+
+        if not is_path_within_root(run_path, root):
+            raise WorkspaceError("workspace_path_outside_root")
+        if run_path.exists():
+            raise WorkspaceError("workspace_run_path_already_exists")
+
+        issue_dir = run_path.parent
+        issue_dir.mkdir(mode=WORKSPACE_MODE, parents=True, exist_ok=True)
+        _restrict_owner_permissions(issue_dir)
+
+        if self.workspace.repo_url:
+            await self._materialize_existing_branch_worktree(run_path, existing_branch, run_id_value)
+        else:
+            run_path.mkdir(mode=WORKSPACE_MODE)
+            _restrict_owner_permissions(run_path)
+
+        run_log_path = self._compute_run_log_path(workspace_key, run_id_value)
+        if run_log_path is not None:
+            run_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        handle = Workspace(
+            path=run_path,
+            workspace_key=workspace_key,
+            run_id=run_id_value,
+            branch_name=existing_branch,
+            run_log_path=run_log_path,
+            created_now=True,
+        )
+        self._write_run_metadata(handle)
+
+        try:
+            await self.run_hook("after_create", handle)
+        except Exception:
+            await self._best_effort_remove_run(handle)
+            raise
+
+        return handle
+
     async def before_run(self, workspace: Workspace) -> WorkspaceHookResult | None:
         self.validate_workspace(workspace.path)
         return await self.run_hook("before_run", workspace)
@@ -461,6 +516,37 @@ class WorkspaceManager:
                 run_path = self._run_path(issue_dir.name, run_id)
                 result[str(run_path)] = (branch_name, metadata_path)
         return result
+
+    async def _materialize_existing_branch_worktree(
+        self, run_path: Path, branch_name: str, run_id: str
+    ) -> None:
+        """Check out an existing remote branch into a new worktree for PR feedback."""
+        if not self.workspace.repo_url:
+            raise WorkspaceError("workspace_repo_url_required")
+
+        bare = self._bare_repo_path()
+        async with _bare_repo_lock(bare):
+            if not bare.exists():
+                await _run_git(
+                    bare.parent, ["clone", "--bare", self.workspace.repo_url, bare.name]
+                )
+            else:
+                try:
+                    await _run_git(bare, ["fetch", "--prune", "origin"])
+                except GitCommandError as exc:
+                    LOGGER.warning("git fetch failed before PR feedback checkout: %s", exc)
+
+        # Use a unique local branch name to avoid conflicts with the original branch
+        # that may still be registered in the bare repo from the initial run.
+        local_branch = f"{branch_name}-fb-{run_id}"
+        try:
+            await _run_git(
+                bare,
+                ["worktree", "add", "-b", local_branch, str(run_path), f"origin/{branch_name}"],
+            )
+        except GitCommandError as exc:
+            shutil.rmtree(run_path, ignore_errors=True)
+            raise WorkspaceError(f"workspace_git_worktree_add_failed:{exc}") from exc
 
     async def _materialize_git_worktree(self, run_path: Path, branch_name: str | None) -> None:
         if not self.workspace.repo_url:

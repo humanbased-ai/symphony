@@ -24,6 +24,7 @@ DEFAULT_CODEX_STALL_TIMEOUT_MS = 300_000
 DEFAULT_CLAUDE_COMMAND = "claude"
 DEFAULT_CLAUDE_TURN_TIMEOUT_MS = 3_600_000
 DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions"
+DEFAULT_MAX_PR_TURNS = 10
 
 
 class ConfigError(ValueError):
@@ -224,6 +225,49 @@ class ClaudeCodeConfig:
 
 
 @dataclass(frozen=True)
+class GitHubConfig:
+    """Optional GitHub integration for PR-native feedback loop.
+
+    Supports $VAR syntax for environment variable resolution.
+
+    Example WORKFLOW.md / config section::
+
+        github:
+          token: $GITHUB_TOKEN
+          webhook_secret: $GITHUB_WEBHOOK_SECRET
+          owner: myorg
+          repo: myrepo
+          max_pr_turns: 10
+    """
+
+    token: str | None = None
+    webhook_secret: str | None = None
+    owner: str | None = None
+    repo: str | None = None
+    max_pr_turns: int = DEFAULT_MAX_PR_TURNS
+
+    @classmethod
+    def from_mapping(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> "GitHubConfig":
+        github = _mapping(config.get("github"), "github_config_must_be_map")
+        raw_token = _string_value(github.get("token"))
+        token = resolve_env_reference(raw_token, environ) if raw_token is not None else None
+        raw_secret = _string_value(github.get("webhook_secret"))
+        secret = resolve_env_reference(raw_secret, environ) if raw_secret is not None else None
+        return cls(
+            token=token,
+            webhook_secret=secret,
+            owner=_string_value(github.get("owner")),
+            repo=_string_value(github.get("repo")),
+            max_pr_turns=_positive_int(github.get("max_pr_turns"), DEFAULT_MAX_PR_TURNS, "github_max_pr_turns"),
+        )
+
+
+@dataclass(frozen=True)
 class WebhookConfig:
     """Optional webhook configuration for receiving Linear events via HTTP push.
 
@@ -276,6 +320,7 @@ class WorkflowConfig:
     codex: CodexConfig = field(default_factory=CodexConfig)
     claude_code: ClaudeCodeConfig = field(default_factory=ClaudeCodeConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
+    github: GitHubConfig = field(default_factory=GitHubConfig)
 
     @classmethod
     def from_mapping(
@@ -295,6 +340,7 @@ class WorkflowConfig:
             codex=CodexConfig.from_mapping(config),
             claude_code=ClaudeCodeConfig.from_mapping(config),
             webhook=WebhookConfig.from_mapping(config, environ=environ),
+            github=GitHubConfig.from_mapping(config, environ=environ),
         )
 
 
