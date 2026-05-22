@@ -93,6 +93,12 @@ class SymphonyRuntime:
         self._branch_to_issue: dict[str, Issue] = {}
         # Tracks how many PR feedback agent runs have been triggered per branch.
         self._pr_turns: dict[str, int] = {}
+        # Maps branch → frozenset of comment/review IDs already processed in polling.
+        self._pr_comment_seen: dict[str, frozenset[int]] = {}
+        # Cached PR numbers discovered by find_open_pr_for_branch.
+        self._branch_pr_numbers: dict[str, int] = {}
+        # GitHub login of the token owner — used to skip our own bot comments.
+        self._github_bot_login: str | None = None
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -134,6 +140,7 @@ class SymphonyRuntime:
                 LOGGER.warning("Failed       %s — %s", issue.identifier, error)
 
         await self.poll_feedback()
+        await self.poll_github_pr_feedback()
         self._notify_state_change()
         return RuntimeTickResult(
             fetched=len(candidates),
@@ -353,6 +360,116 @@ class SymphonyRuntime:
                 await self._handle_feedback_for_issue(issue)
             except Exception:  # noqa: BLE001
                 pass
+
+    async def poll_github_pr_feedback(self) -> None:
+        """Poll GitHub API for new PR comments on branches we're currently tracking."""
+        if self.github_client is None or not self._branch_to_issue:
+            return
+
+        if self._github_bot_login is None:
+            try:
+                self._github_bot_login = await asyncio.to_thread(
+                    self.github_client.get_authenticated_login
+                ) or ""
+            except Exception:  # noqa: BLE001
+                self._github_bot_login = ""
+
+        for branch in list(self._branch_to_issue):
+            issue = self._branch_to_issue.get(branch)
+            if issue is None:
+                continue
+            try:
+                await self._poll_pr_for_branch(branch, issue)
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("PR polling error for branch %r", branch, exc_info=True)
+
+    async def _poll_pr_for_branch(self, branch: str, issue: Issue) -> None:
+        gh = self.github_client
+        cached_pr = self._branch_pr_numbers.get(branch)
+
+        if cached_pr is not None:
+            open_pr = await asyncio.to_thread(gh.find_open_pr_for_branch, branch)
+            if open_pr is None:
+                # PR was closed or merged — synthesise a closed event
+                pr_data = await asyncio.to_thread(gh.get_pr, cached_pr)
+                merged = bool((pr_data or {}).get("merged", False))
+                LOGGER.info(
+                    "Polling detected PR #%d %s for %s",
+                    cached_pr, "merged" if merged else "closed", issue.identifier,
+                )
+                event = PRClosedEvent(
+                    pr_number=cached_pr, pr_head_branch=branch, merged=merged,
+                    repo_owner=gh.owner, repo_name=gh.repo,
+                )
+                await self._handle_pr_closed(event)
+                self._branch_pr_numbers.pop(branch, None)
+                self._pr_comment_seen.pop(branch, None)
+                return
+            pr_number = cached_pr
+        else:
+            pr_number_found = await asyncio.to_thread(gh.find_open_pr_for_branch, branch)
+            if pr_number_found is None:
+                return
+            pr_number = pr_number_found
+            self._branch_pr_numbers[branch] = pr_number
+
+        review_comments, issue_comments, reviews = await asyncio.gather(
+            asyncio.to_thread(gh.list_pr_review_comments, pr_number),
+            asyncio.to_thread(gh.list_pr_issue_comments, pr_number),
+            asyncio.to_thread(gh.list_pr_reviews, pr_number),
+        )
+
+        bot_login = self._github_bot_login or ""
+        seen = self._pr_comment_seen.get(branch, frozenset())
+        feedback_parts: list[str] = []
+        new_seen_ids: set[int] = set()
+
+        for comment in review_comments:
+            cid = int(comment.get("id") or 0)
+            if not cid or cid in seen:
+                continue
+            new_seen_ids.add(cid)
+            author = str((comment.get("user") or {}).get("login") or "unknown")
+            if author == bot_login:
+                continue
+            body = str(comment.get("body") or "").strip()
+            if body:
+                feedback_parts.append(f"**{author}** left a review comment:\n\n{body}")
+
+        for comment in issue_comments:
+            cid = int(comment.get("id") or 0)
+            if not cid or cid in seen:
+                continue
+            new_seen_ids.add(cid)
+            author = str((comment.get("user") or {}).get("login") or "unknown")
+            if author == bot_login:
+                continue
+            body = str(comment.get("body") or "").strip()
+            if body:
+                feedback_parts.append(f"**{author}** commented:\n\n{body}")
+
+        for review in reviews:
+            rid = int(review.get("id") or 0)
+            if not rid or rid in seen:
+                continue
+            new_seen_ids.add(rid)
+            state = str(review.get("state") or "").lower()
+            if state != "changes_requested":
+                continue
+            reviewer = str((review.get("user") or {}).get("login") or "unknown")
+            if reviewer == bot_login:
+                continue
+            body = str(review.get("body") or "").strip()
+            text = f"**{reviewer}** requested changes"
+            if body:
+                text += f":\n\n{body}"
+            feedback_parts.append(text)
+
+        self._pr_comment_seen[branch] = seen | frozenset(new_seen_ids)
+
+        if feedback_parts:
+            combined = "\n\n---\n\n".join(feedback_parts)
+            await self._handle_pr_feedback(branch, pr_number, combined)
 
     async def handle_github_pr_event(self, event: GitHubEvent) -> None:
         """Route a GitHub PR event to the appropriate handler."""

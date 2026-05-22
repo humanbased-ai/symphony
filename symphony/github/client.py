@@ -44,6 +44,69 @@ class GitHubClient:
         except GitHubClientError:
             return ""
 
+    def get_pr(self, pr_number: int) -> dict[str, Any] | None:
+        """Return PR data (state, merged, etc.) or None on failure."""
+        try:
+            return self._request("GET", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}")
+        except GitHubClientError:
+            return None
+
+    def find_open_pr_for_branch(self, branch: str) -> int | None:
+        """Return the PR number of the first open PR with the given head branch, or None."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls"
+                f"?head={self.owner}:{branch}&state=open&per_page=1",
+            )
+            if isinstance(result, list) and result:
+                return int(result[0]["number"])
+            return None
+        except (GitHubClientError, KeyError, TypeError, ValueError):
+            return None
+
+    def list_pr_review_comments(self, pr_number: int) -> list[dict]:
+        """List inline review comments (pull_request_review_comment) on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/comments?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def list_pr_issue_comments(self, pr_number: int) -> list[dict]:
+        """List general PR comments (issue-level) on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/comments?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def list_pr_reviews(self, pr_number: int) -> list[dict]:
+        """List review submissions on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/reviews?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def get_authenticated_login(self) -> str | None:
+        """Return the GitHub login for the current token, or None on failure."""
+        try:
+            result = self._request("GET", "/user")
+            login = result.get("login")
+            return str(login) if login else None
+        except GitHubClientError:
+            return None
+
     def list_webhooks(self) -> list[dict]:
         """List all webhooks registered for the repository."""
         result = self._request("GET", f"/repos/{self.owner}/{self.repo}/hooks")
