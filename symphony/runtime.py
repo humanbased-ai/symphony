@@ -37,6 +37,13 @@ _MAX_CLASSIFY_COMMENTS = 20
 _PR_DIFF_TRUNCATE = 8_000
 
 
+def _fmt_duration_ms(ms: int) -> str:
+    s = ms // 1000
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m {s % 60}s"
+
+
 @dataclass(frozen=True)
 class RuntimeTickResult:
     fetched: int
@@ -45,6 +52,7 @@ class RuntimeTickResult:
     failed: tuple[str, ...] = ()
     released: tuple[str, ...] = ()
     errors: dict[str, str] = field(default_factory=dict)
+    active: int = 0
 
 
 class SymphonyRuntime:
@@ -149,6 +157,7 @@ class SymphonyRuntime:
             failed=tuple(failed),
             released=tuple(released),
             errors=errors,
+            active=len(self.state.running),
         )
 
     async def run_issue(self, issue: Issue, *, attempt: int | None = None) -> "_WorkerResult":
@@ -259,6 +268,7 @@ class SymphonyRuntime:
         entry = self.state.running[issue.id]
         workspace = None
         session = None
+        start_ms = self.clock_ms()
 
         try:
             workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
@@ -272,6 +282,12 @@ class SymphonyRuntime:
             branch_name = getattr(workspace, "branch_name", None)
             if branch_name:
                 self._branch_to_issue[branch_name] = issue
+                LOGGER.info(
+                    "Workspace    %s  branch: %s  path: %s",
+                    issue.identifier,
+                    branch_name,
+                    getattr(workspace, "path", "?"),
+                )
             await _maybe_await(self.workspace_manager.before_run(workspace))
 
             enriched_issue = await self._enrich_with_comments(issue)
@@ -286,8 +302,10 @@ class SymphonyRuntime:
             _apply_usage(entry, getattr(result, "usage", None))
             await _maybe_await(self.workspace_manager.after_run(workspace))
 
+            elapsed = _fmt_duration_ms(self.clock_ms() - start_ms)
             if result.success:
                 complete_worker_success(issue.id, self.state, now_ms=self.clock_ms())
+                LOGGER.info("Completed    %s — %s  (%s)", issue.identifier, issue.title, elapsed)
                 return _WorkerResult(success=True)
 
             error = str(result.exit_reason or "worker_failed")
@@ -298,9 +316,11 @@ class SymphonyRuntime:
                 max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
                 error=error,
             )
+            LOGGER.warning("Failed       %s — %s  (%s)  reason: %s", issue.identifier, issue.title, elapsed, error)
             return _WorkerResult(success=False, error=error)
         except Exception as exc:  # noqa: BLE001 - runtime must convert worker failures into retry state.
             error = str(exc) or exc.__class__.__name__
+            elapsed = _fmt_duration_ms(self.clock_ms() - start_ms)
             if workspace is not None:
                 await _best_effort_after_run(self.workspace_manager, workspace)
             if issue.id in self.state.running:
@@ -311,6 +331,7 @@ class SymphonyRuntime:
                     max_retry_backoff_ms=self.config.agent.max_retry_backoff_ms,
                     error=error,
                 )
+            LOGGER.warning("Failed       %s — %s  (%s)  reason: %s", issue.identifier, issue.title, elapsed, error)
             return _WorkerResult(success=False, error=error)
         finally:
             if session is not None and hasattr(self.runner, "stop_session"):
@@ -629,6 +650,18 @@ class SymphonyRuntime:
             issue.identifier,
             target_state,
         )
+
+        if signal == FeedbackSignal.CLOSE and self.github_client is not None:
+            branches = [b for b, iss in self._branch_to_issue.items() if iss.id == issue.id]
+            for branch in branches:
+                pr_number = self._branch_pr_numbers.get(branch)
+                if pr_number:
+                    closed = await asyncio.to_thread(self.github_client.close_pr, pr_number)
+                    if closed:
+                        LOGGER.info("Closed PR #%d for %s", pr_number, issue.identifier)
+                    else:
+                        LOGGER.warning("Failed to close PR #%d for %s", pr_number, issue.identifier)
+
         if hasattr(self.tracker, "update_issue_state_by_name"):
             success = await _call_sync(self.tracker.update_issue_state_by_name, issue.id, target_state)
             if success:
