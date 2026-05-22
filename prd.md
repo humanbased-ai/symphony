@@ -783,6 +783,12 @@ local checkout installs, wheel/sdist generation with `uv build`, and isolated
 wheel smoke testing. Native single-file binaries and Homebrew remain explicit
 follow-on distribution channels instead of Phase 2A blockers.
 
+**README update — 2026-05-22 (IN-324):** Added a "How It Works" section to the
+README with an ASCII lifecycle diagram and a numbered five-step walkthrough
+(write issue → claim → isolated workspace → agent run → PR + loop close). This
+gives new users a clear mental model of the end-to-end workflow before they read
+the feature list and install instructions.
+
 ### 6.4.1 Phase 2A Follow-Up: Production CLI Release And Onboarding UX
 
 **Linear issue:** IN-280 — Productionize Symphony CLI release and onboarding UX.

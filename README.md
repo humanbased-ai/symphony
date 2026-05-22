@@ -13,6 +13,45 @@ This repository contains the Python CLI implementation of the language-agnostic
 operator use with Linear, GitHub, and Claude Code; Codex app-server is also
 supported.
 
+## How It Works
+
+```
+Linear issue (Todo)
+        │
+        ▼
+Symphony polls & claims (→ In Progress)
+        │
+        ▼
+Isolated workspace created
+(bare clone + git worktree per run)
+        │
+        ▼
+Agent runs with rendered prompt
+(Claude Code / Codex / ...)
+        │
+        ▼
+PR opened + URL posted to Linear (→ In Review)
+        │
+        ▼
+Operator reviews & merges
+```
+
+1. **Write a Linear issue** — describe the task, acceptance criteria, and target
+   repository. The issue body becomes the agent prompt via a Jinja2 template in
+   `WORKFLOW.md`.
+2. **Move it to an active state** — Symphony watches configured Linear states
+   (e.g., `Todo`) and claims eligible issues by immediately transitioning them to
+   an in-progress state before any agent launches.
+3. **Isolated workspace provisioned** — Symphony creates a `<root>/<issue>/<run_id>`
+   directory from a shared bare clone using `git worktree`, so concurrent agents
+   never share files, branches, or credentials.
+4. **Agent implements the task** — the configured runner (Claude Code, Codex, or
+   others) works inside the isolated workspace with the rendered prompt and access
+   to the `linear_graphql` tool for posting progress back to Linear.
+5. **PR opened and loop closed** — the agent opens a pull request and posts the PR
+   URL as a Linear comment. Symphony moves the issue to the configured handoff
+   state (e.g., `In Review`). The operator reviews and merges.
+
 ## Key Features
 
 - **Issue-driven dispatch** — poll Linear, pick eligible tickets, run the agent,
