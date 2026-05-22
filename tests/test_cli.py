@@ -341,6 +341,78 @@ Body
 
             self.assertTrue(all(ok for ok, _, _ in checks))
 
+    def test_doctor_checks_warns_when_states_in_progress_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workflow_path = root / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: symphony-ai-agent-orchestration
+workspace:
+  root: workspaces
+codex:
+  command: python --version
+---
+Body
+""",
+                encoding="utf-8",
+            )
+
+            import socket as _socket
+            with _socket.socket() as _s:
+                _s.bind(("127.0.0.1", 0))
+                free_port = _s.getsockname()[1]
+            with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
+                checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
+
+            warn_check = next(
+                ((ok, label, detail) for ok, label, detail in checks if label == "states.in_progress"),
+                None,
+            )
+            self.assertIsNotNone(warn_check, "expected a states.in_progress check")
+            ok, _label, detail = warn_check
+            self.assertTrue(ok)
+            self.assertTrue(detail.startswith("warn:"))
+            self.assertIn("claim guard disabled", detail)
+
+    def test_doctor_checks_no_warn_when_states_in_progress_set(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workflow_path = root / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: symphony-ai-agent-orchestration
+states:
+  in_progress: "In Progress"
+workspace:
+  root: workspaces
+codex:
+  command: python --version
+---
+Body
+""",
+                encoding="utf-8",
+            )
+
+            import socket as _socket
+            with _socket.socket() as _s:
+                _s.bind(("127.0.0.1", 0))
+                free_port = _s.getsockname()[1]
+            with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
+                checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
+
+            warn_check = next(
+                ((ok, label, detail) for ok, label, detail in checks if label == "states.in_progress"),
+                None,
+            )
+            self.assertIsNone(warn_check, "expected no states.in_progress warning when field is set")
+
     def test_status_api_uses_runtime_snapshot_and_refresh_callback(self):
         class FakeRuntime:
             def __init__(self):

@@ -35,6 +35,20 @@ DEFAULT_REVIEW_STATE = "In Review"
 
 
 @dataclass(frozen=True)
+class StatesConfig:
+    in_progress: str | None = None
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "StatesConfig":
+        states = config.get("states")
+        if states is None:
+            states = {}
+        if not isinstance(states, Mapping):
+            raise ConfigError("states_config_must_be_map")
+        return cls(in_progress=_string_value(states.get("in_progress")))
+
+
+@dataclass(frozen=True)
 class TrackerConfig:
     kind: str
     endpoint: str = DEFAULT_LINEAR_ENDPOINT
@@ -311,6 +325,7 @@ class WebhookConfig:
 @dataclass(frozen=True)
 class WorkflowConfig:
     tracker: TrackerConfig
+    states: StatesConfig = field(default_factory=StatesConfig)
     polling: PollingConfig = field(default_factory=PollingConfig)
     workspace: WorkspaceConfig = field(
         default_factory=lambda: WorkspaceConfig(Path(tempfile.gettempdir()) / "symphony_workspaces")
@@ -333,6 +348,7 @@ class WorkflowConfig:
         workflow_dir = Path(workflow_path).expanduser().resolve().parent if workflow_path is not None else None
         return cls(
             tracker=TrackerConfig.from_mapping(config),
+            states=StatesConfig.from_mapping(config),
             polling=PollingConfig.from_mapping(config),
             workspace=WorkspaceConfig.from_mapping(config, workflow_dir=workflow_dir, environ=environ),
             hooks=HooksConfig.from_mapping(config),

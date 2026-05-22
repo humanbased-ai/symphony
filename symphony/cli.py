@@ -1757,6 +1757,12 @@ def doctor_checks(
         return checks
 
     checks.append((True, "workflow", str(context.workflow_path)))
+    if not context.config.states.in_progress:
+        checks.append((
+            True,
+            "states.in_progress",
+            "warn: not set — claim guard disabled; set states.in_progress in WORKFLOW.md to enable it",
+        ))
     checks.append((True, "linear auth", _linear_runtime_auth_source(context.config, environ=environ)))
     linear_token = _resolve_linear_token(context.config)
     if linear_token:
