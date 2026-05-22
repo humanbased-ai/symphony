@@ -245,6 +245,7 @@ class GitHubConfig:
     owner: str | None = None
     repo: str | None = None
     max_pr_turns: int = DEFAULT_MAX_PR_TURNS
+    webhook_url: str | None = None
 
     @classmethod
     def from_mapping(
@@ -258,12 +259,15 @@ class GitHubConfig:
         token = resolve_env_reference(raw_token, environ) if raw_token is not None else None
         raw_secret = _string_value(github.get("webhook_secret"))
         secret = resolve_env_reference(raw_secret, environ) if raw_secret is not None else None
+        raw_url = _string_value(github.get("webhook_url"))
+        webhook_url = resolve_env_reference(raw_url, environ) if raw_url is not None else None
         return cls(
             token=token,
             webhook_secret=secret,
             owner=_string_value(github.get("owner")),
             repo=_string_value(github.get("repo")),
             max_pr_turns=_positive_int(github.get("max_pr_turns"), DEFAULT_MAX_PR_TURNS, "github_max_pr_turns"),
+            webhook_url=webhook_url,
         )
 
 

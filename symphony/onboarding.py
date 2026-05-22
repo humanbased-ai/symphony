@@ -64,6 +64,8 @@ class InitConfig:
     runner: str = DEFAULT_RUNNER
     github_org: str = ""
     github_repo: str = ""
+    github_webhook_url: str = ""
+    github_webhook_secret: str = ""
 
 
 class OnboardingError(ValueError):
@@ -98,6 +100,16 @@ def generate_workflow(config: InitConfig) -> str:
             "max_turns": preset.max_turns,
         },
     }
+
+    if config.github_org and config.github_repo:
+        front_matter["github"] = {
+            "token": "$GITHUB_TOKEN",
+            "owner": config.github_org,
+            "repo": config.github_repo,
+        }
+        if config.github_webhook_url:
+            front_matter["github"]["webhook_secret"] = "$GITHUB_WEBHOOK_SECRET"
+            front_matter["github"]["webhook_url"] = config.github_webhook_url
 
     if runner == "claude_code":
         prompt = (

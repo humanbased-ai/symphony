@@ -28,6 +28,7 @@ from symphony.auth import (
     load_local_linear_token,
     load_local_github_token,
     save_local_github_token,
+    save_local_github_webhook_secret,
     save_local_linear_token,
 )
 from symphony.config import ConfigError, WorkflowConfig
@@ -336,6 +337,14 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--github-repo",
         help="Default GitHub repository name (without org prefix) for PR automation.",
+    )
+    parser.add_argument(
+        "--github-webhook-url",
+        help=(
+            "Public URL where GitHub will POST PR events "
+            "(e.g. https://yourserver.com/api/v1/webhooks/github). "
+            "When set, Symphony auto-registers the webhook and stores the secret locally."
+        ),
     )
     parser.add_argument(
         "--yes",
@@ -736,6 +745,20 @@ async def run_daemon(
             LOGGER.info("Webhook registered: id=%s url=%s", webhook_id, wh.url)
         except (MissingLinearTokenError, WebhookRegistrarError) as exc:
             LOGGER.warning("Webhook auto-registration failed (falling back to polling): %s", exc)
+
+    # Auto-register the GitHub webhook when webhook_url + webhook_secret + token are configured.
+    gh = context.config.github
+    if gh.webhook_url and gh.webhook_secret and gh.owner and gh.repo and gh.token:
+        try:
+            client = GitHubClient(token=gh.token, owner=gh.owner, repo=gh.repo)
+            webhook_id = await asyncio.to_thread(
+                client.register_webhook,
+                gh.webhook_url,
+                gh.webhook_secret,
+            )
+            LOGGER.info("GitHub webhook registered: id=%s url=%s", webhook_id, gh.webhook_url)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("GitHub webhook auto-registration failed: %s", exc)
 
     # serve_status_api accepts webhook_api and github_webhook_api as keyword args.
     import functools as _functools  # noqa: PLC0415
@@ -1162,6 +1185,14 @@ def _run_init_with_args(
             print("  Scope it to the specific repository if possible.")
             github_token = getpass.getpass("GitHub token (blank to skip): ").strip()
 
+        # --- Webhook URL + secret (optional) ---
+        github_webhook_url = getattr(args, "github_webhook_url", None) or ""
+        github_webhook_secret = ""
+        if github_webhook_url and not automated:
+            print("\n  GitHub webhook URL provided — a random webhook secret will be generated.")
+        if github_webhook_url:
+            github_webhook_secret = secrets.token_hex(32)
+
         if automated:
             failures = _automated_setup_failures(
                 args,
@@ -1186,6 +1217,8 @@ def _run_init_with_args(
                 runner=runner,
                 github_org=github_org,
                 github_repo=github_repo,
+                github_webhook_url=github_webhook_url,
+                github_webhook_secret=github_webhook_secret,
             )
         )
         workflow_path = write_workflow(args.workflow_path, workflow, overwrite=args.overwrite)
@@ -1214,6 +1247,10 @@ def _run_init_with_args(
         print("GitHub token not stored. Using gh auth, GITHUB_TOKEN, or local credentials.")
     elif runner == "claude_code":
         print("GitHub token not stored. Set GITHUB_TOKEN or re-run with --github-token.")
+
+    if github_webhook_secret:
+        save_local_github_webhook_secret(github_webhook_secret, path=args.credentials_path)
+        print(f"  Set environment variable: GITHUB_WEBHOOK_SECRET={github_webhook_secret}")
 
     print(f"\nWrote workflow: {workflow_path}")
     print(f"Next: {_cyan(_cli_name() + ' doctor ' + str(workflow_path))}")

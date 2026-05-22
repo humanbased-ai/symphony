@@ -44,6 +44,61 @@ class GitHubClient:
         except GitHubClientError:
             return ""
 
+    def list_webhooks(self) -> list[dict]:
+        """List all webhooks registered for the repository."""
+        result = self._request("GET", f"/repos/{self.owner}/{self.repo}/hooks")
+        if isinstance(result, list):
+            return result
+        return []
+
+    def delete_webhook(self, webhook_id: int) -> None:
+        """Delete a webhook by its ID."""
+        try:
+            self._request("DELETE", f"/repos/{self.owner}/{self.repo}/hooks/{webhook_id}")
+        except GitHubClientError as exc:
+            # 404 means it's already gone — treat as success
+            if "github_http_error:404" in str(exc):
+                return
+            raise
+
+    def register_webhook(
+        self,
+        url: str,
+        secret: str,
+        events: list[str] | None = None,
+    ) -> str:
+        """Register a webhook, returning the webhook id as a string.
+
+        If a webhook with the same URL already exists it is deleted first so
+        the secret is guaranteed to be up-to-date.
+        """
+        if events is None:
+            events = ["pull_request", "pull_request_review", "pull_request_review_comment"]
+
+        # Remove any existing webhook pointing at the same URL
+        try:
+            existing = self.list_webhooks()
+            for hook in existing:
+                config_block = hook.get("config") or {}
+                if config_block.get("url") == url:
+                    self.delete_webhook(int(hook["id"]))
+        except GitHubClientError:
+            pass
+
+        payload = {
+            "name": "web",
+            "active": True,
+            "events": events,
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        }
+        result = self._request("POST", f"/repos/{self.owner}/{self.repo}/hooks", payload)
+        return str(result["id"])
+
     # ------------------------------------------------------------------
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
