@@ -107,6 +107,8 @@ class SymphonyRuntime:
         self._branch_pr_numbers: dict[str, int] = {}
         # GitHub login of the token owner — used to skip our own bot comments.
         self._github_bot_login: str | None = None
+        # Maps branch → frozenset of check-run IDs already processed for CI failures.
+        self._pr_ci_seen: dict[str, frozenset[int]] = {}
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -491,6 +493,39 @@ class SymphonyRuntime:
         if feedback_parts:
             combined = "\n\n---\n\n".join(feedback_parts)
             await self._handle_pr_feedback(branch, pr_number, combined)
+            return
+
+        # Check for new CI failures only when there is no human feedback this tick,
+        # so the agent addresses human comments before retrying CI.
+        await self._handle_ci_failures(branch, pr_number, issue)
+
+    async def _handle_ci_failures(self, branch: str, pr_number: int, issue: Issue) -> None:
+        """Trigger a PR-feedback agent run when new CI check failures appear."""
+        gh = self.github_client
+        if gh is None:
+            return
+        failed = await asyncio.to_thread(gh.get_pr_failed_check_runs, pr_number)
+        if not failed:
+            return
+        ci_seen = self._pr_ci_seen.get(branch, frozenset())
+        new_failures = [r for r in failed if r["id"] not in ci_seen]
+        if not new_failures:
+            return
+        self._pr_ci_seen[branch] = ci_seen | frozenset(r["id"] for r in new_failures)
+        lines = []
+        for r in new_failures:
+            line = f"- **{r['name']}** failed"
+            if r["details_url"]:
+                line += f" — {r['details_url']}"
+            if r["summary"]:
+                line += f"\n  {r['summary']}"
+            lines.append(line)
+        feedback_text = "The following CI checks failed:\n\n" + "\n".join(lines)
+        LOGGER.info(
+            "CI failure(s) on PR #%d for %s: %s",
+            pr_number, issue.identifier, ", ".join(r["name"] for r in new_failures),
+        )
+        await self._handle_pr_feedback(branch, pr_number, feedback_text)
 
     async def handle_github_pr_event(self, event: GitHubEvent) -> None:
         """Route a GitHub PR event to the appropriate handler."""
@@ -652,15 +687,22 @@ class SymphonyRuntime:
         )
 
         if signal == FeedbackSignal.CLOSE and self.github_client is not None:
+            pr_number: int | None = None
             branches = [b for b, iss in self._branch_to_issue.items() if iss.id == issue.id]
             for branch in branches:
                 pr_number = self._branch_pr_numbers.get(branch)
                 if pr_number:
-                    closed = await asyncio.to_thread(self.github_client.close_pr, pr_number)
-                    if closed:
-                        LOGGER.info("Closed PR #%d for %s", pr_number, issue.identifier)
-                    else:
-                        LOGGER.warning("Failed to close PR #%d for %s", pr_number, issue.identifier)
+                    break
+            if pr_number is None:
+                pr_number = await asyncio.to_thread(
+                    self.github_client.find_open_pr_for_issue, issue.identifier
+                )
+            if pr_number:
+                closed = await asyncio.to_thread(self.github_client.close_pr, pr_number)
+                if closed:
+                    LOGGER.info("Closed PR #%d for %s", pr_number, issue.identifier)
+                else:
+                    LOGGER.warning("Failed to close PR #%d for %s", pr_number, issue.identifier)
 
         if hasattr(self.tracker, "update_issue_state_by_name"):
             success = await _call_sync(self.tracker.update_issue_state_by_name, issue.id, target_state)
