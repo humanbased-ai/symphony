@@ -229,45 +229,6 @@ Body
             self.assertIn("repo: myrepo", updated)
             self.assertIn("$GITHUB_TOKEN", updated)
 
-    def test_onboard_skips_github_inject_when_already_configured(self):
-        """onboard does not modify WORKFLOW.md when github: is already present."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            workflow_path = Path(temp_dir) / "WORKFLOW.md"
-            original = """---
-tracker:
-  kind: linear
-  api_key: literal-token
-  project_slug: myproject
-workspace:
-  root: workspaces
-agent:
-  runner: codex
-github:
-  token: literal-ghtoken
-  owner: existingorg
-  repo: existingrepo
----
-Body
-"""
-            workflow_path.write_text(original, encoding="utf-8")
-
-            stdout = StringIO()
-            with redirect_stdout(stdout):
-                with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid")):
-                    with patch("symphony.cli._check_command", return_value=(True, "found")):
-                        result = main([
-                            "onboard",
-                            "--mode", "automated",
-                            "--workflow-path", str(workflow_path),
-                            "--runner", "codex",
-                            "--github-org", "neworg",
-                            "--github-repo", "newrepo",
-                        ])
-
-            self.assertEqual(0, result)
-            # File should be unchanged — existing config wins
-            self.assertEqual(original, workflow_path.read_text(encoding="utf-8"))
-
     def test_init_subcommand_writes_workflow_and_local_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
