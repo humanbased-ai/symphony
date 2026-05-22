@@ -226,7 +226,7 @@ class ClaudeCodeConfig:
 
 @dataclass(frozen=True)
 class GitHubConfig:
-    """Optional GitHub integration for PR-native feedback loop.
+    """Optional GitHub integration for the PR comment polling feedback loop.
 
     Supports $VAR syntax for environment variable resolution.
 
@@ -234,18 +234,15 @@ class GitHubConfig:
 
         github:
           token: $GITHUB_TOKEN
-          webhook_secret: $GITHUB_WEBHOOK_SECRET
           owner: myorg
           repo: myrepo
           max_pr_turns: 10
     """
 
     token: str | None = None
-    webhook_secret: str | None = None
     owner: str | None = None
     repo: str | None = None
     max_pr_turns: int = DEFAULT_MAX_PR_TURNS
-    webhook_url: str | None = None
 
     @classmethod
     def from_mapping(
@@ -257,17 +254,11 @@ class GitHubConfig:
         github = _mapping(config.get("github"), "github_config_must_be_map")
         raw_token = _string_value(github.get("token"))
         token = resolve_env_reference(raw_token, environ) if raw_token is not None else None
-        raw_secret = _string_value(github.get("webhook_secret"))
-        secret = resolve_env_reference(raw_secret, environ) if raw_secret is not None else None
-        raw_url = _string_value(github.get("webhook_url"))
-        webhook_url = resolve_env_reference(raw_url, environ) if raw_url is not None else None
         return cls(
             token=token,
-            webhook_secret=secret,
             owner=_string_value(github.get("owner")),
             repo=_string_value(github.get("repo")),
             max_pr_turns=_positive_int(github.get("max_pr_turns"), DEFAULT_MAX_PR_TURNS, "github_max_pr_turns"),
-            webhook_url=webhook_url,
         )
 
 

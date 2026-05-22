@@ -28,12 +28,11 @@ from symphony.auth import (
     load_local_linear_token,
     load_local_github_token,
     save_local_github_token,
-    save_local_github_webhook_secret,
     save_local_linear_token,
 )
 from symphony.config import ConfigError, WorkflowConfig
 from symphony.github.client import GitHubClient
-from symphony.http_server import GitHubWebhookAPI, StatusAPI, WebhookAPI
+from symphony.http_server import StatusAPI, WebhookAPI
 from symphony.onboarding import (
     DEFAULT_ACTIVE_STATES,
     DEFAULT_PRESET,
@@ -339,14 +338,6 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
         help="Default GitHub repository name (without org prefix) for PR automation.",
     )
     parser.add_argument(
-        "--github-webhook-url",
-        help=(
-            "Public URL where GitHub will POST PR events "
-            "(e.g. https://yourserver.com/api/v1/webhooks/github). "
-            "When set, Symphony auto-registers the webhook and stores the secret locally."
-        ),
-    )
-    parser.add_argument(
         "--yes",
         action="store_true",
         help="Alias for --mode automated. Requires explicit setup inputs.",
@@ -622,13 +613,11 @@ async def serve_status_api(
     port: int,
     *,
     webhook_api: WebhookAPI | None = None,
-    github_webhook_api: GitHubWebhookAPI | None = None,
 ) -> None:
     loop = asyncio.get_running_loop()
     server = create_status_http_server(
         status_api, port, loop=loop,
         webhook_api=webhook_api,
-        github_webhook_api=github_webhook_api,
     )
     LOGGER.info("Status API listening on http://127.0.0.1:%s", port)
     serve_task = asyncio.create_task(asyncio.to_thread(server.serve_forever, 0.25))
@@ -647,10 +636,8 @@ def create_status_http_server(
     loop: asyncio.AbstractEventLoop,
     host: str = "127.0.0.1",
     webhook_api: WebhookAPI | None = None,
-    github_webhook_api: GitHubWebhookAPI | None = None,
 ) -> ThreadingHTTPServer:
     _webhook_route = "/api/v1/webhooks/linear"
-    _github_webhook_route = "/api/v1/webhooks/github"
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
@@ -672,14 +659,7 @@ def create_status_http_server(
             body = self.rfile.read(_content_length(self.headers.get("content-length")))
             route = self.path.split("?", 1)[0]
 
-            if method == "POST" and route == _github_webhook_route and github_webhook_api is not None:
-                header_map = {k.lower(): v for k, v in self.headers.items()}
-                future = asyncio.run_coroutine_threadsafe(
-                    github_webhook_api.async_handle_request(method, self.path, body, header_map),
-                    loop,
-                )
-                response = future.result()
-            elif method == "POST" and route == _webhook_route and webhook_api is not None:
+            if method == "POST" and route == _webhook_route and webhook_api is not None:
                 header_map = {k.lower(): v for k, v in self.headers.items()}
                 future = asyncio.run_coroutine_threadsafe(
                     webhook_api.async_handle_request(method, self.path, body, header_map),
@@ -713,7 +693,6 @@ async def run_daemon(
     workflow_reloader: "RuntimeWorkflowReloader | None" = None,
     status_server: StatusServer = serve_status_api,
     webhook_api: WebhookAPI | None = None,
-    github_webhook_api: GitHubWebhookAPI | None = None,
 ) -> None:
     status_api = create_status_api(runtime)
     # Single lock shared by the poll loop and every webhook-triggered tick so
@@ -728,12 +707,6 @@ async def run_daemon(
     elif webhook_api is not None:
         # Re-inject on_event with the shared lock regardless of how the API was built.
         webhook_api.on_event = _make_webhook_event_handler(runtime, tick_lock=tick_lock)
-    # Build a GitHubWebhookAPI from config when not explicitly provided.
-    if github_webhook_api is None and context.config.github.webhook_secret:
-        github_webhook_api = GitHubWebhookAPI(
-            webhook_secret=context.config.github.webhook_secret,
-            on_event=_make_github_pr_event_handler(runtime),
-        )
     # Auto-register the webhook with Linear when url + team_id + secret are all configured.
     wh = context.config.webhook
     if wh.url and wh.team_id and wh.secret:
@@ -746,26 +719,10 @@ async def run_daemon(
         except (MissingLinearTokenError, WebhookRegistrarError) as exc:
             LOGGER.warning("Webhook auto-registration failed (falling back to polling): %s", exc)
 
-    # Auto-register the GitHub webhook when webhook_url + webhook_secret + token are configured.
-    gh = context.config.github
-    if gh.webhook_url and gh.webhook_secret and gh.owner and gh.repo and gh.token:
-        try:
-            client = GitHubClient(token=gh.token, owner=gh.owner, repo=gh.repo)
-            webhook_id = await asyncio.to_thread(
-                client.register_webhook,
-                gh.webhook_url,
-                gh.webhook_secret,
-            )
-            LOGGER.info("GitHub webhook registered: id=%s url=%s", webhook_id, gh.webhook_url)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("GitHub webhook auto-registration failed: %s", exc)
-
-    # serve_status_api accepts webhook_api and github_webhook_api as keyword args.
     import functools as _functools  # noqa: PLC0415
     _status_server = _functools.partial(
         status_server,
         webhook_api=webhook_api,
-        github_webhook_api=github_webhook_api,
     )
     status_task = asyncio.create_task(_status_server(status_api, context.port))
     poll_task = asyncio.create_task(
@@ -823,20 +780,6 @@ def _make_webhook_event_handler(
                 LOGGER.warning("Webhook-triggered tick failed: %s", exc)
 
     return on_webhook_event
-
-
-def _make_github_pr_event_handler(
-    runtime: SymphonyRuntime,
-) -> "Callable[[Any], Awaitable[None]]":
-    """Return an async callback that routes GitHub PR events to the runtime."""
-
-    async def on_github_pr_event(event: Any) -> None:
-        try:
-            await runtime.handle_github_pr_event(event)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("GitHub PR event handler failed: %s", exc)
-
-    return on_github_pr_event
 
 
 @dataclass
@@ -1185,14 +1128,6 @@ def _run_init_with_args(
             print("  Scope it to the specific repository if possible.")
             github_token = getpass.getpass("GitHub token (blank to skip): ").strip()
 
-        # --- Webhook URL + secret (optional) ---
-        github_webhook_url = getattr(args, "github_webhook_url", None) or ""
-        github_webhook_secret = ""
-        if github_webhook_url and not automated:
-            print("\n  GitHub webhook URL provided — a random webhook secret will be generated.")
-        if github_webhook_url:
-            github_webhook_secret = secrets.token_hex(32)
-
         if automated:
             failures = _automated_setup_failures(
                 args,
@@ -1217,8 +1152,6 @@ def _run_init_with_args(
                 runner=runner,
                 github_org=github_org,
                 github_repo=github_repo,
-                github_webhook_url=github_webhook_url,
-                github_webhook_secret=github_webhook_secret,
             )
         )
         workflow_path = write_workflow(args.workflow_path, workflow, overwrite=args.overwrite)
@@ -1247,10 +1180,6 @@ def _run_init_with_args(
         print("GitHub token not stored. Using gh auth, GITHUB_TOKEN, or local credentials.")
     elif runner == "claude_code":
         print("GitHub token not stored. Set GITHUB_TOKEN or re-run with --github-token.")
-
-    if github_webhook_secret:
-        save_local_github_webhook_secret(github_webhook_secret, path=args.credentials_path)
-        print(f"  Set environment variable: GITHUB_WEBHOOK_SECRET={github_webhook_secret}")
 
     print(f"\nWrote workflow: {workflow_path}")
     print(f"Next: {_cyan(_cli_name() + ' doctor ' + str(workflow_path))}")

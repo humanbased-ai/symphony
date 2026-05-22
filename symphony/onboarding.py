@@ -64,8 +64,6 @@ class InitConfig:
     runner: str = DEFAULT_RUNNER
     github_org: str = ""
     github_repo: str = ""
-    github_webhook_url: str = ""
-    github_webhook_secret: str = ""
 
 
 class OnboardingError(ValueError):
@@ -107,9 +105,6 @@ def generate_workflow(config: InitConfig) -> str:
             "owner": config.github_org,
             "repo": config.github_repo,
         }
-        if config.github_webhook_url:
-            front_matter["github"]["webhook_secret"] = "$GITHUB_WEBHOOK_SECRET"
-            front_matter["github"]["webhook_url"] = config.github_webhook_url
 
     if runner == "claude_code":
         prompt = (

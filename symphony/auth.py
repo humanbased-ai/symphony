@@ -396,37 +396,6 @@ def save_local_github_token(
     return _save_credentials({"github": {"token": resolved}}, path=path, environ=environ)
 
 
-def load_local_github_webhook_secret(
-    *,
-    path: str | Path | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> str | None:
-    credentials_path = Path(path).expanduser() if path is not None else default_credentials_path(environ)
-    try:
-        payload = json.loads(credentials_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    github = payload.get("github")
-    if not isinstance(github, dict):
-        return None
-    secret = github.get("webhook_secret")
-    return _non_empty(secret) if isinstance(secret, str) else None
-
-
-def save_local_github_webhook_secret(
-    secret: str,
-    *,
-    path: str | Path | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> Path:
-    resolved = _non_empty(secret)
-    if resolved is None:
-        raise ValueError("empty_github_webhook_secret")
-    return _save_credentials({"github": {"webhook_secret": resolved}}, path=path, environ=environ)
-
-
 def _save_credentials(
     updates: dict[str, object],
     *,
