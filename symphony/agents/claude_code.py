@@ -389,7 +389,9 @@ _CLAUDE_STOP_REASON_MAP = {
 
 def _claude_exit_reason(*, is_error: bool, subtype: str, stop_reason: str) -> str:
     if is_error:
-        return subtype or "claude_error"
+        # subtype="success" with is_error=True is a contradiction — return a
+        # clear error name rather than the misleading "success" string.
+        return subtype if subtype and subtype != "success" else "claude_error"
     if subtype.startswith("error"):
         return subtype
     if stop_reason in _CLAUDE_STOP_REASON_MAP:

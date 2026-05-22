@@ -822,8 +822,10 @@ Instructions:
 1. Make the necessary code changes to address the feedback.
 2. Commit your changes with a clear message.
 3. Push to the PR branch: git push origin HEAD:{branch}
-4. Post a comment on the PR summarizing what you changed:
-   gh pr comment {pr_number} --body "..."
+4. Post a comment on the PR summarizing what you changed. The body MUST start with
+   `<!-- symphony -->` on its own first line so the automation skips your comment on
+   the next polling cycle (without this marker your comment will trigger another run):
+     gh pr comment {pr_number} --body $'<!-- symphony -->\\nI addressed the feedback by ...'
 
 Focus only on what the reviewer asked for. Do not refactor unrelated code.
 """
