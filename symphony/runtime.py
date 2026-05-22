@@ -13,6 +13,7 @@ from typing import Any
 
 from symphony.agents.base import AgentEvent, AgentEventCallback, TokenUsage
 from symphony.config import WorkflowConfig
+from symphony.github.webhooks import GitHubEvent, PRClosedEvent, PRCommentEvent, PRReviewEvent
 from symphony.orchestrator import (
     OrchestratorState,
     complete_worker_failure,
@@ -33,6 +34,7 @@ from symphony.workflow import WorkflowDefinition, render_prompt
 LOGGER = logging.getLogger(__name__)
 StateCallback = Callable[[OrchestratorState], Any]
 _MAX_CLASSIFY_COMMENTS = 20
+_PR_DIFF_TRUNCATE = 8_000
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class SymphonyRuntime:
         clock_ms: Callable[[], int] | None = None,
         on_event: AgentEventCallback | None = None,
         on_state_change: StateCallback | None = None,
+        github_client: Any | None = None,
     ) -> None:
         self.config = config
         self.workflow = workflow
@@ -74,6 +77,7 @@ class SymphonyRuntime:
         self.clock_ms = clock_ms or _monotonic_epoch_ms
         self.on_event = on_event
         self.on_state_change = on_state_change
+        self.github_client = github_client
         # Tracks the issue IDs seen in the previous poll tick.  An issue is
         # eligible for dispatch only when it newly appears (present in current
         # candidates but absent from _prev_candidate_ids).  Starts empty so
@@ -84,6 +88,11 @@ class SymphonyRuntime:
         self._prev_candidate_ids: set[str] = set()
         # Maps issue_id → frozenset of comment IDs already processed for feedback.
         self._feedback_seen: dict[str, frozenset[str]] = {}
+        # Maps workspace branch_name → Issue, populated after workspace creation.
+        # Used to route GitHub PR events back to the originating Linear issue.
+        self._branch_to_issue: dict[str, Issue] = {}
+        # Tracks how many PR feedback agent runs have been triggered per branch.
+        self._pr_turns: dict[str, int] = {}
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -253,6 +262,9 @@ class SymphonyRuntime:
                 run_id=getattr(workspace, "run_id", None),
                 branch_name=getattr(workspace, "branch_name", None),
             )
+            branch_name = getattr(workspace, "branch_name", None)
+            if branch_name:
+                self._branch_to_issue[branch_name] = issue
             await _maybe_await(self.workspace_manager.before_run(workspace))
 
             enriched_issue = await self._enrich_with_comments(issue)
@@ -341,6 +353,122 @@ class SymphonyRuntime:
                 await self._handle_feedback_for_issue(issue)
             except Exception:  # noqa: BLE001
                 pass
+
+    async def handle_github_pr_event(self, event: GitHubEvent) -> None:
+        """Route a GitHub PR event to the appropriate handler."""
+        if isinstance(event, PRClosedEvent):
+            await self._handle_pr_closed(event)
+        elif isinstance(event, PRCommentEvent):
+            await self._handle_pr_feedback(
+                event.pr_head_branch, event.pr_number,
+                f"**{event.comment_author}** left a review comment:\n\n{event.comment_body}",
+            )
+        elif isinstance(event, PRReviewEvent) and event.review_state == "changes_requested":
+            body = event.review_body or "(no description)"
+            await self._handle_pr_feedback(
+                event.pr_head_branch, event.pr_number,
+                f"**{event.reviewer}** requested changes:\n\n{body}",
+            )
+        elif isinstance(event, PRReviewEvent) and event.review_state == "approved":
+            LOGGER.info("PR #%d approved — waiting for merge to close the issue.", event.pr_number)
+
+    async def _handle_pr_closed(self, event: PRClosedEvent) -> None:
+        issue = self._branch_to_issue.get(event.pr_head_branch)
+        if issue is None:
+            LOGGER.debug("PR #%d closed on unknown branch %r — ignoring.", event.pr_number, event.pr_head_branch)
+            return
+
+        target_state = self.config.tracker.done_state if event.merged else self.config.tracker.cancelled_state
+        LOGGER.info(
+            "PR #%d %s for %s → transitioning to %s",
+            event.pr_number,
+            "merged" if event.merged else "closed",
+            issue.identifier,
+            target_state,
+        )
+        if hasattr(self.tracker, "update_issue_state_by_name"):
+            await _call_sync(self.tracker.update_issue_state_by_name, issue.id, target_state)
+
+        self._branch_to_issue.pop(event.pr_head_branch, None)
+        self._pr_turns.pop(event.pr_head_branch, None)
+
+    async def _handle_pr_feedback(self, branch: str, pr_number: int, feedback_text: str) -> None:
+        issue = self._branch_to_issue.get(branch)
+        if issue is None:
+            LOGGER.debug("PR #%d comment on unknown branch %r — ignoring.", pr_number, branch)
+            return
+
+        max_turns = self.config.github.max_pr_turns
+        turns = self._pr_turns.get(branch, 0)
+        if turns >= max_turns:
+            LOGGER.warning(
+                "PR #%d (%s) has reached max_pr_turns=%d — skipping agent run.",
+                pr_number, issue.identifier, max_turns,
+            )
+            if self.github_client is not None:
+                self.github_client.post_pr_comment(
+                    pr_number,
+                    f"Maximum feedback iterations ({max_turns}) reached for this PR. "
+                    "Please review and merge or close manually.",
+                )
+            return
+
+        self._pr_turns[branch] = turns + 1
+        LOGGER.info(
+            "PR #%d feedback for %s (turn %d/%d) — dispatching agent.",
+            pr_number, issue.identifier, turns + 1, max_turns,
+        )
+
+        diff = ""
+        if self.github_client is not None:
+            diff = await asyncio.to_thread(self.github_client.get_pr_diff, pr_number)
+
+        prompt = _render_pr_feedback_prompt(issue, pr_number, branch, feedback_text, diff)
+        await self._run_pr_feedback(issue, branch, pr_number, prompt)
+
+    async def _run_pr_feedback(self, issue: Issue, branch: str, pr_number: int, prompt: str) -> None:
+        workspace = None
+        session = None
+        try:
+            if hasattr(self.workspace_manager, "prepare_for_pr_feedback"):
+                workspace = await _maybe_await(
+                    self.workspace_manager.prepare_for_pr_feedback(issue, branch)
+                )
+            else:
+                workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
+
+            await _maybe_await(self.workspace_manager.before_run(workspace))
+
+            if _is_api_runner(self.runner):
+                result = await self.runner.run_task(
+                    Path(workspace.path), prompt, issue, self._agent_event_handler
+                )
+            else:
+                session = await self.runner.start_session(Path(workspace.path))
+                result = await self.runner.run_turn(session, prompt, issue, self._agent_event_handler)
+
+            await _maybe_await(self.workspace_manager.after_run(workspace))
+
+            if not result.success:
+                LOGGER.warning("PR feedback agent run failed for %s: %s", issue.identifier, result.exit_reason)
+                if self.github_client is not None:
+                    self.github_client.post_pr_comment(
+                        pr_number,
+                        f"I encountered an error while addressing your feedback: `{result.exit_reason}`",
+                    )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("PR feedback run raised for %s: %s", issue.identifier, exc)
+            if workspace is not None:
+                await _best_effort_after_run(self.workspace_manager, workspace)
+        finally:
+            if session is not None and hasattr(self.runner, "stop_session"):
+                await _maybe_await(self.runner.stop_session(session))
+            if workspace is not None:
+                await _maybe_await(
+                    self.workspace_manager.cleanup(issue.identifier)
+                    if not hasattr(self.workspace_manager, "cleanup_for_run")
+                    else self.workspace_manager.cleanup_for_run(workspace)
+                )
 
     async def _handle_feedback_for_issue(self, issue: Issue) -> None:
         if not hasattr(self.tracker, "fetch_issue_comments_with_ids"):
@@ -479,3 +607,38 @@ async def _call_sync(fn: Any, *args: Any) -> Any:
     if asyncio.iscoroutinefunction(fn):
         return await fn(*args)
     return await asyncio.to_thread(fn, *args)
+
+
+def _render_pr_feedback_prompt(
+    issue: Issue,
+    pr_number: int,
+    branch: str,
+    feedback_text: str,
+    diff: str,
+) -> str:
+    diff_section = ""
+    if diff:
+        truncated = diff[:_PR_DIFF_TRUNCATE]
+        if len(diff) > _PR_DIFF_TRUNCATE:
+            truncated += "\n... [diff truncated]"
+        diff_section = f"\n\nCurrent PR diff:\n```diff\n{truncated}\n```"
+
+    return f"""\
+You are addressing reviewer feedback on pull request #{pr_number} for issue {issue.identifier}: {issue.title}
+
+Original issue:
+{issue.description or "(no description)"}
+{diff_section}
+
+Reviewer feedback:
+{feedback_text}
+
+Instructions:
+1. Make the necessary code changes to address the feedback.
+2. Commit your changes with a clear message.
+3. Push to the PR branch: git push origin HEAD:{branch}
+4. Post a comment on the PR summarizing what you changed:
+   gh pr comment {pr_number} --body "..."
+
+Focus only on what the reviewer asked for. Do not refactor unrelated code.
+"""
