@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -452,8 +451,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE), \
-                 patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.poll_feedback()
 
         self.assertEqual([("r-1", "Done")], tracker.state_transitions)
@@ -468,8 +466,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST), \
-                 patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
                 await runtime.poll_feedback()
 
         self.assertEqual([("r-2", "Todo")], tracker.state_transitions)
@@ -484,8 +481,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CLOSE), \
-                 patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CLOSE):
                 await runtime.poll_feedback()
 
         self.assertEqual([("r-3", "Canceled")], tracker.state_transitions)
@@ -500,8 +496,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE), \
-                 patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 # First poll: marks c-1 as seen.
                 await runtime.poll_feedback()
                 tracker.state_transitions.clear()
@@ -520,8 +515,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=None), \
-                 patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("symphony.runtime.classify_feedback", return_value=None):
                 await runtime.poll_feedback()
 
         self.assertEqual([], tracker.state_transitions)
@@ -537,17 +531,16 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
-                    # First poll: c-1 (LGTM) fires → Done transition.
-                    await runtime.poll_feedback()
-                tracker.state_transitions.clear()
-                # Simulate re-open: a new non-signal comment arrives (c-2).
-                tracker._comment_ids["r-x"] = ["c-1", "c-2"]
-                tracker._comments["r-x"] = ["Alice: LGTM", "Bob: re-opened for discussion"]
-                with patch("symphony.runtime.classify_feedback", return_value=None):
-                    # Second poll: only c-2 is new; it carries no signal → no transition.
-                    await runtime.poll_feedback()
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                # First poll: c-1 (LGTM) fires → Done transition.
+                await runtime.poll_feedback()
+            tracker.state_transitions.clear()
+            # Simulate re-open: a new non-signal comment arrives (c-2).
+            tracker._comment_ids["r-x"] = ["c-1", "c-2"]
+            tracker._comments["r-x"] = ["Alice: LGTM", "Bob: re-opened for discussion"]
+            with patch("symphony.runtime.classify_feedback", return_value=None):
+                # Second poll: only c-2 is new; it carries no signal → no transition.
+                await runtime.poll_feedback()
 
         self.assertEqual([], tracker.state_transitions)
 
@@ -575,8 +568,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE), \
-                 patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.poll_feedback()  # first poll: update fails, not marked seen
                 await runtime.poll_feedback()  # second poll: retries and succeeds
 
@@ -593,38 +585,15 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                with patch("symphony.runtime.classify_feedback", side_effect=ClassifyError("timeout")):
-                    await runtime.poll_feedback()  # fails: _feedback_seen NOT updated
-                self.assertEqual([], tracker.state_transitions)
-                self.assertNotIn("r-e", runtime._feedback_seen)
+            with patch("symphony.runtime.classify_feedback", side_effect=ClassifyError("timeout")):
+                await runtime.poll_feedback()  # fails: _feedback_seen NOT updated
+            self.assertEqual([], tracker.state_transitions)
+            self.assertNotIn("r-e", runtime._feedback_seen)
 
-                with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
-                    await runtime.poll_feedback()  # retries and succeeds
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                await runtime.poll_feedback()  # retries and succeeds
 
         self.assertEqual([("r-e", "Done")], tracker.state_transitions)
-
-    async def test_no_api_key_disables_feedback_gate(self):
-        """When ANTHROPIC_API_KEY is absent, poll_feedback must skip without calling classify."""
-        review_issue = issue("r-k", "IN-540", state="In Review")
-        tracker = FeedbackTracker(
-            [],
-            review_issues=[review_issue],
-            comment_ids={"r-k": ["c-1"]},
-            comments={"r-k": ["Alice: LGTM"]},
-        )
-        # Build an env dict without ANTHROPIC_API_KEY
-        env_no_key = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-        with tempfile.TemporaryDirectory() as tmp:
-            runtime = self._make_runtime(tracker, tmp)
-            with patch.dict("os.environ", env_no_key, clear=True):
-                with patch("symphony.runtime.classify_feedback") as mock_classify:
-                    await runtime.poll_feedback()
-                    await runtime.poll_feedback()  # second call: flag already set, no duplicate warn
-
-        self.assertEqual([], tracker.state_transitions)
-        mock_classify.assert_not_called()
-        self.assertTrue(runtime._warned_no_api_key)
 
     async def test_no_review_issues_does_nothing(self):
         tracker = FeedbackTracker([], review_issues=[])
@@ -651,8 +620,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
                 workspace_manager=FakeWorkspaceManager(Path(tmp) / "workspaces"),
                 runner=FakeSessionRunner(),
             )
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE), \
-                 patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.run_tick()
 
         self.assertEqual([("r-6", "Done")], tracker.state_transitions)

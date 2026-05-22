@@ -1,19 +1,8 @@
 """Human Feedback Gate — comment signal detection for the In Review state."""
 from __future__ import annotations
 
-import json
-import urllib.error
-import urllib.request
+import subprocess
 from enum import Enum
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
-
-_ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
-_ANTHROPIC_VERSION = "2023-06-01"
-_CLASSIFICATION_MODEL = "claude-haiku-4-5-20251001"
-_MAX_TOKENS = 16
 
 _SYSTEM_PROMPT = """\
 You classify human feedback comments left on a code review issue.
@@ -48,39 +37,29 @@ _SIGNAL_MAP = {
 }
 
 
-def classify_feedback(comments: list[str], *, api_key: str, model: str = _CLASSIFICATION_MODEL) -> FeedbackSignal | None:
-    """Use Claude to classify the feedback intent in a list of comments.
+def classify_feedback(comments: list[str]) -> FeedbackSignal | None:
+    """Use Claude CLI to classify the feedback intent in a list of comments.
 
     Comments should be in "Author: body" format as returned by LinearClient.
-    Returns None if no signal is detected or the API call fails.
+    Returns None if no signal is detected or the CLI call fails.
     """
     if not comments:
         return None
 
     body_text = "\n".join(f"- {c}" for c in comments)
     user_content = _USER_TEMPLATE.format(comments=body_text)
+    full_prompt = _SYSTEM_PROMPT.strip() + "\n\n" + user_content
 
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": _MAX_TOKENS,
-        "system": _SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_content}],
-    }).encode()
-
-    req = urllib.request.Request(
-        _ANTHROPIC_ENDPOINT,
-        data=payload,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": _ANTHROPIC_VERSION,
-            "content-type": "application/json",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            response = json.loads(resp.read().decode())
-        label = response["content"][0]["text"].strip().upper()
+        result = subprocess.run(
+            ["claude", "-p", full_prompt],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise ClassifyError(result.stderr.strip() or "claude exited non-zero")
+        label = result.stdout.strip().upper()
         return _SIGNAL_MAP.get(label)
-    except (urllib.error.URLError, KeyError, json.JSONDecodeError, IndexError) as exc:
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         raise ClassifyError(str(exc)) from exc

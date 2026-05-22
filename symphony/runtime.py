@@ -84,7 +84,6 @@ class SymphonyRuntime:
         self._prev_candidate_ids: set[str] = set()
         # Maps issue_id → frozenset of comment IDs already processed for feedback.
         self._feedback_seen: dict[str, frozenset[str]] = {}
-        self._warned_no_api_key: bool = False
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -331,13 +330,6 @@ class SymphonyRuntime:
         if not hasattr(self.tracker, "fetch_issues_by_states"):
             return
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            if not self._warned_no_api_key:
-                LOGGER.warning("ANTHROPIC_API_KEY not set; Human Feedback Gate disabled")
-                self._warned_no_api_key = True
-            return
-
         review_state = self.config.tracker.review_state
         try:
             review_issues = list(await _call_sync(self.tracker.fetch_issues_by_states, [review_state]))
@@ -346,11 +338,11 @@ class SymphonyRuntime:
 
         for issue in review_issues:
             try:
-                await self._handle_feedback_for_issue(issue, api_key=api_key)
+                await self._handle_feedback_for_issue(issue)
             except Exception:  # noqa: BLE001
                 pass
 
-    async def _handle_feedback_for_issue(self, issue: Issue, *, api_key: str) -> None:
+    async def _handle_feedback_for_issue(self, issue: Issue) -> None:
         if not hasattr(self.tracker, "fetch_issue_comments_with_ids"):
             return
 
@@ -368,7 +360,7 @@ class SymphonyRuntime:
         new_comments = new_comments[-_MAX_CLASSIFY_COMMENTS:]
 
         try:
-            signal = await asyncio.to_thread(classify_feedback, new_comments, api_key=api_key)
+            signal = await asyncio.to_thread(classify_feedback, new_comments)
         except ClassifyError as exc:
             LOGGER.warning("Feedback classification failed for %s, will retry: %s", issue.identifier, exc)
             return  # Don't update _feedback_seen; will retry next poll
