@@ -253,7 +253,12 @@ class GitHubConfig:
     ) -> "GitHubConfig":
         github = _mapping(config.get("github"), "github_config_must_be_map")
         raw_token = _string_value(github.get("token"))
-        token = resolve_env_reference(raw_token, environ) if raw_token is not None else None
+        token: str | None = None
+        if raw_token is not None:
+            try:
+                token = resolve_env_reference(raw_token, environ)
+            except ConfigError:
+                pass  # env var not set; runtime resolves token from credentials file
         return cls(
             token=token,
             owner=_string_value(github.get("owner")),
