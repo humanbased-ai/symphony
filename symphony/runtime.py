@@ -35,6 +35,10 @@ LOGGER = logging.getLogger(__name__)
 StateCallback = Callable[[OrchestratorState], Any]
 _MAX_CLASSIFY_COMMENTS = 20
 _PR_DIFF_TRUNCATE = 8_000
+# HTML comment prefix injected into every PR comment Symphony posts.
+# Filtering is done on this marker so that a user whose personal GitHub token
+# is also the Symphony bot token can still have their own comments picked up.
+SYMPHONY_BOT_MARKER = "<!-- symphony -->"
 
 
 def _fmt_duration_ms(ms: int) -> str:
@@ -105,8 +109,6 @@ class SymphonyRuntime:
         self._pr_comment_seen: dict[str, frozenset[int]] = {}
         # Cached PR numbers discovered by find_open_pr_for_branch.
         self._branch_pr_numbers: dict[str, int] = {}
-        # GitHub login of the token owner — used to skip our own bot comments.
-        self._github_bot_login: str | None = None
         # Maps branch → frozenset of check-run IDs already processed for CI failures.
         self._pr_ci_seen: dict[str, frozenset[int]] = {}
 
@@ -389,14 +391,6 @@ class SymphonyRuntime:
         if self.github_client is None or not self._branch_to_issue:
             return
 
-        if self._github_bot_login is None:
-            try:
-                self._github_bot_login = await asyncio.to_thread(
-                    self.github_client.get_authenticated_login
-                ) or ""
-            except Exception:  # noqa: BLE001
-                self._github_bot_login = ""
-
         for branch in list(self._branch_to_issue):
             issue = self._branch_to_issue.get(branch)
             if issue is None:
@@ -442,7 +436,6 @@ class SymphonyRuntime:
             asyncio.to_thread(gh.list_pr_reviews, pr_number),
         )
 
-        bot_login = self._github_bot_login or ""
         seen = self._pr_comment_seen.get(branch, frozenset())
         feedback_parts: list[str] = []
         new_seen_ids: set[int] = set()
@@ -452,10 +445,10 @@ class SymphonyRuntime:
             if not cid or cid in seen:
                 continue
             new_seen_ids.add(cid)
-            author = str((comment.get("user") or {}).get("login") or "unknown")
-            if author == bot_login:
-                continue
             body = str(comment.get("body") or "").strip()
+            if body.startswith(SYMPHONY_BOT_MARKER):
+                continue
+            author = str((comment.get("user") or {}).get("login") or "unknown")
             if body:
                 feedback_parts.append(f"**{author}** left a review comment:\n\n{body}")
 
@@ -464,10 +457,10 @@ class SymphonyRuntime:
             if not cid or cid in seen:
                 continue
             new_seen_ids.add(cid)
-            author = str((comment.get("user") or {}).get("login") or "unknown")
-            if author == bot_login:
-                continue
             body = str(comment.get("body") or "").strip()
+            if body.startswith(SYMPHONY_BOT_MARKER):
+                continue
+            author = str((comment.get("user") or {}).get("login") or "unknown")
             if body:
                 feedback_parts.append(f"**{author}** commented:\n\n{body}")
 
@@ -479,10 +472,10 @@ class SymphonyRuntime:
             state = str(review.get("state") or "").lower()
             if state != "changes_requested":
                 continue
-            reviewer = str((review.get("user") or {}).get("login") or "unknown")
-            if reviewer == bot_login:
-                continue
             body = str(review.get("body") or "").strip()
+            if body.startswith(SYMPHONY_BOT_MARKER):
+                continue
+            reviewer = str((review.get("user") or {}).get("login") or "unknown")
             text = f"**{reviewer}** requested changes"
             if body:
                 text += f":\n\n{body}"
@@ -581,7 +574,7 @@ class SymphonyRuntime:
             if self.github_client is not None:
                 self.github_client.post_pr_comment(
                     pr_number,
-                    f"Maximum feedback iterations ({max_turns}) reached for this PR. "
+                    f"{SYMPHONY_BOT_MARKER}\nMaximum feedback iterations ({max_turns}) reached for this PR. "
                     "Please review and merge or close manually.",
                 )
             return
@@ -627,7 +620,7 @@ class SymphonyRuntime:
                 if self.github_client is not None:
                     self.github_client.post_pr_comment(
                         pr_number,
-                        f"I encountered an error while addressing your feedback: `{result.exit_reason}`",
+                        f"{SYMPHONY_BOT_MARKER}\nI encountered an error while addressing your feedback: `{result.exit_reason}`",
                     )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("PR feedback run raised for %s: %s", issue.identifier, exc)
