@@ -747,6 +747,70 @@ async def run_daemon(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _inject_github_config(workflow_path: Path, owner: str, repo: str) -> None:
+    """Insert a github: block into an existing WORKFLOW.md front matter."""
+    content = workflow_path.read_text(encoding="utf-8")
+    # Front matter is bounded by the first and second '---' lines.
+    # Find the closing delimiter (skip the opening one at index 0).
+    close_idx = content.index("---", 3)
+    github_block = f"github:\n  token: $GITHUB_TOKEN\n  owner: {owner}\n  repo: {repo}\n"
+    workflow_path.write_text(
+        content[:close_idx] + github_block + content[close_idx:],
+        encoding="utf-8",
+    )
+
+
+def _maybe_upgrade_github_config(
+    workflow_path: Path,
+    args: argparse.Namespace,
+    *,
+    detected_github_org: str | None,
+    detected_github_repo: str | None,
+) -> None:
+    """Inject a missing github: block into an existing WORKFLOW.md.
+
+    Prints a confirmation when the block is injected, or a hint when auto-detection
+    fails so the user knows what to do next.
+    """
+    try:
+        ctx = load_startup_context(workflow_path, logs_root="./log", port=DEFAULT_PORT)
+    except StartupError:
+        return  # Let doctor_checks surface the error properly.
+
+    cfg = ctx.config
+    if cfg.agent.runner != "claude_code":
+        return
+    if cfg.github.owner and cfg.github.repo:
+        return  # Already configured.
+
+    automated = True
+    try:
+        automated = _resolve_init_mode(args) == "automated"
+    except OnboardingError:
+        pass
+
+    github_org = (
+        getattr(args, "github_org", None)
+        or detected_github_org
+        or ("" if automated else _prompt("GitHub org/user for PR polling (blank to skip)").strip())
+    )
+    github_repo = (
+        getattr(args, "github_repo", None)
+        or detected_github_repo
+        or ("" if automated else _prompt("Repository name (blank to skip)").strip())
+    )
+
+    if github_org and github_repo:
+        _inject_github_config(workflow_path, github_org, github_repo)
+        print(f"Updated {workflow_path} with GitHub config ({github_org}/{github_repo}).")
+    else:
+        print(
+            "Note: github: block is missing from WORKFLOW.md."
+            " Rerun with --github-org and --github-repo to add it automatically,"
+            " or edit WORKFLOW.md manually."
+        )
+
+
 def _make_webhook_event_handler(
     runtime: SymphonyRuntime,
     *,
@@ -1013,6 +1077,12 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         checks = doctor_checks(workflow_path, logs_root="./log", port=DEFAULT_PORT, skip_port_check=True)
         print_setup_checks("Existing setup", checks)
         if all(ok for ok, _, _ in checks):
+            _maybe_upgrade_github_config(
+                workflow_path,
+                args,
+                detected_github_org=detected_github_org,
+                detected_github_repo=detected_github_repo,
+            )
             print(f"\nOnboarding already complete: {workflow_path}")
             print("Skipped init because WORKFLOW.md and local prerequisites validated.")
             _offer_tutorial(args)
