@@ -5,6 +5,8 @@ release tag is created.
 
 ## Unreleased
 
+- Agent dispatch smoke test (IN-316): verified end-to-end workflow — Linear polling detects issue, agent is dispatched to a workspace branch, and PR is opened and linked back to the issue.
+
 - Per-run workspace isolation (IN-286): workspaces are now materialized at
   `<workspace.root>/<workspace_key>/<run_id>` per dispatch. When
   `workspace.repo_url` is configured, Symphony maintains a bare clone at
