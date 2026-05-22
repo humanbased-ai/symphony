@@ -186,6 +186,88 @@ Body
             self.assertIn("Onboarding already complete", stdout.getvalue())
             self.assertIn("Skipped init", stdout.getvalue())
 
+    def test_onboard_injects_github_config_when_missing(self):
+        """onboard upgrades an existing claude_code WORKFLOW.md that lacks github: block."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: myproject
+workspace:
+  root: workspaces
+agent:
+  runner: claude_code
+  max_turns: 5
+---
+Body
+""",
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid")):
+                    with patch("symphony.cli._check_command", return_value=(True, "found")):
+                        with patch("symphony.cli._check_claude_login", return_value=(True, "ok")):
+                            with patch("symphony.cli._check_github_token_scopes", return_value=(True, "ok")):
+                                result = main([
+                                    "onboard",
+                                    "--mode", "automated",
+                                    "--workflow-path", str(workflow_path),
+                                    "--runner", "claude_code",
+                                    "--github-org", "myorg",
+                                    "--github-repo", "myrepo",
+                                ])
+
+            self.assertEqual(0, result)
+            updated = workflow_path.read_text(encoding="utf-8")
+            self.assertIn("github:", updated)
+            self.assertIn("owner: myorg", updated)
+            self.assertIn("repo: myrepo", updated)
+            self.assertIn("$GITHUB_TOKEN", updated)
+
+    def test_onboard_skips_github_inject_when_already_configured(self):
+        """onboard does not modify WORKFLOW.md when github: is already present."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            original = """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: myproject
+workspace:
+  root: workspaces
+agent:
+  runner: codex
+github:
+  token: literal-ghtoken
+  owner: existingorg
+  repo: existingrepo
+---
+Body
+"""
+            workflow_path.write_text(original, encoding="utf-8")
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid")):
+                    with patch("symphony.cli._check_command", return_value=(True, "found")):
+                        result = main([
+                            "onboard",
+                            "--mode", "automated",
+                            "--workflow-path", str(workflow_path),
+                            "--runner", "codex",
+                            "--github-org", "neworg",
+                            "--github-repo", "newrepo",
+                        ])
+
+            self.assertEqual(0, result)
+            # File should be unchanged — existing config wins
+            self.assertEqual(original, workflow_path.read_text(encoding="utf-8"))
+
     def test_init_subcommand_writes_workflow_and_local_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
