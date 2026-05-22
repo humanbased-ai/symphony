@@ -50,7 +50,7 @@ class CLITests(unittest.TestCase):
                 main(["--version"])
 
         self.assertEqual(0, raised.exception.code)
-        self.assertIn(__version__, stdout.getvalue())
+        self.assertIn(f"Symphony {__version__}", stdout.getvalue())
 
     def test_load_startup_context_validates_workflow_and_resolves_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:

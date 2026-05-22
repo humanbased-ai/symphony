@@ -395,7 +395,7 @@ def _add_version_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"{parser.prog} {__version__}",
+        version=f"Symphony {__version__}",
     )
 
 
