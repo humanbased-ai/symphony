@@ -482,9 +482,12 @@ def create_runtime(context: StartupContext) -> SymphonyRuntime:
 
 def create_github_client(config: WorkflowConfig) -> GitHubClient | None:
     gh = config.github
-    if gh.token and gh.owner and gh.repo:
-        return GitHubClient(token=gh.token, owner=gh.owner, repo=gh.repo)
-    return None
+    if not gh.owner or not gh.repo:
+        return None
+    token = gh.token or _resolve_github_token()
+    if not token:
+        return None
+    return GitHubClient(token=token, owner=gh.owner, repo=gh.repo)
 
 
 def create_status_api(runtime: SymphonyRuntime) -> StatusAPI:
