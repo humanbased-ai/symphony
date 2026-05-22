@@ -135,6 +135,15 @@ class StatusSnapshotTests(unittest.TestCase):
 
 
 class StatusAPIHandlerTests(unittest.TestCase):
+    def test_healthz_returns_hello_world(self):
+        api = StatusAPI(lambda: sample_state())
+
+        response = api.handle_request("GET", "/healthz")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("Hello, World!", response.body)
+        self.assertEqual("text/plain; charset=utf-8", response.headers["content-type"])
+
     def test_health_endpoint_reports_running_count(self):
         api = StatusAPI(lambda: sample_state(), monotonic_started_at=0)
 

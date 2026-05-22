@@ -23,10 +23,12 @@ RefreshCallback = Callable[[], Any]
 @dataclass(frozen=True)
 class HTTPResponse:
     status_code: int
-    body: dict[str, Any]
+    body: Any
     headers: dict[str, str]
 
     def json_bytes(self) -> bytes:
+        if isinstance(self.body, str):
+            return self.body.encode("utf-8")
         return json.dumps(self.body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -47,6 +49,11 @@ class StatusAPI:
         method = method.upper()
         route = _normalized_path(path)
         now = _utc_now()
+
+        if route == "/healthz":
+            if method != "GET":
+                return _error_response(405, "method_not_allowed", "GET is required for this endpoint")
+            return HTTPResponse(status_code=200, body="Hello, World!", headers={"content-type": "text/plain; charset=utf-8"})
 
         if route == f"{API_PREFIX}/health":
             if method != "GET":
@@ -240,11 +247,15 @@ def build_issue_detail(state: Any, issue_identifier: str, *, now: datetime | Non
 def create_fastapi_app(status_api: StatusAPI) -> Any:
     try:
         from fastapi import FastAPI
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import JSONResponse, PlainTextResponse
     except ModuleNotFoundError as exc:
         raise RuntimeError("fastapi_unavailable") from exc
 
     app = FastAPI()
+
+    @app.get("/healthz")
+    def healthz() -> PlainTextResponse:
+        return PlainTextResponse("Hello, World!")
 
     @app.get(f"{API_PREFIX}/health")
     def health() -> JSONResponse:
