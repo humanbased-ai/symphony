@@ -1097,11 +1097,17 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
             _offer_starter_mission(args)
             return 0
 
-        message = (
-            "existing workflow needs attention; run `symphony doctor "
-            f"{workflow_path}` or rerun onboarding with --overwrite"
-        )
-        parser.exit(2, f"symphony onboard: {message}\n")
+        failed = [(name, detail) for ok, name, detail in checks if not ok]
+        print()
+        print(_warn(f"Setup incomplete — {len(failed)} check(s) need attention:"))
+        for name, detail in failed:
+            print(f"  {_fail('✗')} {name}: {detail}")
+        print()
+        print("Fix options:")
+        print(f"  Credentials only : symphony onboard --linear-api-key lin_api_... --github-token ghp_...")
+        print(f"  Regenerate config: symphony onboard --overwrite")
+        print(f"  Full details     : symphony doctor {workflow_path}")
+        parser.exit(2, "")
 
     return _run_init_with_args(
         args,
@@ -1237,6 +1243,11 @@ def _run_init_with_args(
         parser.exit(2, f"symphony {command_name}: {exc}\n")
 
     if linear_token:
+        if not automated:
+            valid_ok, valid_detail = _check_linear_key_valid(linear_token)
+            if not valid_ok:
+                print(f"  Warning: Linear key validation failed — {valid_detail}")
+                print("  Storing anyway — re-run with --linear-api-key to replace.")
         credentials_path = save_local_linear_token(linear_token, path=args.credentials_path)
         print(f"Stored Linear credentials: {credentials_path}")
     elif automated:
@@ -2063,7 +2074,19 @@ def _check_command(command: str) -> tuple[bool, str]:
 
 
 def _check_claude_login() -> tuple[bool, str]:
-    """Heuristic: check if Claude CLI has been configured by looking for its config directory."""
+    """Check if Claude CLI responds and has a config directory indicating prior login."""
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False, "claude --version failed — run: claude login"
+    except Exception as exc:
+        return False, f"claude not callable ({exc}) — run: claude login"
+
     home = Path.home()
     candidates = [home / ".config" / "claude", home / ".claude"]
     for config_dir in candidates:
@@ -2117,14 +2140,22 @@ def _check_github_token_scopes(token: str) -> tuple[bool, str]:
         "https://api.github.com/user",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
     )
+    import json as _json
+
     try:
         with _req.urlopen(request, timeout=10) as resp:
+            data = _json.loads(resp.read())
+            username = data.get("login", "authenticated")
             scopes_raw = resp.headers.get("X-OAuth-Scopes", "")
             scopes = {s.strip() for s in scopes_raw.split(",") if s.strip()}
             if not scopes:
-                return True, "fine-grained PAT — scopes not verifiable via API"
+                return (
+                    True,
+                    f"fine-grained PAT (logged in as {username}; scopes unverifiable — "
+                    "ensure Contents (read/write) + Pull requests (read/write) permissions are granted)",
+                )
             if "repo" in scopes or "public_repo" in scopes:
-                return True, f"write scopes confirmed ({', '.join(sorted(scopes))})"
+                return True, f"write scopes confirmed (logged in as {username}: {', '.join(sorted(scopes))})"
             return (
                 False,
                 f"missing repo write scope — found: {', '.join(sorted(scopes))}; "
