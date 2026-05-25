@@ -53,7 +53,6 @@ class _DoneEntry:
     started_ms: int
     ended_ms: int
     tokens: int
-    branch: str | None = None
 
 
 @dataclass
@@ -63,7 +62,6 @@ class _FailedEntry:
     started_ms: int
     ended_ms: int
     error: str
-    branch: str | None = None
 
 
 class LiveDashboard:
@@ -135,7 +133,6 @@ class LiveDashboard:
                     started_ms=entry.started_at_ms,
                     ended_ms=now,
                     tokens=entry.total_tokens,
-                    branch=entry.issue.branch_name,
                 ))
         for identifier in result.failed:
             if any(f.identifier == identifier for f in self._failed):
@@ -151,7 +148,6 @@ class LiveDashboard:
                     started_ms=entry.started_at_ms,
                     ended_ms=now,
                     error=result.errors.get(identifier, "failed"),
-                    branch=entry.issue.branch_name,
                 ))
         self._refresh()
 
@@ -253,7 +249,7 @@ class LiveDashboard:
                     Text(e.title, style="#6b7280"),
                     Text("✓ done", style="#16a34a"),
                     Text(_fmt_dur(e.ended_ms - e.started_ms), style="#4b5563"),
-                    self._pr_cell(e.branch),
+                    Text(""),
                     Text(f"{e.tokens:,} tok" if e.tokens else "—", style="#374151"),
                 )
 
@@ -266,7 +262,7 @@ class LiveDashboard:
                     Text(e.title, style="bold #f1f5f9"),
                     Text("✗ failed", style="#dc2626"),
                     Text(_fmt_dur(e.ended_ms - e.started_ms), style="#4b5563"),
-                    self._pr_cell(e.branch),
+                    Text(""),
                     Text(e.error, style="#b91c1c"),
                 )
 
