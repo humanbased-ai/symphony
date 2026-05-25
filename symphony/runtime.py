@@ -113,6 +113,8 @@ class SymphonyRuntime:
         self._branch_pr_numbers: dict[str, int] = {}
         # Maps branch → frozenset of check-run IDs already processed for CI failures.
         self._pr_ci_seen: dict[str, frozenset[int]] = {}
+        # All RunningEntry objects ever dispatched, keyed by issue.id.
+        self._dispatched_entries: dict[str, Any] = {}
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -137,6 +139,8 @@ class SymphonyRuntime:
 
         for issue in dispatched_issues:
             LOGGER.info("Dispatching  %s — %s", issue.identifier, issue.title)
+            if issue.id in self.state.running:
+                self._dispatched_entries[issue.id] = self.state.running[issue.id]
 
         completed: list[str] = []
         failed: list[str] = []
@@ -357,12 +361,36 @@ class SymphonyRuntime:
             return issue
 
     def _refresh_running_issue_states(self, candidates: list[Issue]) -> None:
-        """Update issue state on running entries using the freshly-fetched candidate list."""
+        """Update issue state for all dispatched entries every tick.
+
+        Running issues are updated from the already-fetched candidates list at
+        no extra cost. Completed/failed issues that are no longer candidates are
+        batch-fetched separately so their state stays current in the dashboard.
+        """
         by_id = {issue.id: issue for issue in candidates}
+
+        # Update running entries from candidates (free — already fetched).
         for entry in self.state.running.values():
             fresh = by_id.get(entry.issue.id)
             if fresh is not None and fresh.state != entry.issue.state:
                 entry.issue = dataclasses.replace(entry.issue, state=fresh.state)
+
+        # Batch-refresh completed/failed entries that are no longer candidates.
+        stale_ids = [
+            issue_id for issue_id in self._dispatched_entries
+            if issue_id not in by_id and issue_id not in self.state.running
+        ]
+        if not stale_ids or not hasattr(self.tracker, "fetch_issue_states_by_ids"):
+            return
+        try:
+            fresh_issues: list[Issue] = self.tracker.fetch_issue_states_by_ids(stale_ids)
+            fresh_by_id = {i.id: i for i in fresh_issues}
+            for issue_id, entry in self._dispatched_entries.items():
+                fresh = fresh_by_id.get(issue_id)
+                if fresh is not None and fresh.state != entry.issue.state:
+                    entry.issue = dataclasses.replace(entry.issue, state=fresh.state)
+        except Exception:
+            pass
 
     def _detect_pr_from_comments(self, issue: Issue) -> None:
         import re

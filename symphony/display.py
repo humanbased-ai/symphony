@@ -120,6 +120,15 @@ class LiveDashboard:
         self._running = dict(state.running)
         self._retrying = list(state.retry_attempts.values())
         self._poll_interval_s = state.poll_interval_ms // 1000
+        # Propagate freshly-fetched issue states to done/failed entries.
+        for done_entry in self._done:
+            acc = next((e for e in self._all_entries.values() if e.identifier == done_entry.identifier), None)
+            if acc:
+                done_entry.issue_state = acc.issue.state
+        for failed_entry in self._failed:
+            acc = next((e for e in self._all_entries.values() if e.identifier == failed_entry.identifier), None)
+            if acc:
+                failed_entry.issue_state = acc.issue.state
         self._refresh()
 
     async def on_agent_event(self, event: AgentEvent) -> None:
