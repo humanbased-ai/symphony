@@ -24,5 +24,6 @@ class Issue:
     labels: tuple[str, ...] = field(default_factory=tuple)
     blocked_by: tuple[Blocker, ...] = field(default_factory=tuple)
     comments: tuple[str, ...] = field(default_factory=tuple)
+    pr_number: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
