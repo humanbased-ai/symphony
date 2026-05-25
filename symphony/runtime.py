@@ -712,8 +712,15 @@ class SymphonyRuntime:
         self._detect_pr_from_comments(dataclasses.replace(issue, comments=tuple(all_texts)))
 
         current_ids = frozenset(cid for cid, _ in pairs)
-        seen = self._feedback_seen.get(issue.id, frozenset())
 
+        # On first encounter after (re)start, mark all existing comments as seen
+        # without classifying them so pre-existing close/approve signals are not
+        # re-triggered by a restart.
+        if issue.id not in self._feedback_seen:
+            self._feedback_seen[issue.id] = current_ids
+            return
+
+        seen = self._feedback_seen[issue.id]
         new_ids = current_ids - seen
         if not new_ids:
             return
