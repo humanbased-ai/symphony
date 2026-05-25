@@ -124,6 +124,7 @@ Steps:
 3. Push the branch and open a PR
 """
 TickHook = Callable[[], Any]
+AfterTickHook = Callable[["RuntimeTickResult"], None]
 StatusServer = Callable[[StatusAPI, int], Awaitable[None]]
 
 
@@ -555,6 +556,38 @@ async def _startup_workspace_sweep(workspace_manager: WorkspaceManager) -> None:
         LOGGER.info("Startup workspace sweep removed %d stale per-run director%s.", removed, "y" if removed == 1 else "ies")
 
 
+def _maybe_create_dashboard() -> "Any | None":
+    """Return a LiveDashboard when running in a TTY and rich is available."""
+    if os.environ.get("NO_DASHBOARD") or os.environ.get("NO_COLOR"):
+        return None
+    if not sys.stdout.isatty():
+        return None
+    try:
+        from symphony.display import LiveDashboard  # noqa: PLC0415
+        return LiveDashboard()
+    except ImportError:
+        return None
+
+
+def _suppress_stream_handler() -> None:
+    """Remove console stream handlers so the dashboard owns the terminal."""
+    root = logging.getLogger()
+    root.handlers = [
+        h for h in root.handlers
+        if not (
+            isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.handlers.RotatingFileHandler)
+        )
+    ]
+
+
+async def _dashboard_animation_loop(dashboard: "Any") -> None:
+    """Advance the spinner every 200 ms so running issues animate smoothly."""
+    while True:
+        await asyncio.sleep(0.2)
+        dashboard.tick_spinner()
+
+
 def _log_tick(result) -> None:
     parts = [f"fetched={result.fetched}"]
     if getattr(result, "active", 0):
@@ -581,6 +614,7 @@ async def run_poll_loop(
     *,
     before_tick: TickHook | None = None,
     tick_lock: asyncio.Lock | None = None,
+    after_tick: AfterTickHook | None = None,
 ) -> None:
     # Guard the startup snapshot with the shared lock so that a webhook-triggered
     # tick cannot fire while _prev_candidate_ids is still empty and pre-existing
@@ -612,6 +646,8 @@ async def run_poll_loop(
             await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
             continue
         _log_tick(result)
+        if after_tick is not None:
+            after_tick(result)
         await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
 
 
@@ -726,6 +762,14 @@ async def run_daemon(
         except (MissingLinearTokenError, WebhookRegistrarError) as exc:
             LOGGER.warning("Webhook auto-registration failed (falling back to polling): %s", exc)
 
+    dashboard = _maybe_create_dashboard()
+    if dashboard is not None:
+        runtime.on_event = dashboard.on_agent_event
+        runtime.on_state_change = dashboard.on_state_change
+        runtime.on_pr_update = dashboard.update_pr
+        _suppress_stream_handler()
+        dashboard.start()
+
     import functools as _functools  # noqa: PLC0415
     _status_server = _functools.partial(
         status_server,
@@ -737,9 +781,12 @@ async def run_daemon(
             runtime,
             before_tick=workflow_reloader.reload_if_changed if workflow_reloader is not None else None,
             tick_lock=tick_lock,
+            after_tick=dashboard.update_tick if dashboard is not None else None,
         )
     )
-    tasks = {status_task, poll_task}
+    tasks: set[asyncio.Task[Any]] = {status_task, poll_task}
+    if dashboard is not None:
+        tasks.add(asyncio.create_task(_dashboard_animation_loop(dashboard)))
 
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
@@ -752,6 +799,8 @@ async def run_daemon(
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if dashboard is not None:
+            dashboard.stop()
 
 
 def _inject_github_config(workflow_path: Path, owner: str, repo: str) -> None:

@@ -75,6 +75,7 @@ class SymphonyRuntime:
         clock_ms: Callable[[], int] | None = None,
         on_event: AgentEventCallback | None = None,
         on_state_change: StateCallback | None = None,
+        on_pr_update: Callable[[str, int, str], None] | None = None,
         github_client: Any | None = None,
     ) -> None:
         self.config = config
@@ -89,6 +90,7 @@ class SymphonyRuntime:
         self.clock_ms = clock_ms or _monotonic_epoch_ms
         self.on_event = on_event
         self.on_state_change = on_state_change
+        self.on_pr_update = on_pr_update
         self.github_client = github_client
         # Tracks the issue IDs seen in the previous poll tick.  An issue is
         # eligible for dispatch only when it newly appears (present in current
@@ -418,6 +420,8 @@ class SymphonyRuntime:
                     pr_number=cached_pr, pr_head_branch=branch, merged=merged,
                     repo_owner=gh.owner, repo_name=gh.repo,
                 )
+                if self.on_pr_update is not None:
+                    self.on_pr_update(branch, cached_pr, "merged" if merged else "closed")
                 await self._handle_pr_closed(event)
                 self._branch_pr_numbers.pop(branch, None)
                 self._pr_comment_seen.pop(branch, None)
@@ -429,6 +433,8 @@ class SymphonyRuntime:
                 return
             pr_number = pr_number_found
             self._branch_pr_numbers[branch] = pr_number
+            if self.on_pr_update is not None:
+                self.on_pr_update(branch, pr_number, "open")
 
         review_comments, issue_comments, reviews = await asyncio.gather(
             asyncio.to_thread(gh.list_pr_review_comments, pr_number),
@@ -518,6 +524,8 @@ class SymphonyRuntime:
             "CI failure(s) on PR #%d for %s: %s",
             pr_number, issue.identifier, ", ".join(r["name"] for r in new_failures),
         )
+        if self.on_pr_update is not None:
+            self.on_pr_update(branch, pr_number, "ci_fail")
         await self._handle_pr_feedback(branch, pr_number, feedback_text)
 
     async def handle_github_pr_event(self, event: GitHubEvent) -> None:
@@ -537,6 +545,8 @@ class SymphonyRuntime:
             )
         elif isinstance(event, PRReviewEvent) and event.review_state == "approved":
             LOGGER.info("PR #%d approved — waiting for merge to close the issue.", event.pr_number)
+            if self.on_pr_update is not None:
+                self.on_pr_update(event.pr_head_branch, event.pr_number, "approved")
 
     async def _handle_pr_closed(self, event: PRClosedEvent) -> None:
         issue = self._branch_to_issue.get(event.pr_head_branch)
