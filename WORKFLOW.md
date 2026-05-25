@@ -42,21 +42,18 @@ Review feedback — address each point before submitting:
 
 ## Instructions
 
-1. Clone the repository (gh handles authentication — no token in the URL):
-   gh repo clone codatta/symphony .
+The repository is already checked out in your workspace on a dedicated branch
+prepared by Symphony. Do not clone the repository or create a new branch.
 
-2. Create a working branch:
-   git checkout -b fix/{{ issue.identifier | lower }}
+1. Implement the changes. Keep the scope to what the issue describes.
 
-3. Implement the changes. Keep the scope to what the issue describes.
-
-4. Push and open a PR:
+2. Push and open a PR:
    git push -u origin HEAD
    gh pr create --title "{{ issue.title }}" --body "Resolves {{ issue.url }}"
 
-5. Post the PR URL as a comment on the Linear issue using LINEAR_API_KEY.
+3. Post the PR URL as a comment on the Linear issue using LINEAR_API_KEY.
 
-6. Update the Linear issue state to "In Review" (query workflow states first to get the
+4. Update the Linear issue state to "In Review" (query workflow states first to get the
    state ID, then call issueUpdate with the state ID).
 
 Use $GITHUB_TOKEN for git authentication and $LINEAR_API_KEY for all Linear API calls.
