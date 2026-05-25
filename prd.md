@@ -1418,7 +1418,19 @@ Doctor warns if `states.in_progress` is not configured in WORKFLOW.md, since omi
 
 ---
 
-## 9. Open Questions
+## 9. Examples
+
+### Binary Search (`examples/binary_search.py`)
+
+Added as a standalone algorithm reference per IN-343. Provides both iterative (`binary_search`) and recursive (`binary_search_recursive`) implementations operating on sorted sequences.
+
+- **Time complexity:** O(log n) for both variants.
+- **Space complexity:** O(1) iterative; O(log n) recursive (call stack).
+- Returns the index of the target element, or `-1` if not found.
+
+---
+
+## 10. Open Questions
 
 1. **Linear OAuth app registration:** Should Symphony ship with a shared OAuth client_id (users install the Symphony Linear app from Linear's marketplace), or does each team register their own Linear application with their own client_id/secret?
 2. **Hermes deployment:** Is the target Ollama on localhost, a remote vLLM cluster, or a hosted inference endpoint?
