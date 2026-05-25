@@ -109,6 +109,11 @@ class LiveDashboard:
     def on_state_change(self, state: OrchestratorState) -> None:
         for issue_id, entry in state.running.items():
             self._all_entries[issue_id] = entry
+            pr = entry.issue.pr_number
+            branch = entry.issue.branch_name
+            if pr and branch and branch not in self._pr_numbers:
+                self._pr_numbers[branch] = pr
+                self._pr_statuses.setdefault(pr, "open")
         self._running = dict(state.running)
         self._retrying = list(state.retry_attempts.values())
         self._poll_interval_s = state.poll_interval_ms // 1000
