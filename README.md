@@ -39,6 +39,17 @@ supported.
   move state through Symphony-managed auth.
 - **Status API + dashboard** — `/api/v1/state`, `/api/v1/<issue>`,
   `/api/v1/refresh`, `/api/v1/health`.
+- **PR feedback loop** — polls GitHub PR review comments and issue comments each
+  tick; new reviewer feedback automatically dispatches the agent to address it on
+  the existing branch. PR merge or close transitions the Linear issue state.
+- **CI auto-fix** — monitors check-runs on tracked PR branches; when new
+  failures appear and no human comment was posted that tick, the agent is
+  dispatched with the failure details to fix and re-push.
+- **LLM feedback classification** — approve / change-request / close signals in
+  Linear comments are classified by the Claude CLI, not just regex, so natural
+  language feedback is reliably detected.
+- **Colored console logging** — timestamps, log levels, and per-issue activity
+  lines are color-coded in TTY sessions; file handler always writes plain text.
 
 ## Install
 
@@ -124,9 +135,9 @@ Available presets: `codex-safe`, `codex-autonomous`, `review-only`.
 |-------|--------|-----------|
 | **0 — Guardrails** | 🟡 open | AGENTS.md tracking, PR template, LFS docs |
 | **1 — MVP (Linear + Codex)** | 🟢 shipped | Python skeleton, WORKFLOW.md parser, Linear read path, `linear_graphql` tool, orchestration state machine, workspace lifecycle, agent runner ABCs, Codex runner, status API |
-| **1 — SPEC compliance follow-ups** | 🟢 in review | Per-run workspace isolation (IN-286), blocker gate (IN-287), fail-closed approval (IN-288), failure-state transition (IN-289), claim race prevention (IN-290) — PRs #34–#38 |
-| **2A — CLI onboarding & packaging** | 🟢 mostly shipped | `init` / `doctor` / `run` / `onboard`, bilingual tutorial, presets, Homebrew tap. Remaining: env-first onboard redesign (IN-283), repo-shape auto-detect (IN-284), runner picker + cross-vendor review (IN-285) |
-| **2B — Standalone app & Linear productionization** | 🟡 partial | Shipped: Linear OAuth/PKCE, webhooks, credential storage, Homebrew. Remaining: Tauri desktop shell, setup flow, app status view |
+| **1 — SPEC compliance follow-ups** | 🟢 shipped | Per-run workspace isolation (IN-286), blocker gate (IN-287), fail-closed approval (IN-288), failure-state transition (IN-289), claim race prevention (IN-290) — PRs #34–#38 |
+| **2A — CLI onboarding & packaging** | 🟢 mostly shipped | `init` / `doctor` / `run` / `onboard`, bilingual tutorial, presets, Homebrew tap, first-run wizard, colored logging. Remaining: repo-shape auto-detect (IN-284), runner picker + cross-vendor review (IN-285) |
+| **2B — Standalone app & Linear productionization** | 🟡 partial | Shipped: Linear OAuth/PKCE, webhooks, credential storage, Homebrew, PR feedback loop, CI auto-fix, LLM feedback classification. Remaining: Tauri desktop shell, setup flow, app status view |
 | **3 — Operator visibility & approval** | ⚪ planned | SSE event stream, web dashboard/PWA, mobile push, approval gate UI |
 | **4 — Multi-agent runners** | ⚪ planned | Claude Code (shipped as MVP), Gemini API, OpenAI-compatible / Hermes, GPT-Image-1 |
 | **5 — IM integrations & distribution** | ⚪ planned | Telegram bot, Slack bot, marketplace channels |
@@ -187,11 +198,9 @@ Acceptance criteria:
 ```
 
 Move it to `Todo`, run `symphony run WORKFLOW.md --once --log-level INFO`,
-inspect the workspace and PR. For the review loop, post a revision request as a
-Linear comment, move the issue back to an active state, run another tick.
-
-Current limitation: GitHub PR review comments are not auto-read. Copy revision
-instructions to the Linear issue and re-activate manually.
+inspect the workspace and PR. For the review loop, post a revision request as
+a GitHub PR review comment or Linear issue comment — Symphony polls both each
+tick and automatically dispatches the agent to address the feedback.
 
 ## WORKFLOW.md Basics
 
