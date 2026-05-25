@@ -91,7 +91,10 @@ def generate_workflow(config: InitConfig) -> str:
             "terminal_states": list(terminal_states),
         },
         "polling": {"interval_ms": preset.polling_interval_ms},
-        "workspace": {"root": workspace_root},
+        "workspace": {
+            "root": workspace_root,
+            **({"repo_url": f"https://github.com/{config.github_org}/{config.github_repo}"} if config.github_org and config.github_repo else {}),
+        },
         "agent": {
             "runner": runner,
             "max_concurrent_agents": preset.max_concurrent_agents,
