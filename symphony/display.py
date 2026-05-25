@@ -54,6 +54,7 @@ class _DoneEntry:
     ended_ms: int
     tokens: int
     branch: str | None = None
+    issue_state: str | None = None
 
 
 @dataclass
@@ -64,6 +65,7 @@ class _FailedEntry:
     ended_ms: int
     error: str
     branch: str | None = None
+    issue_state: str | None = None
 
 
 class LiveDashboard:
@@ -141,6 +143,7 @@ class LiveDashboard:
                     ended_ms=now,
                     tokens=entry.total_tokens,
                     branch=entry.issue.branch_name,
+                    issue_state=entry.issue.state,
                 ))
         for identifier in result.failed:
             if any(f.identifier == identifier for f in self._failed):
@@ -157,6 +160,7 @@ class LiveDashboard:
                     ended_ms=now,
                     error=result.errors.get(identifier, "failed"),
                     branch=entry.issue.branch_name,
+                    issue_state=entry.issue.state,
                 ))
         self._refresh()
 
@@ -187,10 +191,26 @@ class LiveDashboard:
         label = tmpl.replace("{n}", str(pr_num))
         return Text(label, style=style)
 
+    def _state_cell(self, state: str | None) -> Text:
+        if not state:
+            return Text("—", style="#4b5563")
+        s = state.lower()
+        if "progress" in s or "active" in s:
+            return Text(state, style="#d97706")
+        if "review" in s:
+            return Text(state, style="#60a5fa")
+        if "done" in s or "complet" in s or "merged" in s:
+            return Text(state, style="#16a34a")
+        if "cancel" in s or "closed" in s:
+            return Text(state, style="#6b7280")
+        if "todo" in s or "backlog" in s:
+            return Text(state, style="#9ca3af")
+        return Text(state, style="#6b7280")
+
     def _section_row(self, tbl: Table, label: str) -> None:
         tbl.add_row(
             Text(f"── {label} ", style="#3d3d3d"),
-            Text(""), Text(""), Text(""), Text(""), Text(""),
+            Text(""), Text(""), Text(""), Text(""), Text(""), Text(""),
         )
 
     def _render(self) -> Panel:
@@ -220,6 +240,7 @@ class LiveDashboard:
         )
         tbl.add_column("Issue",      width=8,  no_wrap=True)
         tbl.add_column("Title",      ratio=3,  no_wrap=True)
+        tbl.add_column("State",      width=12, no_wrap=True)
         tbl.add_column("Status",     width=11, no_wrap=True)
         tbl.add_column("Time",       width=7,  no_wrap=True)
         tbl.add_column("PR",         width=14, no_wrap=True)
@@ -236,6 +257,7 @@ class LiveDashboard:
                 tbl.add_row(
                     Text(entry.identifier, style="bold #60a5fa"),
                     Text(entry.issue.title, style="bold #f1f5f9"),
+                    self._state_cell(entry.issue.state),
                     Text("⟳ running", style="#d97706"),
                     Text(_fmt_dur(elapsed), style="#6b7280"),
                     self._pr_cell(entry.issue.branch_name),
@@ -245,7 +267,7 @@ class LiveDashboard:
                 tbl.add_row(
                     Text(""),
                     Text(f"{sp}  {_bar(pct)}  {msg}", style="#4b5563 italic"),
-                    Text(""), Text(""), Text(""), Text(""),
+                    Text(""), Text(""), Text(""), Text(""), Text(""),
                 )
 
         # Completed
@@ -255,6 +277,7 @@ class LiveDashboard:
                 tbl.add_row(
                     Text(e.identifier, style="#2563a8 bold"),
                     Text(e.title, style="#6b7280"),
+                    self._state_cell(e.issue_state),
                     Text("✓ done", style="#16a34a"),
                     Text(_fmt_dur(e.ended_ms - e.started_ms), style="#4b5563"),
                     self._pr_cell(e.branch),
@@ -268,6 +291,7 @@ class LiveDashboard:
                 tbl.add_row(
                     Text(e.identifier, style="bold #60a5fa"),
                     Text(e.title, style="bold #f1f5f9"),
+                    self._state_cell(e.issue_state),
                     Text("✗ failed", style="#dc2626"),
                     Text(_fmt_dur(e.ended_ms - e.started_ms), style="#4b5563"),
                     self._pr_cell(e.branch),
@@ -281,6 +305,7 @@ class LiveDashboard:
                 due_in = max(0, (r.due_at_ms - now) // 1000)
                 tbl.add_row(
                     Text(r.identifier, style="bold #60a5fa"),
+                    Text(""),
                     Text(""),
                     Text("🔁 retry", style="#c2410c"),
                     Text(""),
