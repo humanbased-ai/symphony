@@ -125,6 +125,7 @@ class SymphonyRuntime:
         new_issue_ids = current_ids - self._prev_candidate_ids
         self._prev_candidate_ids = current_ids
 
+        self._refresh_running_issue_states(candidates)
         released = await self._release_due_retries_missing_from_candidates(candidates)
         dispatched_issues = self._dispatch_due_retries(candidates, now_ms=now_ms)
 
@@ -354,6 +355,14 @@ class SymphonyRuntime:
             return enriched
         except Exception:
             return issue
+
+    def _refresh_running_issue_states(self, candidates: list[Issue]) -> None:
+        """Update issue state on running entries using the freshly-fetched candidate list."""
+        by_id = {issue.id: issue for issue in candidates}
+        for entry in self.state.running.values():
+            fresh = by_id.get(entry.issue.id)
+            if fresh is not None and fresh.state != entry.issue.state:
+                entry.issue = dataclasses.replace(entry.issue, state=fresh.state)
 
     def _detect_pr_from_comments(self, issue: Issue) -> None:
         import re
