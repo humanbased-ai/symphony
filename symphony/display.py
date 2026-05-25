@@ -33,7 +33,7 @@ _PR_STYLES: dict[str, tuple[str, str]] = {
 
 
 def _now_ms() -> int:
-    return int(time.monotonic() * 1000)
+    return int(time.time() * 1000)
 
 
 def _fmt_dur(ms: int) -> str:
@@ -178,10 +178,10 @@ class LiveDashboard:
 
     def _pr_cell(self, branch: str | None) -> Text:
         if not branch:
-            return Text("—", style="#2a2a2a")
+            return Text("—", style="#4b5563")
         pr_num = self._pr_numbers.get(branch)
         if pr_num is None:
-            return Text("—", style="#2a2a2a")
+            return Text("—", style="#4b5563")
         status = self._pr_statuses.get(pr_num, "open")
         style, tmpl = _PR_STYLES.get(status, _PR_STYLES["open"])
         label = tmpl.replace("{n}", str(pr_num))
