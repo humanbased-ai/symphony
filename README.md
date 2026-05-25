@@ -50,6 +50,11 @@ supported.
   language feedback is reliably detected.
 - **Colored console logging** — timestamps, log levels, and per-issue activity
   lines are color-coded in TTY sessions; file handler always writes plain text.
+- **Live terminal dashboard** — Rich-powered table that replaces scrolling log
+  output with a structured per-issue view: spinner + progress bar for running
+  issues, muted rows for done/failed/waiting/retry state, and PR status badges
+  (`open`, `draft`, `review`, `approved`, `merged`, `CI ✗`). Auto-enabled when
+  stdout is a TTY; disabled by setting `NO_DASHBOARD=1` or `NO_COLOR`.
 
 ## Install
 
@@ -93,33 +98,45 @@ brew install gh && gh auth login
 Run onboarding from the repository where you want `WORKFLOW.md` to live:
 
 ```bash
-symphony onboard --project-slug your-linear-project-slug
+sy onboard --project-slug your-linear-project-slug
 ```
 
-`symphony onboard` scans the local environment first, reports detected Linear /
+`sy onboard` scans the local environment first, reports detected Linear /
 GitHub auth and runner availability, asks only for the gaps, and writes
 `WORKFLOW.md` + stores credentials under the local Symphony config path.
 
 Validate the setup:
 
 ```bash
-symphony doctor WORKFLOW.md
+sy doctor WORKFLOW.md
 ```
 
-Run one controlled poll tick against a real Linear ticket:
+Smoke-test with a single poll tick before running continuously:
 
 ```bash
-symphony run WORKFLOW.md --once --log-level INFO
+sy run WORKFLOW.md --once --log-level INFO
 ```
 
-A successful run prints `Tick OK: fetched=1 dispatched=1 completed=1 failed=0 …`
-and the agent opens a PR + posts the URL back to Linear. For continuous
-operation, drop `--once` and add `--port 7337 --logs-root ./log`.
+`--once` runs one poll/dispatch tick and exits — useful for verifying that auth,
+workspace, and agent configuration are working before you start the daemon. A
+successful run prints `Tick OK: fetched=1 dispatched=1 completed=1 failed=0 …`
+and the agent opens a PR + posts the URL back to Linear.
+
+Start the daemon for continuous operation:
+
+```bash
+sy run WORKFLOW.md --port 7337 --logs-root ./log
+```
+
+When stdout is a TTY, the live terminal dashboard starts automatically. It shows
+a per-issue table with spinner and progress bar for running issues, muted rows
+for done/failed/waiting/retry state, and PR status badges. Set `NO_DASHBOARD=1`
+to fall back to plain scrolling log output (e.g. in CI or when piping output).
 
 For scripted setup (no prompts):
 
 ```bash
-symphony onboard --mode automated \
+sy onboard --mode automated \
   --project-slug your-linear-project-slug \
   --linear-api-key lin_api_... \
   --github-token ghp_... \
@@ -148,9 +165,31 @@ See [prd.md](prd.md) §7 for the full build queue with ticket links, and
 
 ## Operating Symphony
 
+### Terminal Dashboard
+
+When you run `sy run` in a terminal, Symphony automatically starts a live
+Rich-powered dashboard that replaces scrolling log output:
+
+- **Running issues** — animated spinner, elapsed time, turn progress bar, and
+  current PR status badge (`open`, `draft`, `review`, `approved`, `merged`,
+  `CI ✗`).
+- **Done / failed / waiting issues** — muted rows showing final state and
+  token count or error summary.
+
+The dashboard is active whenever stdout is a TTY. Disable it with environment
+variables:
+
+| Variable | Effect |
+|---|---|
+| `NO_DASHBOARD=1` | Disable the dashboard; fall back to plain log output |
+| `NO_COLOR` | Disable all ANSI color (also disables the dashboard) |
+
+Both variables are respected in CI and pipe contexts automatically — plain log
+output is always the fallback when stdout is not a TTY.
+
 ### Doctor checks
 
-`symphony doctor WORKFLOW.md` validates: workflow parse, Linear auth source,
+`sy doctor WORKFLOW.md` validates: workflow parse, Linear auth source,
 runner command, `gh auth`, GitHub token, workspace root writability, logs root,
 status API port, claim guard (warn), approval gate (hard fail when
 misconfigured), failure state (warn).
@@ -158,10 +197,17 @@ misconfigured), failure state (warn).
 ### Day-to-day
 
 ```bash
-symphony run WORKFLOW.md --port 7337 --logs-root ./log --log-level INFO
+sy run WORKFLOW.md --port 7337 --logs-root ./log --log-level INFO
 ```
 
 Stop with `Ctrl-C`. Status API: `http://127.0.0.1:7337/api/v1/state`.
+
+The live terminal dashboard starts automatically in TTY sessions. To disable it
+(e.g. when logging to a file or running in CI), set `NO_DASHBOARD=1`:
+
+```bash
+NO_DASHBOARD=1 sy run WORKFLOW.md --port 7337 --logs-root ./log
+```
 
 Good fits: scoped implementation tickets, docs/cleanup tasks, review follow-up
 where feedback lands on the Linear issue. Avoid: secret rotation, broad
@@ -173,11 +219,11 @@ Each `WORKFLOW.md` targets one Linear project. Run one process per project on
 different ports:
 
 ```bash
-symphony run project-a/WORKFLOW.md --port 7337 --logs-root ./log/a
-symphony run project-b/WORKFLOW.md --port 7338 --logs-root ./log/b
+sy run project-a/WORKFLOW.md --port 7337 --logs-root ./log/a
+sy run project-b/WORKFLOW.md --port 7338 --logs-root ./log/b
 ```
 
-Stop with `pkill -f "symphony run"` or `kill <PID>`. Update
+Stop with `pkill -f "sy run"` or `kill <PID>`. Update
 `tracker.project_slug` in a watched `WORKFLOW.md` to hot-switch the running
 daemon.
 
@@ -197,7 +243,7 @@ Acceptance criteria:
   - The PR URL is commented on this Linear issue.
 ```
 
-Move it to `Todo`, run `symphony run WORKFLOW.md --once --log-level INFO`,
+Move it to `Todo`, run `sy run WORKFLOW.md --once --log-level INFO`,
 inspect the workspace and PR. For the review loop, post a revision request as
 a GitHub PR review comment or Linear issue comment — Symphony polls both each
 tick and automatically dispatches the agent to address the feedback.
