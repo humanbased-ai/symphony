@@ -90,6 +90,7 @@ class LiveDashboard:
         self._fetched = 0
         self._poll_interval_s = 30
         self._spinner_idx = 0
+        self._dirty = False
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -170,15 +171,16 @@ class LiveDashboard:
         self._refresh()
 
     def tick_spinner(self) -> None:
-        """Advance spinner and refresh display so elapsed times update in real time."""
+        """Advance spinner; sole writer to _live.update to avoid render races."""
         self._spinner_idx = (self._spinner_idx + 1) % len(_SPINNER)
+        self._dirty = False
         self._live.update(self._render())
 
     # ── Rendering ──────────────────────────────────────────────────────────
 
     def _refresh(self) -> None:
-        self._spinner_idx = (self._spinner_idx + 1) % len(_SPINNER)
-        self._live.update(self._render())
+        """Mark display dirty; tick_spinner will flush on the next 200ms tick."""
+        self._dirty = True
 
     def _pr_cell(self, branch: str | None) -> Text:
         if not branch:
