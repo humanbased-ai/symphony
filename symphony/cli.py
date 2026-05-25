@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import logging
 import logging.handlers
 import os
@@ -1097,11 +1096,17 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
             _offer_starter_mission(args)
             return 0
 
-        message = (
-            "existing workflow needs attention; run `symphony doctor "
-            f"{workflow_path}` or rerun onboarding with --overwrite"
-        )
-        parser.exit(2, f"symphony onboard: {message}\n")
+        failed = [(name, detail) for ok, name, detail in checks if not ok]
+        print()
+        print(_warn(f"Setup incomplete — {len(failed)} check(s) need attention:"))
+        for name, detail in failed:
+            print(f"  {_fail('✗')} {name}: {detail}")
+        print()
+        print("Fix options:")
+        print(f"  Credentials only : symphony onboard --linear-api-key lin_api_... --github-token ghp_...")
+        print(f"  Regenerate config: symphony onboard --overwrite")
+        print(f"  Full details     : symphony doctor {workflow_path}")
+        parser.exit(2, "")
 
     return _run_init_with_args(
         args,
@@ -1194,7 +1199,10 @@ def _run_init_with_args(
             print("  Symphony uses this key to poll issues and post progress comments.")
             print("  Create one at: linear.app/settings/api → Personal API keys")
             print("  The key starts with lin_api_...")
-            linear_token = getpass.getpass("Linear API key (blank to skip): ").strip()
+            linear_token = _prompt_token(
+                "Linear API key (blank to skip)",
+                _check_linear_key_valid,
+            )
 
         # --- Step 4: GitHub token (optional, for PR automation) ---
         github_token = args.github_token
@@ -1204,7 +1212,11 @@ def _run_init_with_args(
             print("  Create a fine-grained token at: github.com/settings/tokens")
             print("  Required permissions: Contents (Read/Write), Pull requests (Read/Write)")
             print("  Scope it to the specific repository if possible.")
-            github_token = getpass.getpass("GitHub token (blank to skip): ").strip()
+            github_token = _prompt_token(
+                "GitHub token (blank to skip)",
+                lambda t: (True, f"connected as {_validate_github_token(t)}") if _validate_github_token(t)
+                    else (False, "token validation failed — check permissions"),
+            )
 
         if automated:
             failures = _automated_setup_failures(
@@ -1246,14 +1258,15 @@ def _run_init_with_args(
         print(f"Default credentials path: {default_credentials_path()}")
 
     if github_token:
-        gh_user = "provided" if automated else _validate_github_token(github_token)
-        if gh_user:
+        if automated:
+            gh_user = _validate_github_token(github_token)
+            if not gh_user:
+                print("  GitHub token validation failed — token not stored.")
+                print("  Check permissions or re-run with --github-token.")
+                github_token = None
+        if github_token:
             credentials_path = save_local_github_token(github_token, path=args.credentials_path)
             print(f"Stored GitHub credentials: {credentials_path}")
-            print(f"  Connected as: {gh_user}")
-        else:
-            print("  GitHub token validation failed — token not stored.")
-            print("  Check permissions or re-run with --github-token.")
     elif runner == "claude_code" and automated:
         print("GitHub token not stored. Using gh auth, GITHUB_TOKEN, or local credentials.")
     elif runner == "claude_code":
@@ -2010,6 +2023,33 @@ def _prompt_default(label: str, default: str) -> str:
     return value or default
 
 
+def _prompt_token(
+    label: str,
+    validate: "Callable[[str], tuple[bool, str]]",
+) -> "str | None":
+    """Prompt for a token with immediate validation and re-prompt on failure.
+
+    Returns the token string (valid or user-accepted-invalid), or None if the
+    user left it blank.
+    """
+    while True:
+        token = input(f"{label}: ").strip()
+        if not token:
+            return None
+        ok, detail = validate(token)
+        if ok:
+            print(f"  {_ok(detail)}")
+            return token
+        print(f"  {_fail('✗')} {detail}")
+        try:
+            retry = input("  Enter a different value? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return token
+        if retry not in ("", "y", "yes"):
+            return token
+
+
 def _parse_github_input(value: str) -> tuple[str, str]:
     """Extract (org, repo) from a raw user input string.
 
@@ -2063,7 +2103,19 @@ def _check_command(command: str) -> tuple[bool, str]:
 
 
 def _check_claude_login() -> tuple[bool, str]:
-    """Heuristic: check if Claude CLI has been configured by looking for its config directory."""
+    """Check if Claude CLI responds and has a config directory indicating prior login."""
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False, "claude --version failed — run: claude login"
+    except Exception as exc:
+        return False, f"claude not callable ({exc}) — run: claude login"
+
     home = Path.home()
     candidates = [home / ".config" / "claude", home / ".claude"]
     for config_dir in candidates:
@@ -2117,14 +2169,22 @@ def _check_github_token_scopes(token: str) -> tuple[bool, str]:
         "https://api.github.com/user",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
     )
+    import json as _json
+
     try:
         with _req.urlopen(request, timeout=10) as resp:
+            data = _json.loads(resp.read())
+            username = data.get("login", "authenticated")
             scopes_raw = resp.headers.get("X-OAuth-Scopes", "")
             scopes = {s.strip() for s in scopes_raw.split(",") if s.strip()}
             if not scopes:
-                return True, "fine-grained PAT — scopes not verifiable via API"
+                return (
+                    True,
+                    f"fine-grained PAT (logged in as {username}; scopes unverifiable — "
+                    "ensure Contents (read/write) + Pull requests (read/write) permissions are granted)",
+                )
             if "repo" in scopes or "public_repo" in scopes:
-                return True, f"write scopes confirmed ({', '.join(sorted(scopes))})"
+                return True, f"write scopes confirmed (logged in as {username}: {', '.join(sorted(scopes))})"
             return (
                 False,
                 f"missing repo write scope — found: {', '.join(sorted(scopes))}; "
