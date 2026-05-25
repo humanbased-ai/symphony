@@ -125,6 +125,7 @@ class SymphonyRuntime:
         new_issue_ids = current_ids - self._prev_candidate_ids
         self._prev_candidate_ids = current_ids
 
+        self._refresh_running_issue_states(candidates)
         released = await self._release_due_retries_missing_from_candidates(candidates)
         dispatched_issues = self._dispatch_due_retries(candidates, now_ms=now_ms)
 
@@ -349,9 +350,34 @@ class SymphonyRuntime:
             return issue
         try:
             comments = await _maybe_await(self.tracker.fetch_issue_comments(issue.id))
-            return dataclasses.replace(issue, comments=tuple(comments))
+            enriched = dataclasses.replace(issue, comments=tuple(comments))
+            self._detect_pr_from_comments(enriched)
+            return enriched
         except Exception:
             return issue
+
+    def _refresh_running_issue_states(self, candidates: list[Issue]) -> None:
+        """Update issue state on running entries using the freshly-fetched candidate list."""
+        by_id = {issue.id: issue for issue in candidates}
+        for entry in self.state.running.values():
+            fresh = by_id.get(entry.issue.id)
+            if fresh is not None and fresh.state != entry.issue.state:
+                entry.issue = dataclasses.replace(entry.issue, state=fresh.state)
+
+    def _detect_pr_from_comments(self, issue: Issue) -> None:
+        import re
+        if self.on_pr_update is None or not issue.branch_name:
+            return
+        branch = issue.branch_name
+        if branch in self._branch_pr_numbers:
+            return
+        for text in issue.comments:
+            m = re.search(r"github\.com/[^/]+/[^/]+/pull/(\d+)", text)
+            if m:
+                pr_number = int(m.group(1))
+                self._branch_pr_numbers[branch] = pr_number
+                self.on_pr_update(branch, pr_number, "open")
+                return
 
     async def _agent_event_handler(self, event: AgentEvent) -> None:
         issue_id = event.issue_id
@@ -653,6 +679,10 @@ class SymphonyRuntime:
         pairs: list[tuple[str, str]] = list(
             await _call_sync(self.tracker.fetch_issue_comments_with_ids, issue.id)
         )
+        # Scan all comments for GitHub PR URLs in case _enrich_with_comments missed them.
+        all_texts = [text for _, text in pairs]
+        self._detect_pr_from_comments(dataclasses.replace(issue, comments=tuple(all_texts)))
+
         current_ids = frozenset(cid for cid, _ in pairs)
         seen = self._feedback_seen.get(issue.id, frozenset())
 
