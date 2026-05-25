@@ -161,10 +161,9 @@ class LiveDashboard:
         self._refresh()
 
     def tick_spinner(self) -> None:
-        """Advance spinner one frame; call periodically for animation."""
+        """Advance spinner and refresh display so elapsed times update in real time."""
         self._spinner_idx = (self._spinner_idx + 1) % len(_SPINNER)
-        if self._running or self._retrying:
-            self._live.update(self._render())
+        self._live.update(self._render())
 
     # ── Rendering ──────────────────────────────────────────────────────────
 
