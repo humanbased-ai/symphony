@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import logging
 import logging.handlers
 import os
@@ -1200,7 +1199,10 @@ def _run_init_with_args(
             print("  Symphony uses this key to poll issues and post progress comments.")
             print("  Create one at: linear.app/settings/api → Personal API keys")
             print("  The key starts with lin_api_...")
-            linear_token = getpass.getpass("Linear API key (blank to skip): ").strip()
+            linear_token = _prompt_token(
+                "Linear API key (blank to skip)",
+                _check_linear_key_valid,
+            )
 
         # --- Step 4: GitHub token (optional, for PR automation) ---
         github_token = args.github_token
@@ -1210,7 +1212,11 @@ def _run_init_with_args(
             print("  Create a fine-grained token at: github.com/settings/tokens")
             print("  Required permissions: Contents (Read/Write), Pull requests (Read/Write)")
             print("  Scope it to the specific repository if possible.")
-            github_token = getpass.getpass("GitHub token (blank to skip): ").strip()
+            github_token = _prompt_token(
+                "GitHub token (blank to skip)",
+                lambda t: (True, f"connected as {_validate_github_token(t)}") if _validate_github_token(t)
+                    else (False, "token validation failed — check permissions"),
+            )
 
         if automated:
             failures = _automated_setup_failures(
@@ -1243,11 +1249,6 @@ def _run_init_with_args(
         parser.exit(2, f"symphony {command_name}: {exc}\n")
 
     if linear_token:
-        if not automated:
-            valid_ok, valid_detail = _check_linear_key_valid(linear_token)
-            if not valid_ok:
-                print(f"  Warning: Linear key validation failed — {valid_detail}")
-                print("  Storing anyway — re-run with --linear-api-key to replace.")
         credentials_path = save_local_linear_token(linear_token, path=args.credentials_path)
         print(f"Stored Linear credentials: {credentials_path}")
     elif automated:
@@ -1257,14 +1258,15 @@ def _run_init_with_args(
         print(f"Default credentials path: {default_credentials_path()}")
 
     if github_token:
-        gh_user = "provided" if automated else _validate_github_token(github_token)
-        if gh_user:
+        if automated:
+            gh_user = _validate_github_token(github_token)
+            if not gh_user:
+                print("  GitHub token validation failed — token not stored.")
+                print("  Check permissions or re-run with --github-token.")
+                github_token = None
+        if github_token:
             credentials_path = save_local_github_token(github_token, path=args.credentials_path)
             print(f"Stored GitHub credentials: {credentials_path}")
-            print(f"  Connected as: {gh_user}")
-        else:
-            print("  GitHub token validation failed — token not stored.")
-            print("  Check permissions or re-run with --github-token.")
     elif runner == "claude_code" and automated:
         print("GitHub token not stored. Using gh auth, GITHUB_TOKEN, or local credentials.")
     elif runner == "claude_code":
@@ -2019,6 +2021,33 @@ def _prompt(label: str) -> str:
 def _prompt_default(label: str, default: str) -> str:
     value = input(f"{label} [{default}]: ").strip()
     return value or default
+
+
+def _prompt_token(
+    label: str,
+    validate: "Callable[[str], tuple[bool, str]]",
+) -> "str | None":
+    """Prompt for a token with immediate validation and re-prompt on failure.
+
+    Returns the token string (valid or user-accepted-invalid), or None if the
+    user left it blank.
+    """
+    while True:
+        token = input(f"{label}: ").strip()
+        if not token:
+            return None
+        ok, detail = validate(token)
+        if ok:
+            print(f"  {_ok(detail)}")
+            return token
+        print(f"  {_fail('✗')} {detail}")
+        try:
+            retry = input("  Enter a different value? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return token
+        if retry not in ("", "y", "yes"):
+            return token
 
 
 def _parse_github_input(value: str) -> tuple[str, str]:
