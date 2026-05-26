@@ -72,6 +72,12 @@ class MergeSortTests(unittest.TestCase):
         result = merge_sort([1, 3, 2, 5, 4], key=lambda x: -x)
         self.assertEqual([5, 4, 3, 2, 1], result)
 
+    def test_stable_sort_equal_keys(self):
+        # Items with equal keys must preserve their original relative order.
+        items = [("b", 1), ("a", 1), ("c", 2)]
+        result = merge_sort(items, key=lambda x: x[1])
+        self.assertEqual([("b", 1), ("a", 1), ("c", 2)], result)
+
     def test_input_not_mutated(self):
         original = [3, 1, 2]
         merge_sort(original, key=self._identity)

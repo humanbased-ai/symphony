@@ -1,4 +1,4 @@
-from typing import Callable, List, TypeVar
+from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
 
@@ -19,7 +19,7 @@ def merge_sorted_lists(a: list[T], b: list[T]) -> list[T]:
     return result
 
 
-def merge_sort(items: List[T], key: Callable[[T], any]) -> List[T]:
+def merge_sort(items: list[T], key: Callable[[T], Any]) -> list[T]:
     """Sort items by key using merge sort. Returns a new list; input is not mutated."""
     if len(items) <= 1:
         return list(items)
@@ -31,8 +31,9 @@ def merge_sort(items: List[T], key: Callable[[T], any]) -> List[T]:
     return _merge(left, right, key)
 
 
-def _merge(left: List[T], right: List[T], key: Callable[[T], any]) -> List[T]:
-    result: List[T] = []
+def _merge(left: list[T], right: list[T], key: Callable[[T], Any]) -> list[T]:
+    """Merge two sorted lists using key for comparison. Stable: left-side elements precede right-side on ties."""
+    result: list[T] = []
     i = j = 0
     while i < len(left) and j < len(right):
         if key(left[i]) <= key(right[j]):
