@@ -1,0 +1,50 @@
+name: bump-version
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump patch version
+    runs-on: ubuntu-latest
+    # Skip if this push is itself a version bump to avoid infinite loops
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version in pyproject.toml
+        id: bump
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+
+          text = Path("pyproject.toml").read_text(encoding="utf-8")
+          m = re.search(r'(version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")', text)
+          if not m:
+              raise SystemExit("Could not find version in pyproject.toml")
+          major, minor, patch = m.group(2), m.group(3), int(m.group(4))
+          new_version = f"{major}.{minor}.{patch + 1}"
+          new_text = text[:m.start()] + f'{m.group(1)}{new_version}{m.group(5)}' + text[m.end():]
+          Path("pyproject.toml").write_text(new_text, encoding="utf-8")
+          print(f"Bumped to {new_version}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"version={new_version}\n")
+          PY
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip ci]"
+          git push
