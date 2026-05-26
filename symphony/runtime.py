@@ -780,12 +780,14 @@ class SymphonyRuntime:
         )
 
         if signal == FeedbackSignal.CLOSE and self.github_client is not None:
-            pr_number: int | None = None
-            branches = [b for b, iss in self._branch_to_issue.items() if iss.id == issue.id]
-            for branch in branches:
-                pr_number = self._branch_pr_numbers.get(branch)
-                if pr_number:
-                    break
+            branch = issue.branch_name
+            pr_number: int | None = self._branch_pr_numbers.get(branch) if branch else None
+            if pr_number is None:
+                branches = [b for b, iss in self._branch_to_issue.items() if iss.id == issue.id]
+                for b in branches:
+                    pr_number = self._branch_pr_numbers.get(b)
+                    if pr_number:
+                        break
             if pr_number is None:
                 pr_number = await asyncio.to_thread(
                     self.github_client.find_open_pr_for_issue, issue.identifier
