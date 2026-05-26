@@ -744,6 +744,26 @@ class SymphonyRuntime:
             return
 
         tracker_cfg = self.config.tracker
+
+        # For CHANGE_REQUEST: if the issue already has an open PR, push fixes to
+        # the existing branch rather than re-dispatching and opening a second PR.
+        if signal == FeedbackSignal.CHANGE_REQUEST:
+            branch = issue.branch_name
+            pr_number: int | None = self._branch_pr_numbers.get(branch) if branch else None
+            if pr_number is None and branch and self.github_client is not None:
+                pr_number = await asyncio.to_thread(
+                    self.github_client.find_open_pr_for_issue, issue.identifier
+                )
+            if branch and pr_number:
+                LOGGER.info(
+                    "Feedback signal change_request on %s → pushing fixes to PR #%d on branch %s",
+                    issue.identifier, pr_number, branch,
+                )
+                self._branch_to_issue[branch] = issue
+                self._feedback_seen[issue.id] = current_ids
+                await self._handle_pr_feedback(branch, pr_number, "\n".join(new_comments))
+                return
+
         if signal == FeedbackSignal.APPROVE:
             target_state = tracker_cfg.done_state
         elif signal == FeedbackSignal.CHANGE_REQUEST:
