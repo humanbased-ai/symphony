@@ -538,15 +538,18 @@ class WorkspaceManager:
                 await _run_git(
                     bare.parent, ["clone", "--bare", self.workspace.repo_url, bare.name]
                 )
-            else:
-                try:
-                    await _run_git(bare, ["fetch", "--prune", "origin"])
-                except GitCommandError as exc:
-                    LOGGER.warning("git fetch failed before PR feedback checkout: %s", exc)
+            # Fetch the specific PR branch by name so it exists locally even if a
+            # previous run's cleanup deleted it with `git branch -D`.  A plain
+            # `git fetch origin` on a bare clone without an explicit fetch refspec
+            # does not update refs/heads/*, so the targeted form is required here.
+            try:
+                await _run_git(
+                    bare,
+                    ["fetch", "origin", f"{existing_branch}:{existing_branch}"],
+                )
+            except GitCommandError as exc:
+                LOGGER.warning("git fetch failed before PR feedback checkout: %s", exc)
 
-        # In a bare clone, git fetch stores branches as refs/heads/* (not
-        # refs/remotes/origin/*), so we reference the branch directly without
-        # the "origin/" prefix.
         try:
             await _run_git(
                 bare,
