@@ -399,6 +399,67 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             result3 = await runtime.run_tick()
             self.assertEqual(("IN-301",), result3.dispatched)
 
+    async def test_new_issue_not_dispatched_due_to_full_slots_retried_next_tick(self):
+        """Issues that appear new but cannot be dispatched (slots full) stay eligible."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            issue_a = issue("id-a", "IN-400", state="Todo", priority=1)
+            issue_b = issue("id-b", "IN-401", state="Todo", priority=2)
+            issue_c = issue("id-c", "IN-402", state="Todo", priority=3)
+            clock = ManualClock(1_000)
+            tracker = FakeTracker([issue_a, issue_b, issue_c])
+            # max_concurrent_agents=2, so only 2 of the 3 new issues can be dispatched
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 2, "max_retry_backoff_ms": 300_000},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = SymphonyRuntime(
+                config=config,
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=clock,
+            )
+
+            # Tick 1: all 3 appear as new; only 2 slots available.
+            result1 = await runtime.run_tick()
+            self.assertEqual(2, len(result1.dispatched))
+            self.assertIn("IN-400", result1.dispatched)
+            self.assertIn("IN-401", result1.dispatched)
+
+            # Tick 2: IN-402 was not dispatched last tick — must be eligible now.
+            result2 = await runtime.run_tick()
+            self.assertIn("IN-402", result2.dispatched)
+
+    async def test_new_issue_dispatched_on_same_tick_not_re_dispatched_next_tick(self):
+        """Successfully dispatched new issues are not re-dispatched on the following tick."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            iss = issue("id-x", "IN-403", state="Todo")
+            tracker = FakeTracker([iss])
+            runtime = SymphonyRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(1_000),
+            )
+
+            result1 = await runtime.run_tick()
+            self.assertIn("IN-403", result1.dispatched)
+
+            # Tick 2: same issue still in candidates but already dispatched — must not repeat.
+            result2 = await runtime.run_tick()
+            self.assertNotIn("IN-403", result2.dispatched)
+
 
 class FeedbackTracker(FakeTracker):
     """Extends FakeTracker with comment/state-transition stubs for feedback gate tests."""

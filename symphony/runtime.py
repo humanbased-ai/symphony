@@ -125,7 +125,6 @@ class SymphonyRuntime:
 
         current_ids = {issue.id for issue in candidates}
         new_issue_ids = current_ids - self._prev_candidate_ids
-        self._prev_candidate_ids = current_ids
 
         self._refresh_running_issue_states(candidates)
         released = await self._release_due_retries_missing_from_candidates(candidates)
@@ -136,6 +135,12 @@ class SymphonyRuntime:
         for issue in select_dispatchable(remaining, self.state):
             dispatch_issue(issue, self.state, now_ms=now_ms)
             dispatched_issues.append(issue)
+
+        # Mark new issues as seen only after dispatch so that issues that could
+        # not be dispatched this tick (concurrency limit full) remain eligible
+        # on the next tick rather than being permanently dropped.
+        dispatched_new_ids = {i.id for i in dispatched_issues if i.id in new_issue_ids}
+        self._prev_candidate_ids = current_ids - (new_issue_ids - dispatched_new_ids)
 
         for issue in dispatched_issues:
             LOGGER.info("Dispatching  %s — %s", issue.identifier, issue.title)
