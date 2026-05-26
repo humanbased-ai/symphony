@@ -769,18 +769,34 @@ class SymphonyRuntime:
         if signal == FeedbackSignal.CHANGE_REQUEST:
             branch = issue.branch_name
             pr_number: int | None = self._branch_pr_numbers.get(branch) if branch else None
+            pr_data: dict | None = None
+            if pr_number is not None and self.github_client is not None:
+                pr_data = await asyncio.to_thread(self.github_client.get_pr, pr_number)
+                if not pr_data or pr_data.get("state") != "open":
+                    # Cached PR is closed; clear stale entry and search again
+                    if branch:
+                        self._branch_pr_numbers.pop(branch, None)
+                    pr_number = None
+                    pr_data = None
             if pr_number is None and branch and self.github_client is not None:
                 pr_number = await asyncio.to_thread(
                     self.github_client.find_open_pr_for_issue, issue.identifier
                 )
+                if pr_number is not None:
+                    pr_data = await asyncio.to_thread(self.github_client.get_pr, pr_number)
             if branch and pr_number:
+                # Use the PR's actual head branch so _branch_to_issue maps to a
+                # real GitHub branch; using the Linear branch name would cause
+                # _poll_pr_for_branch to misfire and cancel the issue.
+                actual_branch = (((pr_data or {}).get("head") or {}).get("ref")) or branch
                 LOGGER.info(
                     "Feedback signal change_request on %s → pushing fixes to PR #%d on branch %s",
-                    issue.identifier, pr_number, branch,
+                    issue.identifier, pr_number, actual_branch,
                 )
-                self._branch_to_issue[branch] = issue
+                self._branch_pr_numbers[actual_branch] = pr_number
+                self._branch_to_issue[actual_branch] = issue
                 self._feedback_seen[issue.id] = current_ids
-                await self._handle_pr_feedback(branch, pr_number, "\n".join(new_comments))
+                await self._handle_pr_feedback(actual_branch, pr_number, "\n".join(new_comments))
                 return
 
         if signal == FeedbackSignal.APPROVE:
