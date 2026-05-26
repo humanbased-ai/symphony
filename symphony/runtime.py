@@ -287,6 +287,23 @@ class SymphonyRuntime:
         start_ms = self.clock_ms()
 
         try:
+            if self.github_client is not None:
+                existing_pr = await asyncio.to_thread(
+                    self.github_client.find_open_pr_for_issue, issue.identifier
+                )
+                if existing_pr is not None:
+                    pr_data = await asyncio.to_thread(self.github_client.get_pr, existing_pr)
+                    head_branch = ((pr_data or {}).get("head") or {}).get("ref")
+                    LOGGER.info(
+                        "Issue %s already has open PR #%d on branch %r — skipping new dispatch.",
+                        issue.identifier, existing_pr, head_branch,
+                    )
+                    if head_branch:
+                        self._branch_pr_numbers[head_branch] = existing_pr
+                        self._branch_to_issue[head_branch] = issue
+                    complete_worker_success(issue.id, self.state, now_ms=self.clock_ms())
+                    return _WorkerResult(success=True)
+
             workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
             _attach_runtime_entry_metadata(
                 entry,
