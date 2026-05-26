@@ -76,7 +76,7 @@ class LiveDashboard:
         self._live = Live(
             renderable=Text(""),
             console=self._console,
-            refresh_per_second=4,
+            auto_refresh=False,
             transient=False,
         )
         self._running: dict[str, Any] = {}       # issue_id → RunningEntry
@@ -183,7 +183,7 @@ class LiveDashboard:
         """Advance spinner; sole writer to _live.update to avoid render races."""
         self._spinner_idx = (self._spinner_idx + 1) % len(_SPINNER)
         self._dirty = False
-        self._live.update(self._render())
+        self._live.update(self._render(), refresh=True)
 
     # ── Rendering ──────────────────────────────────────────────────────────
 
