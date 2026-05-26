@@ -564,6 +564,8 @@ class SymphonyRuntime:
             return
         failed = await asyncio.to_thread(gh.get_pr_failed_check_runs, pr_number)
         if not failed:
+            if branch in self._pr_ci_seen and self.on_pr_update is not None:
+                self.on_pr_update(branch, pr_number, "open")
             return
         ci_seen = self._pr_ci_seen.get(branch, frozenset())
         new_failures = [r for r in failed if r["id"] not in ci_seen]
