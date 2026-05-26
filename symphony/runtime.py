@@ -20,6 +20,7 @@ from symphony.orchestrator import (
     complete_worker_success,
     dispatch_issue,
     is_terminal_state,
+    park_issue_for_pr,
     reconcile_refreshed_issues,
     release_issue,
     select_dispatchable,
@@ -301,7 +302,7 @@ class SymphonyRuntime:
                     if head_branch:
                         self._branch_pr_numbers[head_branch] = existing_pr
                         self._branch_to_issue[head_branch] = issue
-                    complete_worker_success(issue.id, self.state, now_ms=self.clock_ms())
+                    park_issue_for_pr(issue.id, self.state)
                     return _WorkerResult(success=True)
 
             workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
@@ -645,6 +646,8 @@ class SymphonyRuntime:
 
         self._branch_to_issue.pop(event.pr_head_branch, None)
         self._pr_turns.pop(event.pr_head_branch, None)
+        if issue is not None:
+            release_issue(issue.id, self.state)
 
     async def _handle_pr_feedback(self, branch: str, pr_number: int, feedback_text: str) -> None:
         issue = self._branch_to_issue.get(branch)

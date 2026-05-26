@@ -242,6 +242,18 @@ def release_issue(issue_id: str, state: OrchestratorState) -> None:
     state.claimed.discard(issue_id)
 
 
+def park_issue_for_pr(issue_id: str, state: OrchestratorState) -> None:
+    """Remove from running/retry but keep claimed so the main dispatch loop skips it.
+
+    Used when dispatch is skipped because an open PR already exists.
+    poll_github_pr_feedback drives the issue; release_issue is called when the
+    PR is closed or merged.
+    """
+    state.running.pop(issue_id, None)
+    state.retry_attempts.pop(issue_id, None)
+    state.claimed.add(issue_id)
+
+
 def stalled_issue_ids(state: OrchestratorState, *, now_ms: int, stall_timeout_ms: int) -> list[str]:
     stalled: list[str] = []
     for issue_id, entry in state.running.items():
