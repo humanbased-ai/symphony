@@ -16,7 +16,9 @@ supported.
 ## Key Features
 
 - **Issue-driven dispatch** — poll Linear, pick eligible tickets, run the agent,
-  open a PR, close the loop with Linear comments and state transitions.
+  open a PR, close the loop with Linear comments and state transitions. Issues
+  that already have an open PR are skipped automatically — no duplicate
+  dispatches.
 - **Per-run workspace isolation** — each dispatch gets its own
   `<root>/<issue>/<run_id>` directory. Optional git mode maintains a bare clone
   with `git worktree` per run and force-cleans the branch on completion.
@@ -37,14 +39,16 @@ supported.
   receiver with HMAC-SHA256 verification, polling fallback.
 - **`linear_graphql` agent tool** — agents can read issues, post comments, and
   move state through Symphony-managed auth.
-- **Status API + dashboard** — `/api/v1/state`, `/api/v1/<issue>`,
-  `/api/v1/refresh`, `/api/v1/health`.
-- **PR feedback loop** — polls GitHub PR review comments and issue comments each
-  tick; new reviewer feedback automatically dispatches the agent to address it on
-  the existing branch. PR merge or close transitions the Linear issue state.
+- **Terminal dashboard** — alt-screen UI showing live issue state, current PR
+  URL, and CI check status per issue. REST API at `/api/v1/state`,
+  `/api/v1/<issue>`, `/api/v1/refresh`, `/api/v1/health`.
+- **PR feedback loop** — polls GitHub PR review comments and Linear issue
+  comments each tick. Change-request feedback is routed to the existing PR
+  branch; approve or close signals trigger the matching state transition.
 - **CI auto-fix** — monitors check-runs on tracked PR branches; when new
   failures appear and no human comment was posted that tick, the agent is
-  dispatched with the failure details to fix and re-push.
+  dispatched with the failure details to fix and re-push. CI status resets to
+  open automatically when checks recover.
 - **LLM feedback classification** — approve / change-request / close signals in
   Linear comments are classified by the Claude CLI, not just regex, so natural
   language feedback is reliably detected.
@@ -67,6 +71,8 @@ brew install codatta/symphony/symphony
 pipx install symphony
 # or: uv tool install symphony
 ```
+
+Both channels register two entry points: `symphony` and the shorthand `sy`.
 
 **From source:**
 
@@ -94,6 +100,8 @@ Run onboarding from the repository where you want `WORKFLOW.md` to live:
 
 ```bash
 symphony onboard --project-slug your-linear-project-slug
+# sy is a short alias for symphony
+sy onboard --project-slug your-linear-project-slug
 ```
 
 `symphony onboard` scans the local environment first, reports detected Linear /
@@ -137,7 +145,7 @@ Available presets: `codex-safe`, `codex-autonomous`, `review-only`.
 | **1 — MVP (Linear + Codex)** | 🟢 shipped | Python skeleton, WORKFLOW.md parser, Linear read path, `linear_graphql` tool, orchestration state machine, workspace lifecycle, agent runner ABCs, Codex runner, status API |
 | **1 — SPEC compliance follow-ups** | 🟢 shipped | Per-run workspace isolation (IN-286), blocker gate (IN-287), fail-closed approval (IN-288), failure-state transition (IN-289), claim race prevention (IN-290) — PRs #34–#38 |
 | **2A — CLI onboarding & packaging** | 🟢 mostly shipped | `init` / `doctor` / `run` / `onboard`, bilingual tutorial, presets, Homebrew tap, first-run wizard, colored logging. Remaining: repo-shape auto-detect (IN-284), runner picker + cross-vendor review (IN-285) |
-| **2B — Standalone app & Linear productionization** | 🟡 partial | Shipped: Linear OAuth/PKCE, webhooks, credential storage, Homebrew, PR feedback loop, CI auto-fix, LLM feedback classification. Remaining: Tauri desktop shell, setup flow, app status view |
+| **2B — Standalone app & Linear productionization** | 🟡 partial | Shipped: Linear OAuth/PKCE, webhooks, credential storage, Homebrew, PR feedback loop (with CHANGE_REQUEST branch routing), CI auto-fix + recovery, LLM feedback classification, terminal dashboard, skip-dispatch on open PR. Remaining: Tauri desktop shell, setup flow |
 | **3 — Operator visibility & approval** | ⚪ planned | SSE event stream, web dashboard/PWA, mobile push, approval gate UI |
 | **4 — Multi-agent runners** | ⚪ planned | Claude Code (shipped as MVP), Gemini API, OpenAI-compatible / Hermes, GPT-Image-1 |
 | **5 — IM integrations & distribution** | ⚪ planned | Telegram bot, Slack bot, marketplace channels |
