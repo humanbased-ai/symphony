@@ -11,11 +11,6 @@ Time complexity:  O(n log n) average, O(n²) worst case (already-sorted input
 Space complexity: O(n) auxiliary (new lists at each level of recursion).
 """
 
-from typing import TypeVar, Sequence
-
-T = TypeVar("T")
-
-
 def quicksort(items: list) -> list:
     """Return a new sorted list using quicksort.
 
