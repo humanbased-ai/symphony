@@ -29,12 +29,12 @@ jobs:
           from pathlib import Path
 
           text = Path("pyproject.toml").read_text(encoding="utf-8")
-          m = re.search(r'(version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")', text)
+          m = re.search(r'(version\s*=\s*")(\d+)\.(\d+)\.(\d+)\.(\d+)(")', text)
           if not m:
               raise SystemExit("Could not find version in pyproject.toml")
-          major, minor, patch = m.group(2), m.group(3), int(m.group(4))
-          new_version = f"{major}.{minor}.{patch + 1}"
-          new_text = text[:m.start()] + f'{m.group(1)}{new_version}{m.group(5)}' + text[m.end():]
+          major, minor, patch, build = m.group(2), m.group(3), m.group(4), int(m.group(5))
+          new_version = f"{major}.{minor}.{patch}.{build + 1}"
+          new_text = text[:m.start()] + f'{m.group(1)}{new_version}{m.group(6)}' + text[m.end():]
           Path("pyproject.toml").write_text(new_text, encoding="utf-8")
           print(f"Bumped to {new_version}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
