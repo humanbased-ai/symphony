@@ -5,10 +5,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from rich.console import Console, Group
+from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.live import Live
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.segment import Segment
 from rich.table import Table
 from rich.text import Text
 
@@ -46,6 +47,17 @@ def _bar(pct: float) -> str:
     return "█" * n + "░" * (_BAR_WIDTH - n)
 
 
+class _EraseToEnd:
+    """Control renderable that erases from cursor position to end of screen.
+
+    Appended after the panel so that stale lines below a shrinking panel are
+    cleared on every frame when running in alt-screen (screen=True) mode.
+    """
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        # ESC[J = erase from cursor to end of display (ED mode 0)
+        yield Segment("\x1b[J", None, [])
+
+
 @dataclass
 class _DoneEntry:
     identifier: str
@@ -77,7 +89,7 @@ class LiveDashboard:
             renderable=Text(""),
             console=self._console,
             auto_refresh=False,
-            transient=False,
+            screen=True,
         )
         self._running: dict[str, Any] = {}       # issue_id → RunningEntry
         self._all_entries: dict[str, Any] = {}   # accumulates all seen RunningEntries
@@ -224,7 +236,7 @@ class LiveDashboard:
             Text(""), Text(""), Text(""), Text(""), Text(""), Text(""),
         )
 
-    def _render(self) -> Panel:
+    def _render(self) -> Group:
         now = _now_ms()
         n_run  = len(self._running)
         n_done = len(self._done)
@@ -331,9 +343,11 @@ class LiveDashboard:
         footer.append(f"  ·  poll {self._poll_interval_s}s", style="#374151")
 
         from symphony import __version__  # noqa: PLC0415
-        return Panel(
+        panel = Panel(
             Group(stats, Text(""), tbl, Rule(style="dim #1a1a1a"), footer),
             title=f"[bold white]Symphony[/bold white] [dim]{__version__}[/dim]",
             title_align="left",
             border_style="#2a2a2a",
         )
+        # _EraseToEnd clears stale lines below the panel when it shrinks.
+        return Group(panel, _EraseToEnd())
