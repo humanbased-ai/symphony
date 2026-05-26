@@ -29,6 +29,9 @@ build-backend = "setuptools.build_meta"
 include = ["symphony*"]
 exclude = ["elixir*"]
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [tool.unittest]
 start-dir = "tests"
 pattern = "test_*.py"
