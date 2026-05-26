@@ -686,6 +686,61 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([("r-6", "Done")], tracker.state_transitions)
 
+    async def test_change_request_with_existing_pr_routes_to_pr_feedback_agent(self):
+        """CHANGE_REQUEST on an issue that already has a PR must push to that PR, not open a new one."""
+        review_issue = Issue(
+            id="r-cr1", identifier="IN-510", title="IN-510 title",
+            description="test", priority=1, state="In Review",
+            branch_name="haol/in-510-branch",
+            url="https://linear.app/example/issue/IN-510",
+        )
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-cr1": ["c-1"]},
+            comments={"r-cr1": ["Please add more tests"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeSessionRunner()
+            runtime = SymphonyRuntime(
+                config=make_config(Path(tmp) / "workspaces"),
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(tmp) / "workspaces"),
+                runner=runner,
+            )
+            runtime._branch_pr_numbers["haol/in-510-branch"] = 42
+            runtime._feedback_seen["r-cr1"] = frozenset()  # pre-seed: issue known, no prior comments
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
+                await runtime.poll_feedback()
+
+        # Issue state must NOT change — it stays "In Review" on the existing PR
+        self.assertEqual([], tracker.state_transitions)
+        # PR feedback agent must have been invoked
+        self.assertTrue(len(runner.prompts) > 0)
+
+    async def test_change_request_without_branch_falls_back_to_state_transition(self):
+        """CHANGE_REQUEST on an issue with no branch yet must fall back to transitioning to Todo."""
+        review_issue = Issue(
+            id="r-cr2", identifier="IN-511", title="IN-511 title",
+            description="test", priority=1, state="In Review",
+            branch_name=None,
+            url="https://linear.app/example/issue/IN-511",
+        )
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-cr2": ["c-1"]},
+            comments={"r-cr2": ["Please add more tests"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            runtime._feedback_seen["r-cr2"] = frozenset()  # pre-seed: issue known, no prior comments
+            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
+                await runtime.poll_feedback()
+
+        self.assertEqual([("r-cr2", "Todo")], tracker.state_transitions)
+
 
 if __name__ == "__main__":
     unittest.main()
