@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import logging
 import logging.handlers
 import os
@@ -125,6 +124,7 @@ Steps:
 3. Push the branch and open a PR
 """
 TickHook = Callable[[], Any]
+AfterTickHook = Callable[["RuntimeTickResult"], None]
 StatusServer = Callable[[StatusAPI, int], Awaitable[None]]
 
 
@@ -227,7 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the Symphony CLI MVP orchestrator for a repository WORKFLOW.md.",
         epilog=(
             f"Common commands: {cli} onboard, {cli} init, "
-            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md"
+            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md, {cli} changelog, {cli} report"
         ),
     )
     _add_version_argument(parser)
@@ -263,6 +263,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
         help="Console log level. Defaults to INFO.",
+    )
+    parser.add_argument(
+        "--new-run",
+        action="store_true",
+        help="Start a fresh manifest run instead of continuing the current one.",
     )
     return parser
 
@@ -465,26 +470,37 @@ def configure_logging(level: str, logs_root: Path | None = None) -> None:
         root.addHandler(file_handler)
 
 
-def create_runtime(context: StartupContext) -> SymphonyRuntime:
+def create_runtime(context: StartupContext, *, new_run: bool = False) -> SymphonyRuntime:
+    from symphony.manifest import ManifestWriter, get_or_create_run_id  # noqa: PLC0415
     linear_client = create_tracker(context.config)
     workspace_manager = create_workspace_manager(context.config, logs_root=context.logs_root)
     runner = create_runner(context.config, linear_client)
     github_client = create_github_client(context.config)
-    return SymphonyRuntime(
+    project_slug = (context.config.tracker.project_slug or "default").replace("/", "-")
+    run_id = get_or_create_run_id(project_slug, new=new_run)
+    manifest_writer = ManifestWriter(project_slug, run_id)
+    LOGGER.info("Run manifest → %s", manifest_writer.path)
+    runtime = SymphonyRuntime(
         config=context.config,
         workflow=context.workflow,
         tracker=linear_client,
         workspace_manager=workspace_manager,
         runner=runner,
         github_client=github_client,
+        manifest_writer=manifest_writer,
     )
+    runtime._current_run_id = run_id
+    return runtime
 
 
 def create_github_client(config: WorkflowConfig) -> GitHubClient | None:
     gh = config.github
-    if gh.token and gh.owner and gh.repo:
-        return GitHubClient(token=gh.token, owner=gh.owner, repo=gh.repo)
-    return None
+    if not gh.owner or not gh.repo:
+        return None
+    token = gh.token or _resolve_github_token()
+    if not token:
+        return None
+    return GitHubClient(token=token, owner=gh.owner, repo=gh.repo)
 
 
 def create_status_api(runtime: SymphonyRuntime) -> StatusAPI:
@@ -553,6 +569,38 @@ async def _startup_workspace_sweep(workspace_manager: WorkspaceManager) -> None:
         LOGGER.info("Startup workspace sweep removed %d stale per-run director%s.", removed, "y" if removed == 1 else "ies")
 
 
+def _maybe_create_dashboard() -> "Any | None":
+    """Return a LiveDashboard when running in a TTY and rich is available."""
+    if os.environ.get("NO_DASHBOARD") or os.environ.get("NO_COLOR"):
+        return None
+    if not sys.stdout.isatty():
+        return None
+    try:
+        from symphony.display import LiveDashboard  # noqa: PLC0415
+        return LiveDashboard()
+    except ImportError:
+        return None
+
+
+def _suppress_stream_handler() -> None:
+    """Remove console stream handlers so the dashboard owns the terminal."""
+    root = logging.getLogger()
+    root.handlers = [
+        h for h in root.handlers
+        if not (
+            isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.handlers.RotatingFileHandler)
+        )
+    ]
+
+
+async def _dashboard_animation_loop(dashboard: "Any") -> None:
+    """Advance the spinner every 200 ms so running issues animate smoothly."""
+    while True:
+        await asyncio.sleep(0.2)
+        dashboard.tick_spinner()
+
+
 def _log_tick(result) -> None:
     parts = [f"fetched={result.fetched}"]
     if getattr(result, "active", 0):
@@ -579,6 +627,7 @@ async def run_poll_loop(
     *,
     before_tick: TickHook | None = None,
     tick_lock: asyncio.Lock | None = None,
+    after_tick: AfterTickHook | None = None,
 ) -> None:
     # Guard the startup snapshot with the shared lock so that a webhook-triggered
     # tick cannot fire while _prev_candidate_ids is still empty and pre-existing
@@ -610,6 +659,8 @@ async def run_poll_loop(
             await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
             continue
         _log_tick(result)
+        if after_tick is not None:
+            after_tick(result)
         await asyncio.sleep(runtime.state.poll_interval_ms / 1000)
 
 
@@ -724,6 +775,14 @@ async def run_daemon(
         except (MissingLinearTokenError, WebhookRegistrarError) as exc:
             LOGGER.warning("Webhook auto-registration failed (falling back to polling): %s", exc)
 
+    dashboard = _maybe_create_dashboard()
+    if dashboard is not None:
+        runtime.on_event = dashboard.on_agent_event
+        runtime.on_state_change = dashboard.on_state_change
+        runtime.on_pr_update = dashboard.update_pr
+        _suppress_stream_handler()
+        dashboard.start()
+
     import functools as _functools  # noqa: PLC0415
     _status_server = _functools.partial(
         status_server,
@@ -735,9 +794,12 @@ async def run_daemon(
             runtime,
             before_tick=workflow_reloader.reload_if_changed if workflow_reloader is not None else None,
             tick_lock=tick_lock,
+            after_tick=dashboard.update_tick if dashboard is not None else None,
         )
     )
-    tasks = {status_task, poll_task}
+    tasks: set[asyncio.Task[Any]] = {status_task, poll_task}
+    if dashboard is not None:
+        tasks.add(asyncio.create_task(_dashboard_animation_loop(dashboard)))
 
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
@@ -750,6 +812,9 @@ async def run_daemon(
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if dashboard is not None:
+            dashboard.stop()
+        _prompt_generate_report(runtime)
 
 
 def _inject_github_config(workflow_path: Path, owner: str, repo: str) -> None:
@@ -930,6 +995,152 @@ def apply_runtime_workflow(runtime: SymphonyRuntime, effective: EffectiveWorkflo
     runtime._notify_state_change()
 
 
+def _prompt_generate_report(runtime: Any) -> None:
+    writer = getattr(runtime, "manifest_writer", None)
+    if writer is None or not writer.path.exists():
+        return
+    run_id = getattr(runtime, "_current_run_id", "unknown")
+    _do_generate_report(writer.path, run_id)
+
+
+def _do_generate_report(manifest_path: Any, run_id: str) -> None:
+    from symphony.report import generate_report  # noqa: PLC0415
+    try:
+        generate_report(manifest_path, run_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[symphony] Report generation failed: {exc}", file=sys.stderr)
+
+
+def report_main(argv: Sequence[str] | None = None) -> int:
+    from symphony.manifest import list_runs, SYMPHONY_HOME  # noqa: PLC0415
+    from symphony.report import generate_report  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(prog="symphony report", description="Generate a run analysis report")
+    parser.add_argument("--project-slug", default=None, help="Project slug (default: all projects)")
+    parser.add_argument("--run-id", default=None, help="Specific run ID (default: most recent)")
+    parser.add_argument("--out", default=None, help="Output path (default: run dir/report.md)")
+    parser.add_argument("--print", action="store_true", help="Print report to stdout")
+    args = parser.parse_args(argv)
+
+    runs_root = SYMPHONY_HOME / "runs"
+    if not runs_root.exists():
+        print("symphony: no runs found — start a daemon first", file=sys.stderr)
+        return 1
+
+    if args.project_slug:
+        slugs = [args.project_slug]
+    else:
+        slugs = [p.name for p in sorted(runs_root.iterdir()) if p.is_dir()]
+
+    if not slugs:
+        print("symphony: no runs found", file=sys.stderr)
+        return 1
+
+    all_runs: list[tuple[str, str, Any]] = []
+    for slug in slugs:
+        for run_dir in list_runs(slug):
+            all_runs.append((slug, run_dir.name, run_dir / "manifest.jsonl"))
+
+    if not all_runs:
+        print("symphony: no manifest files found", file=sys.stderr)
+        return 1
+
+    if args.run_id:
+        match = [(s, r, p) for s, r, p in all_runs if r == args.run_id]
+        if not match:
+            print(f"symphony: run {args.run_id!r} not found", file=sys.stderr)
+            return 1
+        slug, run_id, manifest_path = match[0]
+    else:
+        slug, run_id, manifest_path = all_runs[0]
+
+    out_path = Path(args.out) if args.out else None
+    try:
+        report = generate_report(manifest_path, run_id, out_path=out_path)
+        if args.print:
+            print(report)
+    except Exception as exc:  # noqa: BLE001
+        print(f"symphony: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def cache_main(argv: Sequence[str] | None = None) -> int:
+    from symphony.cache.store import CacheStateStore  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(prog="symphony cache", description="Prompt cache management")
+    subparsers = parser.add_subparsers(dest="cache_command")
+    subparsers.add_parser("status", help="Show current cache session table")
+    args = parser.parse_args(argv)
+
+    if args.cache_command == "status":
+        store = CacheStateStore()
+        state = store.load()
+        if not state:
+            print("No cache state found. Run Symphony first to populate.")
+            return 0
+        sessions = state.get("sessions", [])
+        if not sessions:
+            print("No active cache sessions.")
+            return 0
+        header = f"{'SESSION':<20}  {'AGENT':<12}  {'PREFIX':<14}  {'AGE(s)':>7}  {'TTL LEFT(s)':>11}  {'TOKENS':>8}"
+        print(header)
+        print("-" * len(header))
+        for s in sessions:
+            print(
+                f"{s.get('session_id','?')[:20]:<20}  "
+                f"{s.get('agent','?')[:12]:<12}  "
+                f"{s.get('prefix_hash','?')[:12]:<14}  "
+                f"{s.get('age_s', '?'):>7}  "
+                f"{s.get('ttl_remaining_s', '?'):>11}  "
+                f"{s.get('tokens', '?'):>8}"
+            )
+        return 0
+
+    parser.print_help()
+    return 0
+
+
+def changelog_main(argv: Sequence[str] | None = None) -> int:
+    import importlib.resources as pkg_resources
+
+    parser = argparse.ArgumentParser(prog="symphony changelog", description="Show version history")
+    parser.add_argument("-n", metavar="N", type=int, default=None, help="show only the last N versions")
+    args = parser.parse_args(argv)
+
+    try:
+        ref = pkg_resources.files("symphony").joinpath("CHANGELOG.md")
+        content = ref.read_text(encoding="utf-8")
+    except Exception:
+        p = Path(__file__).parent.parent / "CHANGELOG.md"
+        if not p.exists():
+            print("symphony: changelog not found", file=sys.stderr)
+            return 1
+        content = p.read_text(encoding="utf-8")
+
+    if args.n is not None:
+        lines = content.splitlines(keepends=True)
+        preamble: list[str] = []
+        sections: list[list[str]] = []
+        current: list[str] | None = None
+        for line in lines:
+            if line.startswith("## "):
+                if current is not None:
+                    sections.append(current)
+                current = [line]
+            elif current is None:
+                preamble.append(line)
+            else:
+                current.append(line)
+        if current is not None:
+            sections.append(current)
+        content = "".join(preamble) + "".join("".join(s) for s in sections[:args.n])
+
+    print(content, end="")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(argv) if argv is not None else sys.argv[1:]
     if raw_args:
@@ -946,6 +1157,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return webhooks_main(raw_args[1:])
         if command == "project":
             return project_main(raw_args[1:])
+        if command == "changelog":
+            return changelog_main(raw_args[1:])
+        if command == "report":
+            return report_main(raw_args[1:])
+        if command == "cache":
+            return cache_main(raw_args[1:])
 
     parser = build_parser()
     args = parser.parse_args(raw_args)
@@ -991,7 +1208,7 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         print(f"Status API port: {context.port}")
         return 0
 
-    runtime = create_runtime(context)
+    runtime = create_runtime(context, new_run=getattr(args, "new_run", False))
     if args.once:
         result = asyncio.run(run_once(runtime))
         print(
@@ -1094,11 +1311,17 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
             _offer_starter_mission(args)
             return 0
 
-        message = (
-            "existing workflow needs attention; run `symphony doctor "
-            f"{workflow_path}` or rerun onboarding with --overwrite"
-        )
-        parser.exit(2, f"symphony onboard: {message}\n")
+        failed = [(name, detail) for ok, name, detail in checks if not ok]
+        print()
+        print(_warn(f"Setup incomplete — {len(failed)} check(s) need attention:"))
+        for name, detail in failed:
+            print(f"  {_fail('✗')} {name}: {detail}")
+        print()
+        print("Fix options:")
+        print(f"  Credentials only : symphony onboard --linear-api-key lin_api_... --github-token ghp_...")
+        print(f"  Regenerate config: symphony onboard --overwrite")
+        print(f"  Full details     : symphony doctor {workflow_path}")
+        parser.exit(2, "")
 
     return _run_init_with_args(
         args,
@@ -1191,7 +1414,10 @@ def _run_init_with_args(
             print("  Symphony uses this key to poll issues and post progress comments.")
             print("  Create one at: linear.app/settings/api → Personal API keys")
             print("  The key starts with lin_api_...")
-            linear_token = getpass.getpass("Linear API key (blank to skip): ").strip()
+            linear_token = _prompt_token(
+                "Linear API key (blank to skip)",
+                _check_linear_key_valid,
+            )
 
         # --- Step 4: GitHub token (optional, for PR automation) ---
         github_token = args.github_token
@@ -1201,7 +1427,11 @@ def _run_init_with_args(
             print("  Create a fine-grained token at: github.com/settings/tokens")
             print("  Required permissions: Contents (Read/Write), Pull requests (Read/Write)")
             print("  Scope it to the specific repository if possible.")
-            github_token = getpass.getpass("GitHub token (blank to skip): ").strip()
+            github_token = _prompt_token(
+                "GitHub token (blank to skip)",
+                lambda t: (True, f"connected as {_validate_github_token(t)}") if _validate_github_token(t)
+                    else (False, "token validation failed — check permissions"),
+            )
 
         if automated:
             failures = _automated_setup_failures(
@@ -1243,14 +1473,15 @@ def _run_init_with_args(
         print(f"Default credentials path: {default_credentials_path()}")
 
     if github_token:
-        gh_user = "provided" if automated else _validate_github_token(github_token)
-        if gh_user:
+        if automated:
+            gh_user = _validate_github_token(github_token)
+            if not gh_user:
+                print("  GitHub token validation failed — token not stored.")
+                print("  Check permissions or re-run with --github-token.")
+                github_token = None
+        if github_token:
             credentials_path = save_local_github_token(github_token, path=args.credentials_path)
             print(f"Stored GitHub credentials: {credentials_path}")
-            print(f"  Connected as: {gh_user}")
-        else:
-            print("  GitHub token validation failed — token not stored.")
-            print("  Check permissions or re-run with --github-token.")
     elif runner == "claude_code" and automated:
         print("GitHub token not stored. Using gh auth, GITHUB_TOKEN, or local credentials.")
     elif runner == "claude_code":
@@ -2007,6 +2238,33 @@ def _prompt_default(label: str, default: str) -> str:
     return value or default
 
 
+def _prompt_token(
+    label: str,
+    validate: "Callable[[str], tuple[bool, str]]",
+) -> "str | None":
+    """Prompt for a token with immediate validation and re-prompt on failure.
+
+    Returns the token string (valid or user-accepted-invalid), or None if the
+    user left it blank.
+    """
+    while True:
+        token = input(f"{label}: ").strip()
+        if not token:
+            return None
+        ok, detail = validate(token)
+        if ok:
+            print(f"  {_ok(detail)}")
+            return token
+        print(f"  {_fail('✗')} {detail}")
+        try:
+            retry = input("  Enter a different value? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return token
+        if retry not in ("", "y", "yes"):
+            return token
+
+
 def _parse_github_input(value: str) -> tuple[str, str]:
     """Extract (org, repo) from a raw user input string.
 
@@ -2060,7 +2318,19 @@ def _check_command(command: str) -> tuple[bool, str]:
 
 
 def _check_claude_login() -> tuple[bool, str]:
-    """Heuristic: check if Claude CLI has been configured by looking for its config directory."""
+    """Check if Claude CLI responds and has a config directory indicating prior login."""
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False, "claude --version failed — run: claude login"
+    except Exception as exc:
+        return False, f"claude not callable ({exc}) — run: claude login"
+
     home = Path.home()
     candidates = [home / ".config" / "claude", home / ".claude"]
     for config_dir in candidates:
@@ -2114,14 +2384,22 @@ def _check_github_token_scopes(token: str) -> tuple[bool, str]:
         "https://api.github.com/user",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
     )
+    import json as _json
+
     try:
         with _req.urlopen(request, timeout=10) as resp:
+            data = _json.loads(resp.read())
+            username = data.get("login", "authenticated")
             scopes_raw = resp.headers.get("X-OAuth-Scopes", "")
             scopes = {s.strip() for s in scopes_raw.split(",") if s.strip()}
             if not scopes:
-                return True, "fine-grained PAT — scopes not verifiable via API"
+                return (
+                    True,
+                    f"fine-grained PAT (logged in as {username}; scopes unverifiable — "
+                    "ensure Contents (read/write) + Pull requests (read/write) permissions are granted)",
+                )
             if "repo" in scopes or "public_repo" in scopes:
-                return True, f"write scopes confirmed ({', '.join(sorted(scopes))})"
+                return True, f"write scopes confirmed (logged in as {username}: {', '.join(sorted(scopes))})"
             return (
                 False,
                 f"missing repo write scope — found: {', '.join(sorted(scopes))}; "

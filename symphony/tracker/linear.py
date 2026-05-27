@@ -34,6 +34,11 @@ query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first:
       }
       branchName
       url
+      attachments {
+        nodes {
+          url
+        }
+      }
       labels {
         nodes {
           name
@@ -149,6 +154,11 @@ query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!)
       }
       branchName
       url
+      attachments {
+        nodes {
+          url
+        }
+      }
       labels {
         nodes {
           name
@@ -443,6 +453,7 @@ def normalize_issue(raw: dict[str, Any]) -> Issue:
         state=_required_string(_nested(raw, "state", "name"), "state.name"),
         branch_name=_optional_string(raw.get("branchName")),
         url=_optional_string(raw.get("url")),
+        pr_number=_pr_number_from_attachments(raw),
         labels=_labels(raw),
         blocked_by=_blockers(raw),
         created_at=_parse_datetime(raw.get("createdAt")),
@@ -511,6 +522,21 @@ def _nested(mapping: dict[str, Any], *keys: str) -> Any:
             return None
         current = current.get(key)
     return current
+
+
+def _pr_number_from_attachments(raw: dict[str, Any]) -> int | None:
+    import re
+    nodes = _nested(raw, "attachments", "nodes")
+    if not isinstance(nodes, list):
+        return None
+    for node in nodes:
+        url = node.get("url") if isinstance(node, dict) else None
+        if not isinstance(url, str):
+            continue
+        m = re.search(r"/pull/(\d+)$", url)
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def _labels(raw: dict[str, Any]) -> tuple[str, ...]:

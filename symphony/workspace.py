@@ -184,10 +184,13 @@ class WorkspaceManager:
         _restrict_owner_permissions(issue_dir)
 
         if self.workspace.repo_url:
-            await self._materialize_existing_branch_worktree(run_path, existing_branch, run_id_value)
+            local_branch = f"{existing_branch}-fb-{run_id_value}"
+            await self._materialize_existing_branch_worktree(run_path, existing_branch, local_branch)
+            tracked_branch: str | None = local_branch
         else:
             run_path.mkdir(mode=WORKSPACE_MODE)
             _restrict_owner_permissions(run_path)
+            tracked_branch = existing_branch
 
         run_log_path = self._compute_run_log_path(workspace_key, run_id_value)
         if run_log_path is not None:
@@ -197,7 +200,7 @@ class WorkspaceManager:
             path=run_path,
             workspace_key=workspace_key,
             run_id=run_id_value,
-            branch_name=existing_branch,
+            branch_name=tracked_branch,
             run_log_path=run_log_path,
             created_now=True,
         )
@@ -518,9 +521,14 @@ class WorkspaceManager:
         return result
 
     async def _materialize_existing_branch_worktree(
-        self, run_path: Path, branch_name: str, run_id: str
+        self, run_path: Path, existing_branch: str, local_branch: str
     ) -> None:
-        """Check out an existing remote branch into a new worktree for PR feedback."""
+        """Check out an existing remote branch into a new worktree for PR feedback.
+
+        Creates ``local_branch`` (a unique fb-suffixed name) starting at the tip of
+        ``existing_branch`` so cleanup can safely delete the local branch without
+        touching the original PR branch that may still be checked out elsewhere.
+        """
         if not self.workspace.repo_url:
             raise WorkspaceError("workspace_repo_url_required")
 
@@ -530,19 +538,22 @@ class WorkspaceManager:
                 await _run_git(
                     bare.parent, ["clone", "--bare", self.workspace.repo_url, bare.name]
                 )
-            else:
-                try:
-                    await _run_git(bare, ["fetch", "--prune", "origin"])
-                except GitCommandError as exc:
-                    LOGGER.warning("git fetch failed before PR feedback checkout: %s", exc)
+            # Fetch the specific PR branch by name so it exists locally even if a
+            # previous run's cleanup deleted it with `git branch -D`.  A plain
+            # `git fetch origin` on a bare clone without an explicit fetch refspec
+            # does not update refs/heads/*, so the targeted form is required here.
+            try:
+                await _run_git(
+                    bare,
+                    ["fetch", "origin", f"{existing_branch}:{existing_branch}"],
+                )
+            except GitCommandError as exc:
+                LOGGER.warning("git fetch failed before PR feedback checkout: %s", exc)
 
-        # Use a unique local branch name to avoid conflicts with the original branch
-        # that may still be registered in the bare repo from the initial run.
-        local_branch = f"{branch_name}-fb-{run_id}"
         try:
             await _run_git(
                 bare,
-                ["worktree", "add", "-b", local_branch, str(run_path), f"origin/{branch_name}"],
+                ["worktree", "add", "-b", local_branch, str(run_path), existing_branch],
             )
         except GitCommandError as exc:
             shutil.rmtree(run_path, ignore_errors=True)

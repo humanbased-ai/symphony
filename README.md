@@ -1,6 +1,7 @@
 # Symphony
 
 > Turn Linear issues into isolated agent implementation runs.
+<!-- test comment -->
 
 Symphony is an agent orchestration system for teams that want to manage project
 work in Linear instead of supervising one-off coding-agent chats. You write a
@@ -16,7 +17,9 @@ supported.
 ## Key Features
 
 - **Issue-driven dispatch** — poll Linear, pick eligible tickets, run the agent,
-  open a PR, close the loop with Linear comments and state transitions.
+  open a PR, close the loop with Linear comments and state transitions. Issues
+  that already have an open PR are skipped automatically — no duplicate
+  dispatches.
 - **Per-run workspace isolation** — each dispatch gets its own
   `<root>/<issue>/<run_id>` directory. Optional git mode maintains a bare clone
   with `git worktree` per run and force-cleans the branch on completion.
@@ -37,8 +40,21 @@ supported.
   receiver with HMAC-SHA256 verification, polling fallback.
 - **`linear_graphql` agent tool** — agents can read issues, post comments, and
   move state through Symphony-managed auth.
-- **Status API + dashboard** — `/api/v1/state`, `/api/v1/<issue>`,
-  `/api/v1/refresh`, `/api/v1/health`.
+- **Terminal dashboard** — alt-screen UI showing live issue state, current PR
+  URL, and CI check status per issue. REST API at `/api/v1/state`,
+  `/api/v1/<issue>`, `/api/v1/refresh`, `/api/v1/health`.
+- **PR feedback loop** — polls GitHub PR review comments and Linear issue
+  comments each tick. Change-request feedback is routed to the existing PR
+  branch; approve or close signals trigger the matching state transition.
+- **CI auto-fix** — monitors check-runs on tracked PR branches; when new
+  failures appear and no human comment was posted that tick, the agent is
+  dispatched with the failure details to fix and re-push. CI status resets to
+  open automatically when checks recover.
+- **LLM feedback classification** — approve / change-request / close signals in
+  Linear comments are classified by the Claude CLI, not just regex, so natural
+  language feedback is reliably detected.
+- **Colored console logging** — timestamps, log levels, and per-issue activity
+  lines are color-coded in TTY sessions; file handler always writes plain text.
 
 ## Install
 
@@ -56,6 +72,8 @@ brew install codatta/symphony/symphony
 pipx install symphony
 # or: uv tool install symphony
 ```
+
+Both channels register two entry points: `symphony` and the shorthand `sy`.
 
 **From source:**
 
@@ -77,12 +95,28 @@ brew install gh && gh auth login
 # Linear API key — create at linear.app/settings/api → Personal API keys
 ```
 
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `LINEAR_API_KEY` | Yes | Linear personal API key (`lin_api_…`) |
+| `GITHUB_TOKEN` | Fallback | GitHub token if `gh auth` is unavailable |
+| `ANTHROPIC_API_KEY` | claude_code runner | API key for Claude Code |
+| `OPENAI_API_KEY` | codex runner | API key for Codex |
+| `SYMPHONY_NTFY_TOPIC` | Optional | ntfy topic for push notifications |
+| `SYMPHONY_WEBHOOK_URL` | Optional | Generic webhook for event notifications |
+
+Variables can also be stored in the local credentials file written by
+`symphony onboard` — you do not need to export them in every shell session.
+
 ## Quick Start
 
 Run onboarding from the repository where you want `WORKFLOW.md` to live:
 
 ```bash
 symphony onboard --project-slug your-linear-project-slug
+# sy is a short alias for symphony
+sy onboard --project-slug your-linear-project-slug
 ```
 
 `symphony onboard` scans the local environment first, reports detected Linear /
@@ -123,14 +157,14 @@ Available presets: `codex-safe`, `codex-autonomous`, `review-only`.
 | Phase | Status | Highlights |
 |-------|--------|-----------|
 | **0 — Guardrails** | 🟡 open | AGENTS.md tracking, PR template, LFS docs |
-| **1 — MVP (Linear + Codex)** | 🟢 shipped | Python skeleton, WORKFLOW.md parser, Linear read path, `linear_graphql` tool, orchestration state machine, workspace lifecycle, agent runner ABCs, Codex runner, status API |
-| **1 — SPEC compliance follow-ups** | 🟢 in review | Per-run workspace isolation (IN-286), blocker gate (IN-287), fail-closed approval (IN-288), failure-state transition (IN-289), claim race prevention (IN-290) — PRs #34–#38 |
-| **2A — CLI onboarding & packaging** | 🟢 mostly shipped | `init` / `doctor` / `run` / `onboard`, bilingual tutorial, presets, Homebrew tap. Remaining: env-first onboard redesign (IN-283), repo-shape auto-detect (IN-284), runner picker + cross-vendor review (IN-285) |
-| **2B — Standalone app & Linear productionization** | 🟡 partial | Shipped: Linear OAuth/PKCE, webhooks, credential storage, Homebrew. Remaining: Tauri desktop shell, setup flow, app status view |
-| **3 — Operator visibility & approval** | ⚪ planned | SSE event stream, web dashboard/PWA, mobile push, approval gate UI |
-| **4 — Multi-agent runners** | ⚪ planned | Claude Code (shipped as MVP), Gemini API, OpenAI-compatible / Hermes, GPT-Image-1 |
-| **5 — IM integrations & distribution** | ⚪ planned | Telegram bot, Slack bot, marketplace channels |
-| **6 — Backlog / expansion** | ⚪ planned | GitHub Issues / Jira adapters, SSH worker (SPEC Appendix A), Docker/cgroup sandboxing, persistent retry queue, multimodal vision input |
+| **1 — MVP (Linear + Codex)** | 🟢 shipped | Python skeleton, WORKFLOW.md parser, Linear read path, `linear_graphql` tool, orchestration state machine, workspace lifecycle, Codex runner, status API |
+| **1 — SPEC compliance** | 🟢 shipped | Per-run workspace isolation, blocker gate, fail-closed approval, failure-state transition, claim race prevention |
+| **2A — CLI onboarding** | 🟢 mostly shipped | `init` / `doctor` / `run` / `onboard`, bilingual tutorial, presets, Homebrew tap, colored logging |
+| **2B — Linear productionization** | 🟡 partial | OAuth/PKCE, webhooks, PR feedback loop, CI auto-fix, terminal dashboard. Remaining: Tauri desktop shell |
+| **3 — Operator visibility** | ⚪ planned | SSE stream, web dashboard/PWA, mobile push, approval gate UI |
+| **4 — Multi-agent runners** | ⚪ planned | Gemini API, OpenAI-compatible / Hermes, GPT-Image-1 |
+| **5 — IM & distribution** | ⚪ planned | Telegram bot, Slack bot, marketplace channels |
+| **6 — Backlog** | ⚪ planned | GitHub Issues / Jira adapters, Docker sandboxing, persistent retry queue |
 
 See [prd.md](prd.md) §7 for the full build queue with ticket links, and
 [CHANGELOG.md](CHANGELOG.md) for user-facing changes.
@@ -152,9 +186,62 @@ symphony run WORKFLOW.md --port 7337 --logs-root ./log --log-level INFO
 
 Stop with `Ctrl-C`. Status API: `http://127.0.0.1:7337/api/v1/state`.
 
+### Terminal dashboard
+
+When `--port` is set, Symphony exposes a live alt-screen dashboard and a REST
+API alongside the daemon:
+
+```
+http://127.0.0.1:7337/api/v1/state        # all tracked issues
+http://127.0.0.1:7337/api/v1/<issue-id>   # single issue detail
+http://127.0.0.1:7337/api/v1/refresh      # force a poll tick
+http://127.0.0.1:7337/api/v1/health       # liveness check
+```
+
+The terminal UI shows each issue's current state, the open PR URL, and live
+CI check status. Omit `--port` to run headless with log output only.
+
+### PR feedback loop
+
+Once the agent opens a PR, Symphony keeps polling both the GitHub PR review
+comments and the Linear issue comments on every tick. You do not need to
+restart the daemon after leaving review feedback.
+
+- **Change-request** — post a review comment on the GitHub PR (or a comment
+  on the Linear issue) describing what to fix. Symphony classifies the signal
+  via the Claude CLI and re-dispatches the agent to the same branch.
+- **Approved** — Symphony moves the issue to the configured handoff state.
+- **Closed** — Symphony treats the PR close as a terminal signal and
+  transitions the issue accordingly.
+
+### CI auto-fix
+
+Symphony monitors check-runs on each tracked PR branch. When new CI failures
+appear and no human comment was posted in the same tick, Symphony dispatches
+the agent with the failure details so it can push a fix automatically. Once
+checks recover, the CI status resets and polling resumes normally.
+
 Good fits: scoped implementation tickets, docs/cleanup tasks, review follow-up
 where feedback lands on the Linear issue. Avoid: secret rotation, broad
 refactors, high-risk production changes, repos where agent PRs are unsafe.
+
+### Webhooks (optional)
+
+Webhooks let Linear push state changes to Symphony instantly instead of
+waiting for the next poll tick. Add these fields to `WORKFLOW.md` and expose
+a public URL (or a local tunnel):
+
+```yaml
+tracker:
+  webhook_secret: $LINEAR_WEBHOOK_SECRET   # set in Linear webhook settings
+server:
+  public_url: $SYMPHONY_PUBLIC_URL         # e.g. https://symphony.yourteam.com
+  tunnel: none                             # none | cloudflared | ngrok
+```
+
+When webhooks are active you can raise `polling.interval_ms` to `120000`
+(2 min) — webhooks handle the fast path and polling acts as a safety net.
+Without a public URL, polling-only mode works fine for local use.
 
 ### Multiple projects
 
@@ -187,11 +274,37 @@ Acceptance criteria:
 ```
 
 Move it to `Todo`, run `symphony run WORKFLOW.md --once --log-level INFO`,
-inspect the workspace and PR. For the review loop, post a revision request as a
-Linear comment, move the issue back to an active state, run another tick.
+inspect the workspace and PR. For the review loop, post a revision request as
+a GitHub PR review comment or Linear issue comment — Symphony polls both each
+tick and automatically dispatches the agent to address the feedback.
 
-Current limitation: GitHub PR review comments are not auto-read. Copy revision
-instructions to the Linear issue and re-activate manually.
+## Troubleshooting
+
+**Symphony starts but never dispatches an issue**
+- Check `symphony doctor WORKFLOW.md` — the most common cause is a missing or
+  invalid `LINEAR_API_KEY`.
+- Confirm the issue is in one of the states listed in `active_states`.
+- If an open PR already exists for the issue, Symphony skips it by design.
+  Close or merge the PR first.
+
+**Agent runs but does not open a PR**
+- Verify `gh auth status` shows the correct account with repo write access.
+- Check `--logs-root` for the per-issue log file — it usually contains the
+  exact error from the agent.
+
+**Workspace is dirty after a failed run**
+- Set `keep_on_failure: true` in WORKFLOW.md to preserve the workspace for
+  inspection, then clean it up manually.
+- Stale worktrees from crashed runs are swept automatically on the next daemon
+  start.
+
+**`symphony doctor` reports a fatal approval-gate error**
+- This means `approval_policy: on-request` is set but no `approval_state` is
+  configured. Either add `approval_state` or change the policy to `never`.
+
+**Hot reload is not picking up WORKFLOW.md changes**
+- Only YAML front matter and the prompt body are reloaded. Changing the runner
+  binary or workspace root requires a daemon restart.
 
 ## WORKFLOW.md Basics
 

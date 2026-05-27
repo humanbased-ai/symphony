@@ -20,6 +20,7 @@ from symphony.orchestrator import (
     complete_worker_success,
     dispatch_issue,
     is_terminal_state,
+    park_issue_for_pr,
     reconcile_refreshed_issues,
     release_issue,
     select_dispatchable,
@@ -75,7 +76,9 @@ class SymphonyRuntime:
         clock_ms: Callable[[], int] | None = None,
         on_event: AgentEventCallback | None = None,
         on_state_change: StateCallback | None = None,
+        on_pr_update: Callable[[str, int, str], None] | None = None,
         github_client: Any | None = None,
+        manifest_writer: Any | None = None,
     ) -> None:
         self.config = config
         self.workflow = workflow
@@ -89,7 +92,9 @@ class SymphonyRuntime:
         self.clock_ms = clock_ms or _monotonic_epoch_ms
         self.on_event = on_event
         self.on_state_change = on_state_change
+        self.on_pr_update = on_pr_update
         self.github_client = github_client
+        self.manifest_writer = manifest_writer
         # Tracks the issue IDs seen in the previous poll tick.  An issue is
         # eligible for dispatch only when it newly appears (present in current
         # candidates but absent from _prev_candidate_ids).  Starts empty so
@@ -111,6 +116,10 @@ class SymphonyRuntime:
         self._branch_pr_numbers: dict[str, int] = {}
         # Maps branch → frozenset of check-run IDs already processed for CI failures.
         self._pr_ci_seen: dict[str, frozenset[int]] = {}
+        # Branches where a conflict-resolution agent run has been dispatched and not yet resolved.
+        self._pr_conflict_dispatched: set[str] = set()
+        # All RunningEntry objects ever dispatched, keyed by issue.id.
+        self._dispatched_entries: dict[str, Any] = {}
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -121,19 +130,27 @@ class SymphonyRuntime:
 
         current_ids = {issue.id for issue in candidates}
         new_issue_ids = current_ids - self._prev_candidate_ids
-        self._prev_candidate_ids = current_ids
 
+        self._refresh_running_issue_states(candidates)
         released = await self._release_due_retries_missing_from_candidates(candidates)
         dispatched_issues = self._dispatch_due_retries(candidates, now_ms=now_ms)
 
         eligible = [issue for issue in candidates if issue.id in new_issue_ids]
         remaining = [issue for issue in eligible if issue.id not in {item.id for item in dispatched_issues}]
-        for issue in select_dispatchable(remaining, self.state):
+        for issue in select_dispatchable(remaining, self.state, now_ms=now_ms):
             dispatch_issue(issue, self.state, now_ms=now_ms)
             dispatched_issues.append(issue)
 
+        # Mark new issues as seen only after dispatch so that issues that could
+        # not be dispatched this tick (concurrency limit full) remain eligible
+        # on the next tick rather than being permanently dropped.
+        dispatched_new_ids = {i.id for i in dispatched_issues if i.id in new_issue_ids}
+        self._prev_candidate_ids = current_ids - (new_issue_ids - dispatched_new_ids)
+
         for issue in dispatched_issues:
             LOGGER.info("Dispatching  %s — %s", issue.identifier, issue.title)
+            if issue.id in self.state.running:
+                self._dispatched_entries[issue.id] = self.state.running[issue.id]
 
         completed: list[str] = []
         failed: list[str] = []
@@ -268,6 +285,40 @@ class SymphonyRuntime:
 
         return dispatched
 
+    def _resolve_pr_url(self, branch_name: str | None) -> str:
+        if branch_name is None or self.github_client is None:
+            return ""
+        pr_number = self._branch_pr_numbers.get(branch_name)
+        if pr_number is None:
+            return ""
+        gh = self.github_client
+        return f"https://github.com/{gh.owner}/{gh.repo}/pull/{pr_number}"
+
+    def _record_manifest(
+        self,
+        issue: Any,
+        session: Any,
+        *,
+        start_time: float,
+        end_time: float,
+        status: str,
+        usage: Any,
+        pr_url: str,
+    ) -> None:
+        if self.manifest_writer is None:
+            return
+        entry = self.state.running.get(issue.id)
+        self.manifest_writer.record(
+            ticket_id=issue.identifier,
+            session_id=getattr(session, "id", None) or (entry.session_id if entry else None),
+            started_at=start_time,
+            ended_at=end_time,
+            status=status,
+            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            pr_url=pr_url,
+        )
+
     async def _run_dispatched_issue(self, issue: Issue) -> "_WorkerResult":
         entry = self.state.running[issue.id]
         workspace = None
@@ -275,6 +326,23 @@ class SymphonyRuntime:
         start_ms = self.clock_ms()
 
         try:
+            if self.github_client is not None:
+                existing_pr = await asyncio.to_thread(
+                    self.github_client.find_open_pr_for_issue, issue.identifier
+                )
+                if existing_pr is not None:
+                    pr_data = await asyncio.to_thread(self.github_client.get_pr, existing_pr)
+                    head_branch = ((pr_data or {}).get("head") or {}).get("ref")
+                    LOGGER.info(
+                        "Issue %s already has open PR #%d on branch %r — skipping new dispatch.",
+                        issue.identifier, existing_pr, head_branch,
+                    )
+                    if head_branch:
+                        self._branch_pr_numbers[head_branch] = existing_pr
+                        self._branch_to_issue[head_branch] = issue
+                    park_issue_for_pr(issue.id, self.state)
+                    return _WorkerResult(success=True)
+
             workspace = await _maybe_await(self.workspace_manager.prepare_for_issue(issue))
             _attach_runtime_entry_metadata(
                 entry,
@@ -307,12 +375,17 @@ class SymphonyRuntime:
             await _maybe_await(self.workspace_manager.after_run(workspace))
 
             elapsed = _fmt_duration_ms(self.clock_ms() - start_ms)
+            end_time = time.time()
+            usage = getattr(result, "usage", None)
+            pr_url = self._resolve_pr_url(branch_name)
             if result.success:
+                self._record_manifest(issue, session, start_time=start_ms / 1000, end_time=end_time, status="completed", usage=usage, pr_url=pr_url)
                 complete_worker_success(issue.id, self.state, now_ms=self.clock_ms())
                 LOGGER.info("Completed    %s — %s  (%s)", issue.identifier, issue.title, elapsed)
                 return _WorkerResult(success=True)
 
             error = str(result.exit_reason or "worker_failed")
+            self._record_manifest(issue, session, start_time=start_ms / 1000, end_time=end_time, status="failed", usage=usage, pr_url=pr_url)
             complete_worker_failure(
                 issue.id,
                 self.state,
@@ -347,9 +420,58 @@ class SymphonyRuntime:
             return issue
         try:
             comments = await _maybe_await(self.tracker.fetch_issue_comments(issue.id))
-            return dataclasses.replace(issue, comments=tuple(comments))
+            enriched = dataclasses.replace(issue, comments=tuple(comments))
+            self._detect_pr_from_comments(enriched)
+            return enriched
         except Exception:
             return issue
+
+    def _refresh_running_issue_states(self, candidates: list[Issue]) -> None:
+        """Update issue state for all dispatched entries every tick.
+
+        Running issues are updated from the already-fetched candidates list at
+        no extra cost. Completed/failed issues that are no longer candidates are
+        batch-fetched separately so their state stays current in the dashboard.
+        """
+        by_id = {issue.id: issue for issue in candidates}
+
+        # Update running entries from candidates (free — already fetched).
+        for entry in self.state.running.values():
+            fresh = by_id.get(entry.issue.id)
+            if fresh is not None and fresh.state != entry.issue.state:
+                entry.issue = dataclasses.replace(entry.issue, state=fresh.state)
+
+        # Batch-refresh completed/failed entries that are no longer candidates.
+        stale_ids = [
+            issue_id for issue_id in self._dispatched_entries
+            if issue_id not in by_id and issue_id not in self.state.running
+        ]
+        if not stale_ids or not hasattr(self.tracker, "fetch_issue_states_by_ids"):
+            return
+        try:
+            fresh_issues: list[Issue] = self.tracker.fetch_issue_states_by_ids(stale_ids)
+            fresh_by_id = {i.id: i for i in fresh_issues}
+            for issue_id, entry in self._dispatched_entries.items():
+                fresh = fresh_by_id.get(issue_id)
+                if fresh is not None and fresh.state != entry.issue.state:
+                    entry.issue = dataclasses.replace(entry.issue, state=fresh.state)
+        except Exception:
+            pass
+
+    def _detect_pr_from_comments(self, issue: Issue) -> None:
+        import re
+        if self.on_pr_update is None or not issue.branch_name:
+            return
+        branch = issue.branch_name
+        if branch in self._branch_pr_numbers:
+            return
+        for text in issue.comments:
+            m = re.search(r"github\.com/[^/]+/[^/]+/pull/(\d+)", text)
+            if m:
+                pr_number = int(m.group(1))
+                self._branch_pr_numbers[branch] = pr_number
+                self.on_pr_update(branch, pr_number, "open")
+                return
 
     async def _agent_event_handler(self, event: AgentEvent) -> None:
         issue_id = event.issue_id
@@ -418,9 +540,12 @@ class SymphonyRuntime:
                     pr_number=cached_pr, pr_head_branch=branch, merged=merged,
                     repo_owner=gh.owner, repo_name=gh.repo,
                 )
+                if self.on_pr_update is not None:
+                    self.on_pr_update(branch, cached_pr, "merged" if merged else "closed")
                 await self._handle_pr_closed(event)
                 self._branch_pr_numbers.pop(branch, None)
                 self._pr_comment_seen.pop(branch, None)
+                self._pr_conflict_dispatched.discard(branch)
                 return
             pr_number = cached_pr
         else:
@@ -429,6 +554,16 @@ class SymphonyRuntime:
                 return
             pr_number = pr_number_found
             self._branch_pr_numbers[branch] = pr_number
+            if self.on_pr_update is not None:
+                self.on_pr_update(branch, pr_number, "open")
+
+        pr_data = await asyncio.to_thread(gh.get_pr, pr_number)
+        if pr_data:
+            mergeable_state = pr_data.get("mergeable_state", "")
+            if pr_data.get("mergeable") is False and mergeable_state == "dirty":
+                await self._handle_pr_conflict(branch, pr_number, issue)
+            elif mergeable_state and mergeable_state != "dirty":
+                self._pr_conflict_dispatched.discard(branch)
 
         review_comments, issue_comments, reviews = await asyncio.gather(
             asyncio.to_thread(gh.list_pr_review_comments, pr_number),
@@ -499,6 +634,8 @@ class SymphonyRuntime:
             return
         failed = await asyncio.to_thread(gh.get_pr_failed_check_runs, pr_number)
         if not failed:
+            if branch in self._pr_ci_seen and self.on_pr_update is not None:
+                self.on_pr_update(branch, pr_number, "open")
             return
         ci_seen = self._pr_ci_seen.get(branch, frozenset())
         new_failures = [r for r in failed if r["id"] not in ci_seen]
@@ -518,6 +655,8 @@ class SymphonyRuntime:
             "CI failure(s) on PR #%d for %s: %s",
             pr_number, issue.identifier, ", ".join(r["name"] for r in new_failures),
         )
+        if self.on_pr_update is not None:
+            self.on_pr_update(branch, pr_number, "ci_fail")
         await self._handle_pr_feedback(branch, pr_number, feedback_text)
 
     async def handle_github_pr_event(self, event: GitHubEvent) -> None:
@@ -537,6 +676,8 @@ class SymphonyRuntime:
             )
         elif isinstance(event, PRReviewEvent) and event.review_state == "approved":
             LOGGER.info("PR #%d approved — waiting for merge to close the issue.", event.pr_number)
+            if self.on_pr_update is not None:
+                self.on_pr_update(event.pr_head_branch, event.pr_number, "approved")
 
     async def _handle_pr_closed(self, event: PRClosedEvent) -> None:
         issue = self._branch_to_issue.get(event.pr_head_branch)
@@ -557,6 +698,21 @@ class SymphonyRuntime:
 
         self._branch_to_issue.pop(event.pr_head_branch, None)
         self._pr_turns.pop(event.pr_head_branch, None)
+        if issue is not None:
+            release_issue(issue.id, self.state)
+
+    async def _handle_pr_conflict(self, branch: str, pr_number: int, issue: Issue) -> None:
+        if branch in self._pr_conflict_dispatched:
+            return
+        self._pr_conflict_dispatched.add(branch)
+        LOGGER.info(
+            "PR #%d has merge conflicts for %s — dispatching conflict resolution agent.",
+            pr_number, issue.identifier,
+        )
+        if self.on_pr_update is not None:
+            self.on_pr_update(branch, pr_number, "conflict")
+        feedback_text = _render_pr_conflict_prompt()
+        await self._handle_pr_feedback(branch, pr_number, feedback_text)
 
     async def _handle_pr_feedback(self, branch: str, pr_number: int, feedback_text: str) -> None:
         issue = self._branch_to_issue.get(branch)
@@ -643,9 +799,20 @@ class SymphonyRuntime:
         pairs: list[tuple[str, str]] = list(
             await _call_sync(self.tracker.fetch_issue_comments_with_ids, issue.id)
         )
-        current_ids = frozenset(cid for cid, _ in pairs)
-        seen = self._feedback_seen.get(issue.id, frozenset())
+        # Scan all comments for GitHub PR URLs in case _enrich_with_comments missed them.
+        all_texts = [text for _, text in pairs]
+        self._detect_pr_from_comments(dataclasses.replace(issue, comments=tuple(all_texts)))
 
+        current_ids = frozenset(cid for cid, _ in pairs)
+
+        # On first encounter after (re)start, mark all existing comments as seen
+        # without classifying them so pre-existing close/approve signals are not
+        # re-triggered by a restart.
+        if issue.id not in self._feedback_seen:
+            self._feedback_seen[issue.id] = current_ids
+            return
+
+        seen = self._feedback_seen[issue.id]
         new_ids = current_ids - seen
         if not new_ids:
             return
@@ -664,6 +831,26 @@ class SymphonyRuntime:
             return
 
         tracker_cfg = self.config.tracker
+
+        # For CHANGE_REQUEST: if the issue already has an open PR, push fixes to
+        # the existing branch rather than re-dispatching and opening a second PR.
+        if signal == FeedbackSignal.CHANGE_REQUEST:
+            branch = issue.branch_name
+            pr_number: int | None = self._branch_pr_numbers.get(branch) if branch else None
+            if pr_number is None and branch and self.github_client is not None:
+                pr_number = await asyncio.to_thread(
+                    self.github_client.find_open_pr_for_issue, issue.identifier
+                )
+            if branch and pr_number:
+                LOGGER.info(
+                    "Feedback signal change_request on %s → pushing fixes to PR #%d on branch %s",
+                    issue.identifier, pr_number, branch,
+                )
+                self._branch_to_issue[branch] = issue
+                self._feedback_seen[issue.id] = current_ids
+                await self._handle_pr_feedback(branch, pr_number, "\n".join(new_comments))
+                return
+
         if signal == FeedbackSignal.APPROVE:
             target_state = tracker_cfg.done_state
         elif signal == FeedbackSignal.CHANGE_REQUEST:
@@ -680,12 +867,14 @@ class SymphonyRuntime:
         )
 
         if signal == FeedbackSignal.CLOSE and self.github_client is not None:
-            pr_number: int | None = None
-            branches = [b for b, iss in self._branch_to_issue.items() if iss.id == issue.id]
-            for branch in branches:
-                pr_number = self._branch_pr_numbers.get(branch)
-                if pr_number:
-                    break
+            branch = issue.branch_name
+            pr_number: int | None = self._branch_pr_numbers.get(branch) if branch else None
+            if pr_number is None:
+                branches = [b for b, iss in self._branch_to_issue.items() if iss.id == issue.id]
+                for b in branches:
+                    pr_number = self._branch_pr_numbers.get(b)
+                    if pr_number:
+                        break
             if pr_number is None:
                 pr_number = await asyncio.to_thread(
                     self.github_client.find_open_pr_for_issue, issue.identifier
@@ -822,8 +1011,32 @@ Instructions:
 1. Make the necessary code changes to address the feedback.
 2. Commit your changes with a clear message.
 3. Push to the PR branch: git push origin HEAD:{branch}
-4. Post a comment on the PR summarizing what you changed:
-   gh pr comment {pr_number} --body "..."
+4. Post a comment on the PR summarizing what you changed. The body MUST start with
+   `<!-- symphony -->` on its own first line so the automation skips your comment on
+   the next polling cycle (without this marker your comment will trigger another run):
+     gh pr comment {pr_number} --body $'<!-- symphony -->\\nI addressed the feedback by ...'
 
 Focus only on what the reviewer asked for. Do not refactor unrelated code.
+"""
+
+
+def _render_pr_conflict_prompt() -> str:
+    return """\
+This PR has merge conflicts with the base branch that must be resolved before it can be merged.
+
+Instructions:
+1. Fetch the latest base branch and merge it into the current branch:
+     git fetch origin main
+     git merge origin/main
+2. Identify and resolve all conflict markers (<<<<<<<, =======, >>>>>>>).
+3. Stage the resolved files and commit:
+     git add <resolved files>
+     git commit -m "fix: resolve merge conflicts with main"
+4. Push the branch:
+     git push origin HEAD
+5. Post a comment on the PR confirming the conflicts are resolved. The body MUST start with
+   `<!-- symphony -->` on its own first line:
+     gh pr comment <pr_number> --body $'<!-- symphony -->\\nMerge conflicts resolved.'
+
+Resolve conflicts carefully — preserve the intent of both sides where possible.
 """
