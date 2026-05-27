@@ -114,6 +114,8 @@ class SymphonyRuntime:
         self._branch_pr_numbers: dict[str, int] = {}
         # Maps branch → frozenset of check-run IDs already processed for CI failures.
         self._pr_ci_seen: dict[str, frozenset[int]] = {}
+        # Branches where a conflict-resolution agent run has been dispatched and not yet resolved.
+        self._pr_conflict_dispatched: set[str] = set()
         # All RunningEntry objects ever dispatched, keyed by issue.id.
         self._dispatched_entries: dict[str, Any] = {}
 
@@ -502,6 +504,7 @@ class SymphonyRuntime:
                 await self._handle_pr_closed(event)
                 self._branch_pr_numbers.pop(branch, None)
                 self._pr_comment_seen.pop(branch, None)
+                self._pr_conflict_dispatched.discard(branch)
                 return
             pr_number = cached_pr
         else:
@@ -512,6 +515,14 @@ class SymphonyRuntime:
             self._branch_pr_numbers[branch] = pr_number
             if self.on_pr_update is not None:
                 self.on_pr_update(branch, pr_number, "open")
+
+        pr_data = await asyncio.to_thread(gh.get_pr, pr_number)
+        if pr_data:
+            mergeable_state = pr_data.get("mergeable_state", "")
+            if pr_data.get("mergeable") is False and mergeable_state == "dirty":
+                await self._handle_pr_conflict(branch, pr_number, issue)
+            elif mergeable_state and mergeable_state != "dirty":
+                self._pr_conflict_dispatched.discard(branch)
 
         review_comments, issue_comments, reviews = await asyncio.gather(
             asyncio.to_thread(gh.list_pr_review_comments, pr_number),
@@ -648,6 +659,19 @@ class SymphonyRuntime:
         self._pr_turns.pop(event.pr_head_branch, None)
         if issue is not None:
             release_issue(issue.id, self.state)
+
+    async def _handle_pr_conflict(self, branch: str, pr_number: int, issue: Issue) -> None:
+        if branch in self._pr_conflict_dispatched:
+            return
+        self._pr_conflict_dispatched.add(branch)
+        LOGGER.info(
+            "PR #%d has merge conflicts for %s — dispatching conflict resolution agent.",
+            pr_number, issue.identifier,
+        )
+        if self.on_pr_update is not None:
+            self.on_pr_update(branch, pr_number, "conflict")
+        feedback_text = _render_pr_conflict_prompt()
+        await self._handle_pr_feedback(branch, pr_number, feedback_text)
 
     async def _handle_pr_feedback(self, branch: str, pr_number: int, feedback_text: str) -> None:
         issue = self._branch_to_issue.get(branch)
@@ -952,4 +976,26 @@ Instructions:
      gh pr comment {pr_number} --body $'<!-- symphony -->\\nI addressed the feedback by ...'
 
 Focus only on what the reviewer asked for. Do not refactor unrelated code.
+"""
+
+
+def _render_pr_conflict_prompt() -> str:
+    return """\
+This PR has merge conflicts with the base branch that must be resolved before it can be merged.
+
+Instructions:
+1. Fetch the latest base branch and merge it into the current branch:
+     git fetch origin main
+     git merge origin/main
+2. Identify and resolve all conflict markers (<<<<<<<, =======, >>>>>>>).
+3. Stage the resolved files and commit:
+     git add <resolved files>
+     git commit -m "fix: resolve merge conflicts with main"
+4. Push the branch:
+     git push origin HEAD
+5. Post a comment on the PR confirming the conflicts are resolved. The body MUST start with
+   `<!-- symphony -->` on its own first line:
+     gh pr comment <pr_number> --body $'<!-- symphony -->\\nMerge conflicts resolved.'
+
+Resolve conflicts carefully — preserve the intent of both sides where possible.
 """
