@@ -8,9 +8,21 @@ _SYSTEM_PROMPT = """\
 You classify human feedback comments left on a code review issue.
 Reply with exactly one word — no punctuation, no explanation:
   APPROVE         reviewer approves; changes are good, ready to merge or mark done
-  CHANGE_REQUEST  reviewer wants changes made before the issue can be closed
-  CLOSE           reviewer wants to close, cancel, or mark the issue won't-be-fixed
+  CHANGE_REQUEST  reviewer wants code changes, improvements, or additions before closing
+  CLOSE           reviewer explicitly wants to close, abandon, or cancel the issue (e.g. "close this", "won't fix", "cancel")
   NONE            no clear feedback signal in the comments
+
+Examples:
+  "LGTM"                        → APPROVE
+  "looks good, please merge"    → APPROVE
+  "需要更多注释"                  → CHANGE_REQUEST
+  "add more comments please"    → CHANGE_REQUEST
+  "please fix the edge case"    → CHANGE_REQUEST
+  "this needs better tests"     → CHANGE_REQUEST
+  "close this won't fix"        → CLOSE
+  "cancel, no longer needed"    → CLOSE
+  "let's abandon this approach" → CLOSE
+  "nice work!"                  → NONE
 """
 
 _USER_TEMPLATE = """\
