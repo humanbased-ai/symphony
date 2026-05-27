@@ -227,7 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the Symphony CLI MVP orchestrator for a repository WORKFLOW.md.",
         epilog=(
             f"Common commands: {cli} onboard, {cli} init, "
-            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md"
+            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md, {cli} changelog"
         ),
     )
     _add_version_argument(parser)
@@ -981,6 +981,45 @@ def apply_runtime_workflow(runtime: SymphonyRuntime, effective: EffectiveWorkflo
     runtime._notify_state_change()
 
 
+def changelog_main(argv: Sequence[str] | None = None) -> int:
+    import importlib.resources as pkg_resources
+
+    parser = argparse.ArgumentParser(prog="symphony changelog", description="Show version history")
+    parser.add_argument("-n", metavar="N", type=int, default=None, help="show only the last N versions")
+    args = parser.parse_args(argv)
+
+    try:
+        ref = pkg_resources.files("symphony").joinpath("CHANGELOG.md")
+        content = ref.read_text(encoding="utf-8")
+    except Exception:
+        p = Path(__file__).parent.parent / "CHANGELOG.md"
+        if not p.exists():
+            print("symphony: changelog not found", file=sys.stderr)
+            return 1
+        content = p.read_text(encoding="utf-8")
+
+    if args.n is not None:
+        lines = content.splitlines(keepends=True)
+        preamble: list[str] = []
+        sections: list[list[str]] = []
+        current: list[str] | None = None
+        for line in lines:
+            if line.startswith("## "):
+                if current is not None:
+                    sections.append(current)
+                current = [line]
+            elif current is None:
+                preamble.append(line)
+            else:
+                current.append(line)
+        if current is not None:
+            sections.append(current)
+        content = "".join(preamble) + "".join("".join(s) for s in sections[:args.n])
+
+    print(content, end="")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(argv) if argv is not None else sys.argv[1:]
     if raw_args:
@@ -997,6 +1036,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return webhooks_main(raw_args[1:])
         if command == "project":
             return project_main(raw_args[1:])
+        if command == "changelog":
+            return changelog_main(raw_args[1:])
 
     parser = build_parser()
     args = parser.parse_args(raw_args)
