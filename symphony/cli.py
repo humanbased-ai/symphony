@@ -227,7 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the Symphony CLI MVP orchestrator for a repository WORKFLOW.md.",
         epilog=(
             f"Common commands: {cli} onboard, {cli} init, "
-            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md, {cli} changelog"
+            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md, {cli} changelog, {cli} report"
         ),
     )
     _add_version_argument(parser)
@@ -263,6 +263,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
         help="Console log level. Defaults to INFO.",
+    )
+    parser.add_argument(
+        "--new-run",
+        action="store_true",
+        help="Start a fresh manifest run instead of continuing the current one.",
     )
     return parser
 
@@ -465,19 +470,27 @@ def configure_logging(level: str, logs_root: Path | None = None) -> None:
         root.addHandler(file_handler)
 
 
-def create_runtime(context: StartupContext) -> SymphonyRuntime:
+def create_runtime(context: StartupContext, *, new_run: bool = False) -> SymphonyRuntime:
+    from symphony.manifest import ManifestWriter, get_or_create_run_id  # noqa: PLC0415
     linear_client = create_tracker(context.config)
     workspace_manager = create_workspace_manager(context.config, logs_root=context.logs_root)
     runner = create_runner(context.config, linear_client)
     github_client = create_github_client(context.config)
-    return SymphonyRuntime(
+    project_slug = (context.config.tracker.project_slug or "default").replace("/", "-")
+    run_id = get_or_create_run_id(project_slug, new=new_run)
+    manifest_writer = ManifestWriter(project_slug, run_id)
+    LOGGER.info("Run manifest → %s", manifest_writer.path)
+    runtime = SymphonyRuntime(
         config=context.config,
         workflow=context.workflow,
         tracker=linear_client,
         workspace_manager=workspace_manager,
         runner=runner,
         github_client=github_client,
+        manifest_writer=manifest_writer,
     )
+    runtime._current_run_id = run_id
+    return runtime
 
 
 def create_github_client(config: WorkflowConfig) -> GitHubClient | None:
@@ -801,6 +814,7 @@ async def run_daemon(
         await asyncio.gather(*tasks, return_exceptions=True)
         if dashboard is not None:
             dashboard.stop()
+        _prompt_generate_report(runtime)
 
 
 def _inject_github_config(workflow_path: Path, owner: str, repo: str) -> None:
@@ -981,6 +995,77 @@ def apply_runtime_workflow(runtime: SymphonyRuntime, effective: EffectiveWorkflo
     runtime._notify_state_change()
 
 
+def _prompt_generate_report(runtime: Any) -> None:
+    writer = getattr(runtime, "manifest_writer", None)
+    if writer is None or not writer.path.exists():
+        return
+    run_id = getattr(runtime, "_current_run_id", "unknown")
+    _do_generate_report(writer.path, run_id)
+
+
+def _do_generate_report(manifest_path: Any, run_id: str) -> None:
+    from symphony.report import generate_report  # noqa: PLC0415
+    try:
+        generate_report(manifest_path, run_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[symphony] Report generation failed: {exc}", file=sys.stderr)
+
+
+def report_main(argv: Sequence[str] | None = None) -> int:
+    from symphony.manifest import list_runs, SYMPHONY_HOME  # noqa: PLC0415
+    from symphony.report import generate_report  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(prog="symphony report", description="Generate a run analysis report")
+    parser.add_argument("--project-slug", default=None, help="Project slug (default: all projects)")
+    parser.add_argument("--run-id", default=None, help="Specific run ID (default: most recent)")
+    parser.add_argument("--out", default=None, help="Output path (default: run dir/report.md)")
+    parser.add_argument("--print", action="store_true", help="Print report to stdout")
+    args = parser.parse_args(argv)
+
+    runs_root = SYMPHONY_HOME / "runs"
+    if not runs_root.exists():
+        print("symphony: no runs found — start a daemon first", file=sys.stderr)
+        return 1
+
+    if args.project_slug:
+        slugs = [args.project_slug]
+    else:
+        slugs = [p.name for p in sorted(runs_root.iterdir()) if p.is_dir()]
+
+    if not slugs:
+        print("symphony: no runs found", file=sys.stderr)
+        return 1
+
+    all_runs: list[tuple[str, str, Any]] = []
+    for slug in slugs:
+        for run_dir in list_runs(slug):
+            all_runs.append((slug, run_dir.name, run_dir / "manifest.jsonl"))
+
+    if not all_runs:
+        print("symphony: no manifest files found", file=sys.stderr)
+        return 1
+
+    if args.run_id:
+        match = [(s, r, p) for s, r, p in all_runs if r == args.run_id]
+        if not match:
+            print(f"symphony: run {args.run_id!r} not found", file=sys.stderr)
+            return 1
+        slug, run_id, manifest_path = match[0]
+    else:
+        slug, run_id, manifest_path = all_runs[0]
+
+    out_path = Path(args.out) if args.out else None
+    try:
+        report = generate_report(manifest_path, run_id, out_path=out_path)
+        if args.print:
+            print(report)
+    except Exception as exc:  # noqa: BLE001
+        print(f"symphony: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
 def changelog_main(argv: Sequence[str] | None = None) -> int:
     import importlib.resources as pkg_resources
 
@@ -1038,6 +1123,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return project_main(raw_args[1:])
         if command == "changelog":
             return changelog_main(raw_args[1:])
+        if command == "report":
+            return report_main(raw_args[1:])
 
     parser = build_parser()
     args = parser.parse_args(raw_args)
@@ -1083,7 +1170,7 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         print(f"Status API port: {context.port}")
         return 0
 
-    runtime = create_runtime(context)
+    runtime = create_runtime(context, new_run=getattr(args, "new_run", False))
     if args.once:
         result = asyncio.run(run_once(runtime))
         print(

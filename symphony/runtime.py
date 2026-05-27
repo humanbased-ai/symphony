@@ -78,6 +78,7 @@ class SymphonyRuntime:
         on_state_change: StateCallback | None = None,
         on_pr_update: Callable[[str, int, str], None] | None = None,
         github_client: Any | None = None,
+        manifest_writer: Any | None = None,
     ) -> None:
         self.config = config
         self.workflow = workflow
@@ -93,6 +94,7 @@ class SymphonyRuntime:
         self.on_state_change = on_state_change
         self.on_pr_update = on_pr_update
         self.github_client = github_client
+        self.manifest_writer = manifest_writer
         # Tracks the issue IDs seen in the previous poll tick.  An issue is
         # eligible for dispatch only when it newly appears (present in current
         # candidates but absent from _prev_candidate_ids).  Starts empty so
@@ -283,6 +285,40 @@ class SymphonyRuntime:
 
         return dispatched
 
+    def _resolve_pr_url(self, branch_name: str | None) -> str:
+        if branch_name is None or self.github_client is None:
+            return ""
+        pr_number = self._branch_pr_numbers.get(branch_name)
+        if pr_number is None:
+            return ""
+        gh = self.github_client
+        return f"https://github.com/{gh.owner}/{gh.repo}/pull/{pr_number}"
+
+    def _record_manifest(
+        self,
+        issue: Any,
+        session: Any,
+        *,
+        start_time: float,
+        end_time: float,
+        status: str,
+        usage: Any,
+        pr_url: str,
+    ) -> None:
+        if self.manifest_writer is None:
+            return
+        entry = self.state.running.get(issue.id)
+        self.manifest_writer.record(
+            ticket_id=issue.identifier,
+            session_id=getattr(session, "id", None) or (entry.session_id if entry else None),
+            started_at=start_time,
+            ended_at=end_time,
+            status=status,
+            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            pr_url=pr_url,
+        )
+
     async def _run_dispatched_issue(self, issue: Issue) -> "_WorkerResult":
         entry = self.state.running[issue.id]
         workspace = None
@@ -339,12 +375,17 @@ class SymphonyRuntime:
             await _maybe_await(self.workspace_manager.after_run(workspace))
 
             elapsed = _fmt_duration_ms(self.clock_ms() - start_ms)
+            end_time = time.time()
+            usage = getattr(result, "usage", None)
+            pr_url = self._resolve_pr_url(branch_name)
             if result.success:
+                self._record_manifest(issue, session, start_time=start_ms / 1000, end_time=end_time, status="completed", usage=usage, pr_url=pr_url)
                 complete_worker_success(issue.id, self.state, now_ms=self.clock_ms())
                 LOGGER.info("Completed    %s — %s  (%s)", issue.identifier, issue.title, elapsed)
                 return _WorkerResult(success=True)
 
             error = str(result.exit_reason or "worker_failed")
+            self._record_manifest(issue, session, start_time=start_ms / 1000, end_time=end_time, status="failed", usage=usage, pr_url=pr_url)
             complete_worker_failure(
                 issue.id,
                 self.state,
