@@ -101,7 +101,7 @@ jobs:
               f"---\n\n"
           )
 
-          changelog = Path("CHANGELOG.md")
+          changelog = Path("symphony/CHANGELOG.md")
           content = changelog.read_text(encoding="utf-8")
 
           # Insert before the first ## heading
@@ -123,6 +123,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add pyproject.toml
-          git add CHANGELOG.md
+          git add symphony/CHANGELOG.md
           git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip ci]"
           git push
