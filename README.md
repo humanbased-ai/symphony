@@ -1,6 +1,7 @@
 # Symphony
 
 > Turn Linear issues into isolated agent implementation runs.
+<!-- test comment -->
 
 Symphony is an agent orchestration system for teams that want to manage project
 work in Linear instead of supervising one-off coding-agent chats. You write a
