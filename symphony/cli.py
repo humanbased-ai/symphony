@@ -1066,6 +1066,42 @@ def report_main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def cache_main(argv: Sequence[str] | None = None) -> int:
+    from symphony.cache.store import CacheStateStore  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(prog="symphony cache", description="Prompt cache management")
+    subparsers = parser.add_subparsers(dest="cache_command")
+    subparsers.add_parser("status", help="Show current cache session table")
+    args = parser.parse_args(argv)
+
+    if args.cache_command == "status":
+        store = CacheStateStore()
+        state = store.load()
+        if not state:
+            print("No cache state found. Run Symphony first to populate.")
+            return 0
+        sessions = state.get("sessions", [])
+        if not sessions:
+            print("No active cache sessions.")
+            return 0
+        header = f"{'SESSION':<20}  {'AGENT':<12}  {'PREFIX':<14}  {'AGE(s)':>7}  {'TTL LEFT(s)':>11}  {'TOKENS':>8}"
+        print(header)
+        print("-" * len(header))
+        for s in sessions:
+            print(
+                f"{s.get('session_id','?')[:20]:<20}  "
+                f"{s.get('agent','?')[:12]:<12}  "
+                f"{s.get('prefix_hash','?')[:12]:<14}  "
+                f"{s.get('age_s', '?'):>7}  "
+                f"{s.get('ttl_remaining_s', '?'):>11}  "
+                f"{s.get('tokens', '?'):>8}"
+            )
+        return 0
+
+    parser.print_help()
+    return 0
+
+
 def changelog_main(argv: Sequence[str] | None = None) -> int:
     import importlib.resources as pkg_resources
 
@@ -1125,6 +1161,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return changelog_main(raw_args[1:])
         if command == "report":
             return report_main(raw_args[1:])
+        if command == "cache":
+            return cache_main(raw_args[1:])
 
     parser = build_parser()
     args = parser.parse_args(raw_args)

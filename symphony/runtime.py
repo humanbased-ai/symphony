@@ -135,7 +135,7 @@ class SymphonyRuntime:
 
         eligible = [issue for issue in candidates if issue.id in new_issue_ids]
         remaining = [issue for issue in eligible if issue.id not in {item.id for item in dispatched_issues}]
-        for issue in select_dispatchable(remaining, self.state):
+        for issue in select_dispatchable(remaining, self.state, now_ms=now_ms):
             dispatch_issue(issue, self.state, now_ms=now_ms)
             dispatched_issues.append(issue)
 

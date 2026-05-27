@@ -24,17 +24,14 @@ DEFAULT_CLAUDE_COMMAND = "claude"
 DEFAULT_TURN_TIMEOUT_MS = 3_600_000
 DEFAULT_PERMISSION_MODE = "bypassPermissions"
 
-_LINEAR_SYSTEM_PROMPT = """
-You have access to Linear via the LINEAR_API_KEY environment variable.
-To post comments, update issue state, or attach PR links, use Bash:
-
-  curl -s -X POST https://api.linear.app/graphql \\
-    -H "Authorization: $LINEAR_API_KEY" \\
-    -H "Content-Type: application/json" \\
-    -d '{"query": "YOUR_GRAPHQL_QUERY"}'
-
-Only call Linear when you have meaningful progress to report or need to update state.
-""".strip()
+_LINEAR_SYSTEM_PROMPT = (
+    "Access Linear via LINEAR_API_KEY using GraphQL: "
+    "curl -s -X POST https://api.linear.app/graphql "
+    '-H "Authorization: $LINEAR_API_KEY" '
+    '-H "Content-Type: application/json" '
+    "-d '{\"query\":\"GRAPHQL\"}'. "
+    "Only call when reporting meaningful progress or updating state."
+)
 
 
 @dataclass
