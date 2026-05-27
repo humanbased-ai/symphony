@@ -1000,17 +1000,7 @@ def _prompt_generate_report(runtime: Any) -> None:
     if writer is None or not writer.path.exists():
         return
     run_id = getattr(runtime, "_current_run_id", "unknown")
-    try:
-        if sys.stdin.isatty():
-            answer = input(
-                f"\nRun finished. Generate analysis report for {run_id}? [Y/n] "
-            ).strip().lower()
-            if answer in ("", "y", "yes"):
-                _do_generate_report(writer.path, run_id)
-        else:
-            _do_generate_report(writer.path, run_id)
-    except (EOFError, KeyboardInterrupt):
-        pass
+    _do_generate_report(writer.path, run_id)
 
 
 def _do_generate_report(manifest_path: Any, run_id: str) -> None:
