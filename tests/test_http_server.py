@@ -231,6 +231,75 @@ class StatusAPIHandlerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "fastapi_unavailable"):
             create_fastapi_app(api)
 
+    # ------------------------------------------------------------------
+    # Approval endpoints
+    # ------------------------------------------------------------------
+
+    def test_approve_resolves_pending_gate(self):
+        resolved: list[tuple[str, bool]] = []
+
+        def approval_resolver(approval_id: str, approved: bool) -> bool:
+            resolved.append((approval_id, approved))
+            return True
+
+        api = StatusAPI(lambda: sample_state(), approval_resolver=approval_resolver)
+
+        response = api.handle_request("POST", "/api/v1/approvals/gate-123/approve")
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.body["resolved"])
+        self.assertTrue(response.body["approved"])
+        self.assertEqual([("gate-123", True)], resolved)
+
+    def test_reject_resolves_pending_gate(self):
+        resolved: list[tuple[str, bool]] = []
+
+        def approval_resolver(approval_id: str, approved: bool) -> bool:
+            resolved.append((approval_id, approved))
+            return True
+
+        api = StatusAPI(lambda: sample_state(), approval_resolver=approval_resolver)
+
+        response = api.handle_request("POST", "/api/v1/approvals/gate-123/reject")
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.body["resolved"])
+        self.assertFalse(response.body["approved"])
+        self.assertEqual([("gate-123", False)], resolved)
+
+    def test_approve_unknown_gate_returns_404(self):
+        api = StatusAPI(lambda: sample_state(), approval_resolver=lambda _id, _a: False)
+
+        response = api.handle_request("POST", "/api/v1/approvals/unknown-id/approve")
+
+        self.assertEqual(404, response.status_code)
+        self.assertEqual("approval_not_found", response.body["error"]["code"])
+
+    def test_approve_without_resolver_returns_503(self):
+        api = StatusAPI(lambda: sample_state())
+
+        response = api.handle_request("POST", "/api/v1/approvals/gate-abc/approve")
+
+        self.assertEqual(503, response.status_code)
+        self.assertEqual("approval_unavailable", response.body["error"]["code"])
+
+    def test_approve_wrong_method_returns_405(self):
+        api = StatusAPI(lambda: sample_state(), approval_resolver=lambda _id, _a: True)
+
+        response = api.handle_request("GET", "/api/v1/approvals/gate-abc/approve")
+
+        self.assertEqual(405, response.status_code)
+
+    def test_issue_identifier_route_does_not_match_approvals(self):
+        api = StatusAPI(lambda: sample_state())
+
+        response = api.handle_request("GET", "/api/v1/approvals/gate-abc/approve")
+
+        # Without resolver, approval routes should return 405 (wrong method) or 503 (no resolver).
+        # The key assertion is that it does NOT return a 404 "issue_not_found" error,
+        # which would mean the route was incorrectly treated as an issue identifier.
+        self.assertNotEqual("issue_not_found", response.body.get("error", {}).get("code"))
+
 
 if __name__ == "__main__":
     unittest.main()

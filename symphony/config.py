@@ -21,6 +21,7 @@ DEFAULT_CODEX_COMMAND = "codex app-server"
 DEFAULT_CODEX_TURN_TIMEOUT_MS = 3_600_000
 DEFAULT_CODEX_READ_TIMEOUT_MS = 5_000
 DEFAULT_CODEX_STALL_TIMEOUT_MS = 300_000
+DEFAULT_APPROVAL_TIMEOUT_MS = 300_000
 DEFAULT_CLAUDE_COMMAND = "claude"
 DEFAULT_CLAUDE_TURN_TIMEOUT_MS = 3_600_000
 DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions"
@@ -175,6 +176,7 @@ class CodexConfig:
     turn_timeout_ms: int = DEFAULT_CODEX_TURN_TIMEOUT_MS
     read_timeout_ms: int = DEFAULT_CODEX_READ_TIMEOUT_MS
     stall_timeout_ms: int = DEFAULT_CODEX_STALL_TIMEOUT_MS
+    approval_timeout_ms: int = DEFAULT_APPROVAL_TIMEOUT_MS
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "CodexConfig":
@@ -198,6 +200,11 @@ class CodexConfig:
                 codex.get("stall_timeout_ms"),
                 DEFAULT_CODEX_STALL_TIMEOUT_MS,
                 "codex_stall_timeout_ms",
+            ),
+            approval_timeout_ms=_positive_int(
+                codex.get("approval_timeout_ms"),
+                DEFAULT_APPROVAL_TIMEOUT_MS,
+                "codex_approval_timeout_ms",
             ),
         )
 

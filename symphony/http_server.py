@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,10 +15,12 @@ from urllib.parse import unquote, urlsplit
 
 API_PREFIX = "/api/v1"
 JSON_HEADERS = {"content-type": "application/json; charset=utf-8"}
+SSE_HEARTBEAT_INTERVAL_S = 15.0
 
 
 StateProvider = Callable[[], Any]
 RefreshCallback = Callable[[], Any]
+ApprovalResolver = Callable[[str, bool], bool]
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,7 @@ class StatusAPI:
     refresh_callback: RefreshCallback | None = None
     started_at: datetime | None = None
     monotonic_started_at: float | None = None
+    approval_resolver: ApprovalResolver | None = None
 
     def __post_init__(self) -> None:
         if self.started_at is None:
@@ -82,6 +86,18 @@ class StatusAPI:
                 return _error_response(500, "async_refresh_callback", "use async_handle_request for async refresh callbacks")
             return _json_response(202, _refresh_response(result, now=now))
 
+        approval_result = _approval_action_from_route(route)
+        if approval_result is not None:
+            approval_id, approved = approval_result
+            if method != "POST":
+                return _error_response(405, "method_not_allowed", "POST is required for this endpoint")
+            if self.approval_resolver is None:
+                return _error_response(503, "approval_unavailable", "no approval service is configured")
+            resolved = self.approval_resolver(approval_id, approved)
+            if not resolved:
+                return _error_response(404, "approval_not_found", f"approval {approval_id!r} not found or already resolved")
+            return _json_response(200, {"resolved": True, "approved": approved})
+
         issue_identifier = _issue_identifier_from_route(route)
         if issue_identifier is not None:
             if method != "GET":
@@ -97,6 +113,11 @@ class StatusAPI:
         method = method.upper()
         route = _normalized_path(path)
         now = _utc_now()
+
+        # Approval endpoints are safe to handle on the event loop (asyncio.Event.set is safe).
+        if method == "POST" and _approval_action_from_route(route) is not None:
+            return self.handle_request(method, path, body)
+
         if route != f"{API_PREFIX}/refresh" or method != "POST" or self.refresh_callback is None:
             return self.handle_request(method, path, body)
         if not _body_is_empty_json(body):
@@ -237,10 +258,10 @@ def build_issue_detail(state: Any, issue_identifier: str, *, now: datetime | Non
     }
 
 
-def create_fastapi_app(status_api: StatusAPI) -> Any:
+def create_fastapi_app(status_api: StatusAPI, event_bus: "Any | None" = None) -> Any:
     try:
         from fastapi import FastAPI
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import JSONResponse, StreamingResponse
     except ModuleNotFoundError as exc:
         raise RuntimeError("fastapi_unavailable") from exc
 
@@ -256,14 +277,40 @@ def create_fastapi_app(status_api: StatusAPI) -> Any:
         response = status_api.handle_request("GET", f"{API_PREFIX}/state")
         return JSONResponse(response.body, status_code=response.status_code)
 
-    @app.get(f"{API_PREFIX}/{{issue_identifier}}")
-    def issue(issue_identifier: str) -> JSONResponse:
-        response = status_api.handle_request("GET", f"{API_PREFIX}/{issue_identifier}")
-        return JSONResponse(response.body, status_code=response.status_code)
-
     @app.post(f"{API_PREFIX}/refresh")
     async def refresh() -> JSONResponse:
         response = await status_api.async_handle_request("POST", f"{API_PREFIX}/refresh")
+        return JSONResponse(response.body, status_code=response.status_code)
+
+    @app.post(f"{API_PREFIX}/approvals/{{approval_id}}/approve")
+    def approve(approval_id: str) -> JSONResponse:
+        response = status_api.handle_request("POST", f"{API_PREFIX}/approvals/{approval_id}/approve")
+        return JSONResponse(response.body, status_code=response.status_code)
+
+    @app.post(f"{API_PREFIX}/approvals/{{approval_id}}/reject")
+    def reject(approval_id: str) -> JSONResponse:
+        response = status_api.handle_request("POST", f"{API_PREFIX}/approvals/{approval_id}/reject")
+        return JSONResponse(response.body, status_code=response.status_code)
+
+    if event_bus is not None:
+        from symphony.event_bus import event_to_sse_data  # noqa: PLC0415
+
+        @app.get(f"{API_PREFIX}/events")
+        async def sse_events() -> StreamingResponse:
+            async def generate() -> "AsyncIterator[str]":
+                async with event_bus.subscribe() as q:
+                    while True:
+                        try:
+                            event = await asyncio.wait_for(q.get(), timeout=SSE_HEARTBEAT_INTERVAL_S)
+                            yield event_to_sse_data(event)
+                        except asyncio.TimeoutError:
+                            yield event_to_sse_data({"type": "tick_completed"})
+
+            return StreamingResponse(generate(), media_type="text/event-stream")
+
+    @app.get(f"{API_PREFIX}/{{issue_identifier}}")
+    def issue(issue_identifier: str) -> JSONResponse:
+        response = status_api.handle_request("GET", f"{API_PREFIX}/{issue_identifier}")
         return JSONResponse(response.body, status_code=response.status_code)
 
     return app
@@ -523,9 +570,23 @@ def _issue_identifier_from_route(route: str) -> str | None:
     if not route.startswith(prefix):
         return None
     tail = route[len(prefix) :]
-    if not tail or "/" in tail or tail in {"health", "state", "refresh"}:
+    if not tail or "/" in tail or tail in {"health", "state", "refresh", "approvals", "events"}:
         return None
     return tail
+
+
+_APPROVAL_ROUTE_RE = re.compile(
+    r"^" + re.escape(API_PREFIX) + r"/approvals/([^/]+)/(approve|reject)$"
+)
+
+
+def _approval_action_from_route(route: str) -> tuple[str, bool] | None:
+    """Return ``(approval_id, approved)`` if ``route`` is an approval endpoint."""
+    m = _APPROVAL_ROUTE_RE.match(route)
+    if m is None:
+        return None
+    approval_id, action = m.group(1), m.group(2)
+    return approval_id, action == "approve"
 
 
 def _json_response(status_code: int, body: dict[str, Any]) -> HTTPResponse:

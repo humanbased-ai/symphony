@@ -487,8 +487,12 @@ def create_github_client(config: WorkflowConfig) -> GitHubClient | None:
     return None
 
 
-def create_status_api(runtime: SymphonyRuntime) -> StatusAPI:
-    return StatusAPI(runtime.snapshot, refresh_callback=runtime.run_tick)
+def create_status_api(runtime: SymphonyRuntime, *, approval_service: Any = None) -> StatusAPI:
+    # The approval_resolver is always called from inside the asyncio event loop
+    # (via run_coroutine_threadsafe in create_status_http_server, or directly in
+    # the FastAPI handler). asyncio.Event.set() is safe in that context.
+    approval_resolver = approval_service.resolve if approval_service is not None else None
+    return StatusAPI(runtime.snapshot, refresh_callback=runtime.run_tick, approval_resolver=approval_resolver)
 
 
 def create_tracker(config: WorkflowConfig) -> LinearClient:
@@ -671,7 +675,13 @@ def create_status_http_server(
                     loop,
                 )
                 response = future.result()
-            elif method == "POST" and route == "/api/v1/refresh":
+            elif method == "POST" and (
+                route == "/api/v1/refresh"
+                or route.startswith("/api/v1/approvals/")
+            ):
+                # These routes must run on the event loop:
+                # - refresh: async callback
+                # - approvals: asyncio.Event.set() must run inside the loop
                 future = asyncio.run_coroutine_threadsafe(
                     status_api.async_handle_request(method, self.path, body),
                     loop,
@@ -699,7 +709,51 @@ async def run_daemon(
     status_server: StatusServer = serve_status_api,
     webhook_api: WebhookAPI | None = None,
 ) -> None:
-    status_api = create_status_api(runtime)
+    from symphony.event_bus import EventBus  # noqa: PLC0415
+    from symphony.approvals.service import ApprovalService  # noqa: PLC0415
+
+    event_bus = EventBus()
+    approval_service = ApprovalService()
+
+    # Wire EventBus as the runtime event callback so every agent event is
+    # broadcast to all SSE subscribers.
+    approval_timeout_ms = context.config.codex.approval_timeout_ms
+
+    async def _on_event(event: Any) -> None:
+        try:
+            await event_bus.publish({
+                "type": event.type.value if hasattr(event.type, "value") else str(event.type),
+                "message": getattr(event, "message", ""),
+                "issue_id": getattr(event, "issue_id", None),
+                "issue_identifier": getattr(event, "issue_identifier", None),
+                "session_id": getattr(event, "session_id", None),
+            })
+        except Exception:  # noqa: BLE001 - publishing must never crash the runtime.
+            pass
+
+    runtime.on_event = _on_event
+
+    # Wire ApprovalService into the runner when it is a CodexRunner.
+    runner = getattr(runtime, "runner", None)
+    if runner is not None and hasattr(runner, "approval_handler"):
+        async def _approval_handler(session_id: str, issue_identifier: str, prompt: str) -> bool:
+            gate = approval_service.create_gate(
+                session_id, issue_identifier, prompt, timeout_ms=approval_timeout_ms
+            )
+            # Broadcast the approval request to SSE subscribers so dashboards and
+            # notification services can surface it to the operator.
+            await event_bus.publish({
+                "type": "approval_requested",
+                "approval_id": gate.id,
+                "session_id": session_id,
+                "issue_identifier": issue_identifier,
+                "timeout_ms": approval_timeout_ms,
+            })
+            return await approval_service.wait_for_approval(gate)
+
+        runner.approval_handler = _approval_handler
+
+    status_api = create_status_api(runtime, approval_service=approval_service)
     # Single lock shared by the poll loop and every webhook-triggered tick so
     # they cannot execute concurrently against the same runtime state.
     tick_lock = asyncio.Lock()

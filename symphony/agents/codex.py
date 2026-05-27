@@ -37,6 +37,9 @@ FIRST_TURN_REQUEST_ID = 3
 
 DynamicToolExecutor = Callable[[str | None, Any], dict[str, Any]]
 SubprocessFactory = Callable[..., Awaitable["CodexProcess"]]
+# Called when an agent requests approval in "on-request" policy mode.
+# Parameters: (session_id, issue_identifier, prompt) -> approved
+ApprovalHandler = Callable[[str, str, str], Awaitable[bool]]
 
 
 class CodexStreamWriter(Protocol):
@@ -85,6 +88,7 @@ class CodexRunner(CLIAgentRunner):
         linear_client: LinearClient | None = None,
         tool_executor: DynamicToolExecutor | None = None,
         process_factory: SubprocessFactory | None = None,
+        approval_handler: "ApprovalHandler | None" = None,
     ) -> None:
         super().__init__(command)
         self.command_string = command if isinstance(command, str) else shlex.join(tuple(command))
@@ -96,6 +100,7 @@ class CodexRunner(CLIAgentRunner):
         self.linear_client = linear_client
         self.tool_executor = tool_executor
         self.process_factory = process_factory or asyncio.create_subprocess_exec
+        self.approval_handler = approval_handler
 
     async def start_session(
         self,
@@ -450,6 +455,47 @@ class CodexRunner(CLIAgentRunner):
                 data={"event": "approval_auto_approved", "payload": payload, "raw": raw, "decision": decision},
             )
             return "continue"
+
+        # When an approval_handler is wired in, suspend the turn and wait for
+        # operator resolution via the HTTP API or IM bot.
+        if self.approval_handler is not None:
+            prompt = raw  # pass the raw JSON payload as the approval prompt
+            await _emit(
+                on_event,
+                AgentEventType.NOTIFICATION,
+                issue,
+                session_id,
+                message="approval_requested",
+                data={"event": "approval_requested", "payload": payload, "raw": raw},
+            )
+            try:
+                approved = await self.approval_handler(session_id, issue.identifier, prompt)
+            except Exception:  # noqa: BLE001 - approval handler errors are non-recoverable
+                approved = False
+
+            if approved:
+                request_id = payload.get("id")
+                if request_id is not None:
+                    await self._send_request(process, {"id": request_id, "result": {"decision": decision}})
+                await _emit(
+                    on_event,
+                    AgentEventType.NOTIFICATION,
+                    issue,
+                    session_id,
+                    message="approval_granted",
+                    data={"event": "approval_granted", "payload": payload, "raw": raw, "decision": decision},
+                )
+                return "continue"
+
+            await _emit(
+                on_event,
+                AgentEventType.TURN_FAILED,
+                issue,
+                session_id,
+                message="approval_rejected",
+                data={"event": "approval_rejected", "payload": payload, "raw": raw},
+            )
+            return "approval_rejected"
 
         await _emit(
             on_event,

@@ -1176,14 +1176,30 @@ be the first Phase 2 gate before desktop or productionization work expands.
 
 ### 7.5 Phase 3: Operator Visibility And Approval
 
-- [ ] **[HTTP: SSE event stream]** — typed runtime event stream for dashboards and
-  future desktop shell.
+- [x] **[HTTP: SSE event stream] (Linear: IN-158)** — typed runtime event stream
+  for dashboards and future desktop shell. `symphony/event_bus.py` — asyncio
+  pub/sub `EventBus` with bounded per-subscriber queues, `subscribe()` async
+  context manager, and `event_to_sse_data()` serializer. FastAPI
+  `GET /api/v1/events` endpoint with 15 s heartbeat ticks added to
+  `create_fastapi_app()`. Events include session lifecycle, turn results, and
+  approval requests. Shipped in IN-158 PR.
+- [x] **[Core: Approval gate] (Linear: IN-158)** — asyncio.Event-based gate with
+  configurable timeout (fail-closed). `symphony/approvals/service.py` —
+  `ApprovalGate` dataclass with `asyncio.Event result`, `approved: bool | None`,
+  and `to_dict()`. `ApprovalService.wait_for_approval()` uses
+  `asyncio.wait_for` with `approval_timeout_ms / 1000`; timeout sets
+  `approved = False` (fail-closed). `resolve()` is idempotent (returns False for
+  unknown or already-resolved gates). `CodexRunner` gains an optional
+  `approval_handler` callback wired through `run_daemon()`. Approval HTTP
+  endpoints `POST /api/v1/approvals/{id}/approve|reject` added to both
+  `StatusAPI.handle_request()` (thread-safe via
+  `asyncio.run_coroutine_threadsafe`) and `create_fastapi_app()`.
+  `codex.approval_timeout_ms` config field added (default 300 000 ms). Shipped
+  in IN-158 PR.
 - [ ] **[UI: Web dashboard / PWA]** — active issues, status badges, logs,
   retry counts, approval UI, and mobile-responsive layout.
 - [ ] **[Mobile: Push notifications]** — ntfy and generic webhook backends for
   human review, blocked, stalled, and failed sessions.
-- [ ] **[Mobile: Approval gate]** — approve/reject endpoints and deep links that
-  unblock or stop agent turns.
 
 ### 7.6 Phase 4: Multi-Agent Runners
 
