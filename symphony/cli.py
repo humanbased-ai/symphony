@@ -227,7 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the Symphony CLI MVP orchestrator for a repository WORKFLOW.md.",
         epilog=(
             f"Common commands: {cli} onboard, {cli} init, "
-            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md"
+            f"{cli} doctor WORKFLOW.md, {cli} run WORKFLOW.md, {cli} changelog"
         ),
     )
     _add_version_argument(parser)
