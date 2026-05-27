@@ -17,6 +17,7 @@ DEFAULT_HOOK_TIMEOUT_MS = 60_000
 DEFAULT_MAX_CONCURRENT_AGENTS = 10
 DEFAULT_MAX_TURNS = 20
 DEFAULT_MAX_RETRY_BACKOFF_MS = 300_000
+DEFAULT_DISPATCH_STAGGER_MS = 0
 DEFAULT_CODEX_COMMAND = "codex app-server"
 DEFAULT_CODEX_TURN_TIMEOUT_MS = 3_600_000
 DEFAULT_CODEX_READ_TIMEOUT_MS = 5_000
@@ -146,6 +147,7 @@ class AgentConfig:
     max_retry_backoff_ms: int = DEFAULT_MAX_RETRY_BACKOFF_MS
     max_concurrent_agents_by_state: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
     runner: str = "codex"
+    dispatch_stagger_ms: int = DEFAULT_DISPATCH_STAGGER_MS
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "AgentConfig":
@@ -163,6 +165,9 @@ class AgentConfig:
             ),
             max_concurrent_agents_by_state=_state_limit_map(agent.get("max_concurrent_agents_by_state")),
             runner=runner,
+            dispatch_stagger_ms=_non_negative_int(
+                agent.get("dispatch_stagger_ms"), DEFAULT_DISPATCH_STAGGER_MS, "agent_dispatch_stagger_ms"
+            ),
         )
 
 
@@ -410,6 +415,13 @@ def _positive_int(value: Any, default: int, field_name: str) -> int:
     parsed = _int_value(value, default, field_name)
     if parsed <= 0:
         raise ConfigError(f"{field_name}_must_be_positive")
+    return parsed
+
+
+def _non_negative_int(value: Any, default: int, field_name: str) -> int:
+    parsed = _int_value(value, default, field_name)
+    if parsed < 0:
+        raise ConfigError(f"{field_name}_must_be_non_negative")
     return parsed
 
 

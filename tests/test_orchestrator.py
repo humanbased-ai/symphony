@@ -203,5 +203,63 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(set(), state.claimed)
 
 
+class DispatchStaggerTests(unittest.TestCase):
+    def _state(self, stagger_ms: int = 30_000) -> OrchestratorState:
+        config = WorkflowConfig.from_mapping(
+            {
+                "tracker": {
+                    "kind": "linear",
+                    "active_states": ["Todo"],
+                    "terminal_states": ["Done"],
+                },
+                "agent": {
+                    "max_concurrent_agents": 10,
+                    "dispatch_stagger_ms": stagger_ms,
+                },
+                "polling": {"interval_ms": 30_000},
+            }
+        )
+        return OrchestratorState.from_config(config)
+
+    def test_stagger_disabled_selects_all_eligible(self):
+        state = self._state(stagger_ms=0)
+        issues = [issue(f"issue-{i}", f"IN-{i}") for i in range(1, 4)]
+        selected = select_dispatchable(issues, state, now_ms=1_000)
+        self.assertEqual(3, len(selected))
+
+    def test_stagger_limits_to_one_within_window(self):
+        state = self._state(stagger_ms=30_000)
+        # Simulate a recent dispatch 5 seconds ago.
+        state.last_dispatch_at_ms = 0
+        issues = [issue(f"issue-{i}", f"IN-{i}") for i in range(1, 4)]
+        selected = select_dispatchable(issues, state, now_ms=5_000)
+        self.assertEqual(1, len(selected))
+
+    def test_stagger_allows_dispatch_after_window_expires(self):
+        state = self._state(stagger_ms=30_000)
+        state.last_dispatch_at_ms = 0
+        issues = [issue(f"issue-{i}", f"IN-{i}") for i in range(1, 4)]
+        # now_ms >= last_dispatch_at_ms + stagger_ms → stagger window passed
+        selected = select_dispatchable(issues, state, now_ms=30_000)
+        self.assertEqual(3, len(selected))
+
+    def test_stagger_no_limit_when_last_dispatch_is_none(self):
+        state = self._state(stagger_ms=30_000)
+        # last_dispatch_at_ms is None → no prior dispatch, no stagger
+        issues = [issue(f"issue-{i}", f"IN-{i}") for i in range(1, 4)]
+        selected = select_dispatchable(issues, state, now_ms=1_000)
+        self.assertEqual(3, len(selected))
+
+    def test_dispatch_records_last_dispatch_at_ms(self):
+        state = self._state(stagger_ms=30_000)
+        target = issue("issue-1", "IN-1")
+        dispatch_issue(target, state, now_ms=12_345)
+        self.assertEqual(12_345, state.last_dispatch_at_ms)
+
+    def test_config_loads_dispatch_stagger_ms(self):
+        state = self._state(stagger_ms=15_000)
+        self.assertEqual(15_000, state.dispatch_stagger_ms)
+
+
 if __name__ == "__main__":
     unittest.main()

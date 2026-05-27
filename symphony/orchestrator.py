@@ -62,6 +62,8 @@ class OrchestratorState:
     claimed: set[str] = field(default_factory=set)
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
+    dispatch_stagger_ms: int = 0
+    last_dispatch_at_ms: int | None = None
 
     @classmethod
     def from_config(cls, config: WorkflowConfig) -> "OrchestratorState":
@@ -71,6 +73,7 @@ class OrchestratorState:
             active_states=config.tracker.active_states,
             terminal_states=config.tracker.terminal_states,
             max_concurrent_agents_by_state=config.agent.max_concurrent_agents_by_state,
+            dispatch_stagger_ms=config.agent.dispatch_stagger_ms,
         )
 
     def apply_config(self, config: WorkflowConfig) -> None:
@@ -79,6 +82,7 @@ class OrchestratorState:
         self.active_states = config.tracker.active_states
         self.terminal_states = config.tracker.terminal_states
         self.max_concurrent_agents_by_state = config.agent.max_concurrent_agents_by_state
+        self.dispatch_stagger_ms = config.agent.dispatch_stagger_ms
 
     def available_slots(self) -> int:
         return max(self.max_concurrent_agents - len(self.running), 0)
@@ -137,13 +141,29 @@ def _base_issue_eligible(
     return True
 
 
-def select_dispatchable(issues: list[Issue], state: OrchestratorState) -> list[Issue]:
+def select_dispatchable(
+    issues: list[Issue],
+    state: OrchestratorState,
+    *,
+    now_ms: int | None = None,
+) -> list[Issue]:
     selected: list[Issue] = []
     planned_by_state: dict[str, int] = {}
     remaining_global = state.available_slots()
 
+    # Limit to one new dispatch per stagger window to spread cache writes over time.
+    stagger_active = (
+        state.dispatch_stagger_ms > 0
+        and now_ms is not None
+        and state.last_dispatch_at_ms is not None
+        and now_ms - state.last_dispatch_at_ms < state.dispatch_stagger_ms
+    )
+    stagger_limit = 1 if stagger_active else None
+
     for issue in sort_for_dispatch(issues):
         if remaining_global <= 0:
+            break
+        if stagger_limit is not None and len(selected) >= stagger_limit:
             break
         if not _base_issue_eligible(issue, state):
             continue
@@ -174,6 +194,7 @@ def dispatch_issue(
     state.running[issue.id] = entry
     state.claimed.add(issue.id)
     state.retry_attempts.pop(issue.id, None)
+    state.last_dispatch_at_ms = now_ms
     return entry
 
 
