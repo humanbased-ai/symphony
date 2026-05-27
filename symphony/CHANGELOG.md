@@ -3,6 +3,46 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.8 — 2026-05-27
+
+**[PR #136](https://github.com/codatta/symphony/pull/136)**: feat(in-390): run manifest collection and report generation
+
+## Linear
+
+- Issue: IN-390
+
+## Summary
+
+- `symphony/manifest.py` — `ManifestWriter` appends one JSON line per dispatch to `~/.symphony/runs/<project-slug>/<run-id>/manifest.jsonl`; run ID persists across daemon restarts so data isn't fragmented by restarts; `--new-run` starts a fresh run
+- `symphony/report.py` — reads manifest, calls `claude` CLI, writes `report.md`; token costs and counterfactual (no-cache) cost are computed from manifest fields
+- `runtime.py` — accepts optional `manifest_writer`; records each dispatch result (ticket ID, session ID, timing, token usage, PR URL) after the agent returns
+- `cli.py` — wires `ManifestWriter` into `create_runtime` using project slug from config; automatically generates report on daemon stop without prompting; adds `symphony report` command; adds `--new-run` flag
+
+## Decision Context
+
+- Token data sourced from `result.usage` (already flowing through `_run_dispatched_issue`) instead of scanning `~/.claude/` files — more reliable
+- Storage at `~/.symphony/runs/<project-slug>/<run-id>/` — project-isolated
+- Report generated automatically on daemon stop — no prompt, no opt-in flag; cost is ~$0.10 per report, negligible vs run cost
+- Run ID persists in `current_run_id` file — survives restarts without fragmenting the manifest
+- `claude` CLI used for report generation (already a required dependency), no new SDK dependency
+
+## Validation
+
+- `python -c "import symphony.manifest; import symphony.report; import symphony.cli"` passes
+- `symphony report --help` shows correct options
+- `symphony --help` shows `symphony report` in epilog
+
+## UI Evidence
+
+- Not applicable
+
+## Review
+
+- Reviewer / agent requested: —
+- Blocking comments resolved: N/A
+
+---
+
 ## v0.1.0.7 — 2026-05-27
 
 **[PR #135](https://github.com/codatta/symphony/pull/135)**: feat(runtime): auto-detect PR merge conflicts and dispatch resolution agent
