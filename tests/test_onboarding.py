@@ -23,7 +23,7 @@ class OnboardingTests(unittest.TestCase):
         workflow = parse_workflow(content)
 
         self.assertEqual("symphony-ai-agent-orchestration", workflow.config["tracker"]["project_slug"])
-        self.assertEqual(1, workflow.config["agent"]["max_concurrent_agents"])
+        self.assertEqual(3, workflow.config["agent"]["max_concurrent_agents"])
         self.assertEqual("never", workflow.config["codex"]["approval_policy"])
         self.assertIn("{{ issue.identifier }}", workflow.prompt_template)
 

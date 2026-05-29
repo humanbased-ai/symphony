@@ -28,7 +28,7 @@ class WorkflowPreset:
 PRESETS: Mapping[str, WorkflowPreset] = {
     "codex-safe": WorkflowPreset(
         name="codex-safe",
-        max_concurrent_agents=1,
+        max_concurrent_agents=3,
         max_turns=20,
         approval_policy="never",
         thread_sandbox="workspace-write",
