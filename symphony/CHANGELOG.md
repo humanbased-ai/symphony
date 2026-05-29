@@ -3,6 +3,43 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.10 — 2026-05-29
+
+**[PR #142](https://github.com/codatta/symphony/pull/142)**: chore: default codex-safe preset to 3 concurrent agents
+
+## Linear
+
+- Issue: N/A — housekeeping default change, no behavior/contract change beyond the preset value.
+
+## Summary
+
+- Bump the default `codex-safe` onboarding preset from `max_concurrent_agents=1` to `3` (`symphony/onboarding.py`).
+- Freshly generated `WORKFLOW.md` files now dispatch up to three agents in parallel out of the box.
+- All other `codex-safe` defaults are unchanged: 30s polling, `max_turns=20`, `approval_policy=never`, `workspace-write` sandbox.
+
+## Decision Context
+
+- Selected solution: raise the concurrency value on the default preset itself, keeping it as the default preset.
+- Alternatives considered: switch `DEFAULT_PRESET` to `codex-autonomous` (already 3) — rejected because it would also change polling interval (15s) and `max_turns` (30), which is broader than requested.
+- Follow-up work: none.
+
+## Validation
+
+- Targeted checks: `python -m pytest tests/test_onboarding.py -q` — 5 passed.
+- Full gates: not run.
+- Not run: full suite / lint.
+
+## UI Evidence
+
+- Not applicable: backend/config default change only.
+
+## Review
+
+- Reviewer / agent requested: TBD
+- Blocking comments resolved: n/a
+
+---
+
 ## v0.1.0.8 — 2026-05-27
 
 **[PR #136](https://github.com/codatta/symphony/pull/136)**: feat(in-390): run manifest collection and report generation
