@@ -256,6 +256,12 @@ class SymphonyRuntime:
         Called once from the poll-loop startup, after ``record_startup_issues``.
         """
         if self.github_client is None:
+            LOGGER.warning(
+                "Review-state reconciliation skipped: no GitHub client is configured "
+                "(GITHUB_TOKEN did not resolve). PR automation — merge -> done "
+                "transitions, PR feedback polling, and this reconciliation — is disabled "
+                "until a valid GitHub token is provided."
+            )
             return
         if not hasattr(self.tracker, "fetch_issues_by_states"):
             return
