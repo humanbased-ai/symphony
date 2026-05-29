@@ -26,6 +26,18 @@ DEFAULT_CLAUDE_COMMAND = "claude"
 DEFAULT_CLAUDE_TURN_TIMEOUT_MS = 3_600_000
 DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions"
 DEFAULT_MAX_PR_TURNS = 10
+DEFAULT_ACCEPTANCE_REVIEW_SOURCE = "auto"
+DEFAULT_ACCEPTANCE_CONFIDENCE_THRESHOLD = 0.8
+DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS = 300
+DEFAULT_ACCEPTANCE_GUARD_PATHS = (
+    "SPEC.md",
+    "**/migrations/**",
+    ".github/**",
+    "**/secrets/**",
+    "*.pem",
+    "*.key",
+)
+ACCEPTANCE_REVIEW_SOURCES = ("auto", "crosscheck", "none")
 
 
 class ConfigError(ValueError):
@@ -273,6 +285,73 @@ class GitHubConfig:
 
 
 @dataclass(frozen=True)
+class AcceptanceConfig:
+    """Optional final-acceptance gate.
+
+    The acceptance agent re-checks a converged PR against the original issue
+    ("did it do the right thing"), distinct from code review ("is the code
+    good"). It is pluggable on the source of the convergence signal:
+
+    - ``review_source: auto``      use crosscheck's VERDICT when a ``[crosscheck]``
+                                    comment is present, otherwise fall back to the
+                                    silent-runtime signal.
+    - ``review_source: crosscheck`` require a crosscheck ``VERDICT: APPROVE``.
+    - ``review_source: none``       no external reviewer; converge on Symphony
+                                    going quiet (no new feedback, CI green, quiet
+                                    period elapsed).
+
+    Disabled by default. ``auto_merge`` stays ``False`` in Phase 1 — the gate
+    only judges and escalates to a human; it never merges.
+
+    Example WORKFLOW.md / config section::
+
+        acceptance:
+          enabled: true
+          review_source: auto
+          vendor: claude_code
+          auto_merge: false
+          confidence_threshold: 0.8
+          quiet_period_seconds: 300
+          guard_paths:
+            - SPEC.md
+            - "**/migrations/**"
+    """
+
+    enabled: bool = False
+    review_source: str = DEFAULT_ACCEPTANCE_REVIEW_SOURCE
+    vendor: str | None = None
+    auto_merge: bool = False
+    confidence_threshold: float = DEFAULT_ACCEPTANCE_CONFIDENCE_THRESHOLD
+    quiet_period_seconds: int = DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS
+    guard_paths: tuple[str, ...] = DEFAULT_ACCEPTANCE_GUARD_PATHS
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "AcceptanceConfig":
+        acceptance = _mapping(config.get("acceptance"), "acceptance_config_must_be_map")
+        review_source = _string_value(acceptance.get("review_source")) or DEFAULT_ACCEPTANCE_REVIEW_SOURCE
+        if review_source not in ACCEPTANCE_REVIEW_SOURCES:
+            raise ConfigError(f"unsupported_acceptance_review_source:{review_source}")
+        threshold = _ratio_value(
+            acceptance.get("confidence_threshold"),
+            DEFAULT_ACCEPTANCE_CONFIDENCE_THRESHOLD,
+            "acceptance_confidence_threshold",
+        )
+        return cls(
+            enabled=_bool_value(acceptance.get("enabled"), False, "acceptance_enabled"),
+            review_source=review_source,
+            vendor=_string_value(acceptance.get("vendor")),
+            auto_merge=_bool_value(acceptance.get("auto_merge"), False, "acceptance_auto_merge"),
+            confidence_threshold=threshold,
+            quiet_period_seconds=_non_negative_int(
+                acceptance.get("quiet_period_seconds"),
+                DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
+                "acceptance_quiet_period_seconds",
+            ),
+            guard_paths=_string_tuple(acceptance.get("guard_paths"), DEFAULT_ACCEPTANCE_GUARD_PATHS),
+        )
+
+
+@dataclass(frozen=True)
 class WebhookConfig:
     """Optional webhook configuration for receiving Linear events via HTTP push.
 
@@ -326,6 +405,7 @@ class WorkflowConfig:
     claude_code: ClaudeCodeConfig = field(default_factory=ClaudeCodeConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
+    acceptance: AcceptanceConfig = field(default_factory=AcceptanceConfig)
 
     @classmethod
     def from_mapping(
@@ -346,6 +426,7 @@ class WorkflowConfig:
             claude_code=ClaudeCodeConfig.from_mapping(config),
             webhook=WebhookConfig.from_mapping(config, environ=environ),
             github=GitHubConfig.from_mapping(config, environ=environ),
+            acceptance=AcceptanceConfig.from_mapping(config),
         )
 
 
@@ -422,6 +503,39 @@ def _non_negative_int(value: Any, default: int, field_name: str) -> int:
     parsed = _int_value(value, default, field_name)
     if parsed < 0:
         raise ConfigError(f"{field_name}_must_be_non_negative")
+    return parsed
+
+
+def _bool_value(value: Any, default: bool, field_name: str) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1", "on"):
+            return True
+        if lowered in ("false", "no", "0", "off"):
+            return False
+    raise ConfigError(f"{field_name}_must_be_boolean")
+
+
+def _ratio_value(value: Any, default: float, field_name: str) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ConfigError(f"{field_name}_must_be_number")
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError as exc:
+            raise ConfigError(f"{field_name}_must_be_number") from exc
+    else:
+        raise ConfigError(f"{field_name}_must_be_number")
+    if not 0.0 <= parsed <= 1.0:
+        raise ConfigError(f"{field_name}_must_be_between_0_and_1")
     return parsed
 
 

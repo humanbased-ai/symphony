@@ -1185,6 +1185,80 @@ be the first Phase 2 gate before desktop or productionization work expands.
 - [ ] **[Mobile: Approval gate]** — approve/reject endpoints and deep links that
   unblock or stop agent turns.
 
+### 7.5.1 Acceptance Gate (Final Verification)
+
+**Goal:** Close the last open step in the PR lifecycle. Symphony already
+implements, opens PRs, reacts to review feedback, and self-heals CI; the one
+thing it never does is the final **acceptance** — deciding a converged PR
+actually satisfies the original issue and then either merging it or escalating
+to a human. The acceptance agent fills that gap.
+
+**Scope distinction.** Acceptance answers *"did it do the right thing"* (the
+original issue, checked requirement by requirement) — deliberately distinct from
+code review, which answers *"is the code good"*. Code can be clean yet solve the
+wrong problem or miss a requirement, so the acceptance agent re-derives the
+requirements from the issue and re-checks them; a passing code review is not
+treated as proof the work is correct.
+
+**Acceptance dimensions** (what the judge checks, issue-anchored not code-style):
+requirements done item-by-item; solving the right problem; explicit acceptance
+criteria; scope (nothing missing, no unrelated scope creep); evidence it
+actually works (not just "claimed done"); no regressions; and — repo-specific —
+`prd.md`/contract sync with no edits to read-only `SPEC.md`. Code style, naming,
+latent bugs, and performance are **out of scope** (that is code review's job).
+
+**Pluggable convergence (when the judge runs).** The hard part is knowing the
+implement/review loop has actually settled. The signal source is pluggable via
+`acceptance.review_source`:
+
+- **crosscheck branch** — when `@motivation-labs/crosscheck` is in use, it posts
+  a `[crosscheck]` comment ending in `VERDICT: APPROVE | NEEDS WORK | BLOCK`
+  (and an ndjson log with `review_complete{verdict}`/`pr_received{sha}`).
+  crosscheck does **not** submit a GitHub-native approved review, so the gate
+  parses the `VERDICT:` line (primary) or the ndjson log (same-host fallback) —
+  it does **not** rely on `PRReviewEvent approved` or LLM intent-guessing of the
+  comment. Converge only when the latest verdict is `APPROVE`, it covers the
+  current head sha (crosscheck re-reviews per push, giving precise sha binding),
+  no `cr-autofix` PR is still open, and a quiet period has elapsed.
+- **silent branch** — no external reviewer; converge when Symphony itself goes
+  quiet: no new feedback this tick, CI green, the PR-turn counter not still
+  advancing, and a quiet period elapsed.
+- `auto` uses crosscheck when a `[crosscheck]` comment is present, else silent.
+
+**Layering.** Verdict generation (a one-shot, no-session judge mirroring
+`APIAgentRunner`) is pure judgment and never touches merge/Linear. The decision
++ execution (escalate / bounce back / — later — merge) lives in the runtime, the
+only layer allowed to change tracker state or merge. The judge vendor is
+configured independently and should differ from both the implementer and the
+crosscheck reviewer to avoid an AI grading itself.
+
+**Guard rails.** Touching sensitive paths (`SPEC.md`, migrations, `.github/**`,
+secrets, key files, deletes, oversized diffs) forces human escalation regardless
+of confidence. Bounce-back reuses the existing `max_pr_turns` budget rather than
+opening a parallel counter, so acceptance cannot loop past the turn ceiling.
+
+**Phased rollout.** Phase 1 judges only and **always escalates to a human**
+(`auto_merge` stays false) to gather calibration data on agreement before any
+autonomy. Phase 2 adds `github/client.py merge_pr()` (squash, behind GitHub
+branch protection / required checks so a misjudgement still cannot merge) and
+opens auto-merge only for high-confidence, no-guard-path PRs; on merge the
+existing poller → `_handle_pr_closed` → `update_issue_state_by_name(done_state)`
+path already flips Linear to done. A later phase adds Telegram/Slack approval
+buttons.
+
+- [x] **[Acceptance: config + convergence core]** — pluggable `acceptance`
+  config block (disabled by default, `auto_merge` false), and the pure I/O-free
+  core in `symphony/acceptance.py`: crosscheck `VERDICT:` comment parsing,
+  ndjson log fallback with sha binding, guard-path detection, and convergence
+  evaluation for both the crosscheck and silent branches. Unit-tested in
+  `tests/test_acceptance.py`.
+- [ ] **[Acceptance: runtime wiring + judge]** — gather convergence inputs in
+  the PR poller, dispatch a one-shot acceptance judge (issue text + diff +
+  crosscheck verdict) at the post-poll/approval quiet point, and post a
+  human-readable verdict comment that escalates. Reuse `max_pr_turns`.
+- [ ] **[Acceptance: structured verdict + auto-merge]** — Phase 2 machine-
+  readable verdict, `merge_pr()`, and gated auto-merge for the safest PRs.
+
 ### 7.6 Phase 4: Multi-Agent Runners
 
 - [ ] **[Agent: Claude Code]** — Anthropic/Claude Code runner with streaming,
