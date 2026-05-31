@@ -428,7 +428,7 @@ Two modes are supported and coexist:
 | **Personal API key** | `LINEAR_API_KEY` env var or `tracker.api_key` in WORKFLOW.md | Env / WORKFLOW.md |
 | **OAuth 2.0** | Full consent flow via Linear Application; bearer token stored securely | macOS Keychain (desktop) or `~/.symphony/credentials.json` (CLI) |
 
-Token resolution order (first non-empty wins): env var → WORKFLOW.md → Keychain → credentials file. The `LinearClient` never reads credentials directly — it receives a resolved token from `TokenStore`.
+Token resolution order (first non-empty wins): env var → WORKFLOW.md → Keychain → credentials file. The `LinearClient` never reads credentials directly — it receives a resolved token from `TokenStore`. When resolution finds an **expired** OAuth token that carries a `refresh_token` and `LINEAR_CLIENT_ID` is set, `TokenStore` transparently refreshes it via the Linear refresh grant, persists the new token back to the same store, and returns it — so access tokens refresh automatically before any tracker/API call fails. If the refresh fails (or no client id / refresh token is available), resolution falls through to the credentials-file `api_key`, preserving the headless/CI fallback.
 
 **OAuth scopes required:** `read`, `write` (issue state + comments), optionally `app:assignIssues`.
 
@@ -1163,10 +1163,13 @@ be the first Phase 2 gate before desktop or productionization work expands.
   store interface; credentials-file adapter with owner-only permissions; macOS
   Keychain adapter via `keyring`; OAuth token fields (access, refresh, expiry);
   redaction utilities; status metadata without exposing token material.
-- [ ] **[Linear: OAuth 2.0 / PKCE] (Linear: IN-165)** — PKCE authorization code
-  flow, token exchange and refresh, `symphony auth login/status/revoke` commands,
-  HTTP endpoints (`/api/v1/linear/auth/start|callback|status|revoke`), and
-  personal API-key fallback for headless/CI use.
+- [x] **[Linear: OAuth 2.0 / PKCE] (Linear: IN-165)** — PKCE authorization code
+  flow (`symphony/tracker/linear_oauth.py`), token exchange and automatic refresh
+  wired into `TokenStore` resolution, `symphony auth login/status/revoke` commands,
+  HTTP endpoints (`/api/v1/linear/auth/start|callback|status|revoke` via `OAuthAPI`,
+  served alongside the status API), and personal API-key fallback for headless/CI
+  use. No token material is logged or returned in any API response. Pure stdlib
+  `urllib`; no new runtime dependencies.
 - [ ] **[Linear: Webhooks] (Linear: IN-166)** — webhook registration, HMAC-SHA256
   verification, async event routing as immediate orchestrator trigger, idempotent
   re-registration on startup, and polling fallback when webhooks are disabled.
