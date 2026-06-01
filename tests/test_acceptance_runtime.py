@@ -77,6 +77,11 @@ class FakeGitHubClient:
         self.diff = diff
         self.posted_comments: list[tuple[int, str]] = []
         self.post_pr_comment_should_succeed = True
+        # Auto-merge call recording. ``merge_calls`` lets tests assert that
+        # the runtime forwards the head sha (so a stale-sha merge gets caught
+        # by GitHub's ``required_head`` check rather than slipping past us).
+        self.merge_calls: list[dict] = []
+        self.merge_pr_should_succeed = True
 
     def get_pr(self, pr_number: int) -> dict:
         return dict(self.pr)
@@ -93,6 +98,22 @@ class FakeGitHubClient:
     def post_pr_comment(self, pr_number: int, body: str) -> bool:
         self.posted_comments.append((pr_number, body))
         return self.post_pr_comment_should_succeed
+
+    def merge_pr(
+        self,
+        pr_number: int,
+        *,
+        sha: str | None = None,
+        merge_method: str = "squash",
+        commit_title: str | None = None,
+    ) -> bool:
+        self.merge_calls.append({
+            "pr_number": pr_number,
+            "sha": sha,
+            "merge_method": merge_method,
+            "commit_title": commit_title,
+        })
+        return self.merge_pr_should_succeed
 
 
 class StubJudge:
@@ -316,14 +337,36 @@ class RenderVerdictCommentTests(unittest.TestCase):
         self.assertIn("Guard-rail paths", body)
         self.assertIn("`SPEC.md`", body)
 
-    def test_includes_escalation_notice_in_phase_1(self):
+    def test_includes_escalation_notice_when_not_merged(self):
         body = render_verdict_comment(self._verdict(), escalation=True)
-        self.assertIn("Phase 1", body)
         self.assertIn("not auto-merge", body)
+        self.assertIn("human reviewer", body)
+        self.assertNotIn("Auto-merged", body)
 
     def test_omits_escalation_when_disabled(self):
         body = render_verdict_comment(self._verdict(), escalation=False)
-        self.assertNotIn("Phase 1", body)
+        self.assertNotIn("human reviewer", body)
+        self.assertNotIn("Auto-merged", body)
+
+    def test_celebrates_auto_merge_when_merged_true(self):
+        """When auto-merge fires the comment must say so explicitly and skip
+        the human-escalation tail — otherwise reviewers see contradictory
+        text on a merged PR."""
+        body = render_verdict_comment(self._verdict(), merged=True, escalation=False)
+        self.assertIn("Auto-merged", body)
+        self.assertIn("squash", body.lower())
+        self.assertNotIn("human reviewer makes the final call", body)
+
+    def test_names_skip_reason_when_provided(self):
+        """The auto-merge skip reason must surface inside the PR comment so
+        the gate's behavior is auditable from the PR thread alone."""
+        body = render_verdict_comment(
+            self._verdict(),
+            escalation=True,
+            auto_merge_skip_reason="verdict is uncertain, not pass",
+        )
+        self.assertIn("Auto-merge did not fire", body)
+        self.assertIn("uncertain", body)
 
 
 # --------------------------------------------------------------------------- #
@@ -610,11 +653,13 @@ class MaybeRunAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(judged_sha, "head-1")
         assert verdict is not None
         self.assertEqual(verdict.overall, "pass")
-        # Comment body carries the bot marker and Phase 1 escalation text.
+        # Comment body carries the bot marker and escalates to a human because
+        # ``auto_merge`` is False by default — no merge was attempted.
         _, body = gh.posted_comments[0]
         self.assertTrue(body.startswith(SYMPHONY_BOT_MARKER))
         self.assertIn("PASS", body)
-        self.assertIn("Phase 1", body)
+        self.assertIn("not auto-merge", body)
+        self.assertEqual(gh.merge_calls, [])
 
     async def test_sensitive_paths_force_uncertain_even_when_judge_says_pass(self):
         # Diff touches SPEC.md (default guard pattern) but judge ignored it.
@@ -704,6 +749,149 @@ class MaybeRunAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         # judged_sha is None on post failure so the next tick can retry.
         self.assertIsNone(judged_sha)
         self.assertIsNotNone(verdict)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 — auto-merge
+# --------------------------------------------------------------------------- #
+
+
+def _make_snap() -> ConvergenceSnapshot:
+    return ConvergenceSnapshot(
+        last_feedback_at=datetime(2026, 5, 29, 0, 0, 0, tzinfo=UTC),
+        pr_turns_observed=1,
+    )
+
+
+class AutoMergeTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 2 auto-merge fires only on the four-condition gate; everything
+    else still posts the verdict comment and escalates to a human. The tests
+    walk each precondition separately so a regression points at the exact
+    rule that broke."""
+
+    async def _run(
+        self,
+        *,
+        auto_merge: bool,
+        confidence_threshold: float = 0.8,
+        diff: str = "diff --git a/foo.py b/foo.py\n+y\n",
+        judge_response: str | None = None,
+        pr_head_sha: str = "head-auto",
+        merge_succeeds: bool = True,
+    ):
+        gh = FakeGitHubClient(
+            pr={"head": {"sha": pr_head_sha}, "updated_at": "2026-05-30T00:00:00Z"},
+            diff=diff,
+        )
+        gh.merge_pr_should_succeed = merge_succeeds
+        cfg = AcceptanceConfig(
+            enabled=True,
+            review_source="none",
+            quiet_period_seconds=60,
+            auto_merge=auto_merge,
+            confidence_threshold=confidence_threshold,
+        )
+        judge = StubJudge(response=judge_response or _passing_judge_response())
+        _, judged_sha, verdict, _ = await maybe_run_acceptance(
+            github_client=gh,
+            judge=judge,  # type: ignore[arg-type]
+            config=cfg,
+            issue=_issue(),
+            branch="branch-1",
+            pr_number=42,
+            pr_turns=1,
+            snapshot=_make_snap(),
+            now=datetime(2026, 5, 30, 0, 0, 0, tzinfo=UTC),
+            saw_new_feedback_this_tick=False,
+            already_judged_sha=None,
+        )
+        return gh, verdict, judged_sha
+
+    async def test_disabled_auto_merge_never_calls_merge_pr(self):
+        """auto_merge=False is the production safe default — pass verdicts
+        still escalate to a human, no merge call goes out."""
+        gh, verdict, _ = await self._run(auto_merge=False)
+        assert verdict is not None
+        self.assertEqual(verdict.overall, "pass")
+        self.assertEqual(gh.merge_calls, [])
+        self.assertIn("not auto-merge", gh.posted_comments[0][1])
+
+    async def test_pass_high_confidence_no_guards_triggers_squash_merge(self):
+        """The full auto-merge path: every precondition met, ``merge_pr``
+        succeeds, comment celebrates the auto-merge."""
+        gh, verdict, judged_sha = await self._run(auto_merge=True)
+        assert verdict is not None
+        self.assertEqual(verdict.overall, "pass")
+        self.assertEqual(len(gh.merge_calls), 1)
+        call = gh.merge_calls[0]
+        # The runtime MUST forward the head sha so GitHub's required_head
+        # check tells us if a new commit landed after the verdict.
+        self.assertEqual(call["sha"], "head-auto")
+        self.assertEqual(call["merge_method"], "squash")
+        self.assertEqual(call["pr_number"], 42)
+        self.assertEqual(judged_sha, "head-auto")
+        body = gh.posted_comments[0][1]
+        self.assertIn("Auto-merged", body)
+        self.assertNotIn("human reviewer makes the final call", body)
+
+    async def test_uncertain_verdict_blocks_auto_merge(self):
+        """Verdict overall != pass means the judge had doubts. Skip the merge
+        and explain why on the PR."""
+        uncertain_response = _passing_judge_response().replace(
+            '"overall": "pass"', '"overall": "uncertain"'
+        )
+        gh, verdict, _ = await self._run(
+            auto_merge=True, judge_response=uncertain_response
+        )
+        assert verdict is not None
+        self.assertEqual(verdict.overall, "uncertain")
+        self.assertEqual(gh.merge_calls, [])
+        body = gh.posted_comments[0][1]
+        self.assertIn("Auto-merge did not fire", body)
+        self.assertIn("not pass", body)
+
+    async def test_low_confidence_blocks_auto_merge(self):
+        """Confidence threshold is the calibration knob — sub-threshold pass
+        verdicts must NOT auto-merge."""
+        low_conf_response = _passing_judge_response().replace(
+            '"confidence": 0.92', '"confidence": 0.50'
+        )
+        gh, verdict, _ = await self._run(
+            auto_merge=True,
+            confidence_threshold=0.8,
+            judge_response=low_conf_response,
+        )
+        assert verdict is not None
+        self.assertEqual(gh.merge_calls, [])
+        body = gh.posted_comments[0][1]
+        self.assertIn("below the configured threshold", body)
+        self.assertIn("0.80", body)
+
+    async def test_sensitive_paths_block_auto_merge(self):
+        """Even with a perfect verdict, touching a guard-rail path must
+        force human review — the gate's whole point is that some changes
+        are too costly to autonomously merge."""
+        sensitive_diff = "diff --git a/SPEC.md b/SPEC.md\n+rule change\n"
+        gh, verdict, _ = await self._run(auto_merge=True, diff=sensitive_diff)
+        assert verdict is not None
+        # Guard-rail override has already flipped this to uncertain, so the
+        # first skip reason hit is the verdict, not the paths. Either way:
+        # no merge, comment explains.
+        self.assertEqual(gh.merge_calls, [])
+        body = gh.posted_comments[0][1]
+        self.assertIn("Auto-merge did not fire", body)
+
+    async def test_github_rejects_merge_falls_back_to_escalation(self):
+        """GitHub branch protection / required reviews / stale head sha can
+        all reject the merge. Symphony surfaces the rejection on the PR so
+        a human knows the gate tried and where to look."""
+        gh, verdict, _ = await self._run(auto_merge=True, merge_succeeds=False)
+        assert verdict is not None
+        # We DID try to merge — the call was made — but GH said no.
+        self.assertEqual(len(gh.merge_calls), 1)
+        body = gh.posted_comments[0][1]
+        self.assertIn("GitHub rejected", body)
+        self.assertNotIn("Auto-merged by acceptance gate", body)
 
 
 if __name__ == "__main__":

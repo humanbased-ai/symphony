@@ -59,6 +59,40 @@ class GitHubClient:
         except GitHubClientError:
             return False
 
+    def merge_pr(
+        self,
+        pr_number: int,
+        *,
+        sha: str | None = None,
+        merge_method: str = "squash",
+        commit_title: str | None = None,
+    ) -> bool:
+        """Merge a PR. Returns True on success.
+
+        ``sha`` is forwarded to GitHub's ``required_head`` check: the merge
+        request fails if the PR head has advanced past this sha. The
+        acceptance runtime passes the sha it just judged, which closes the
+        race between verdict and merge — a human or auto-fix push after the
+        judge ran will block the merge instead of merging unreviewed code.
+        ``merge_method`` defaults to ``squash`` because squash merges keep
+        ``main``'s history flat regardless of how many turns the implementer
+        agent took on the feature branch.
+        """
+        payload: dict[str, Any] = {"merge_method": merge_method}
+        if sha is not None:
+            payload["sha"] = sha
+        if commit_title is not None:
+            payload["commit_title"] = commit_title
+        try:
+            self._request(
+                "PUT",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge",
+                payload,
+            )
+            return True
+        except GitHubClientError:
+            return False
+
     def find_open_pr_for_branch(self, branch: str) -> int | None:
         """Return the PR number of the first open PR with the given head branch, or None."""
         try:

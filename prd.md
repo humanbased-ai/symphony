@@ -1272,8 +1272,30 @@ buttons.
   parsing, prompt/comment rendering, diff path extraction, convergence-input
   gathering, and the orchestrator's converged / not-converged / already-
   judged / sensitive-path / unparseable / post-failure paths).
-- [ ] **[Acceptance: structured verdict + auto-merge]** — Phase 2 machine-
-  readable verdict, `merge_pr()`, and gated auto-merge for the safest PRs.
+- [x] **[Acceptance: structured verdict + auto-merge]** — Phase 2 auto-merge
+  shipped. `GitHubClient.merge_pr()` calls
+  `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with `merge_method=squash` and
+  forwards the head sha to GitHub's `required_head` check so a commit pushed
+  after the judge ran blocks the merge instead of slipping through.
+  `acceptance_runtime.maybe_run_acceptance` fires the merge only when **all
+  four** preconditions hold: `config.acceptance.auto_merge` is true (off by
+  default), `verdict.overall == "pass"`,
+  `verdict.confidence >= config.acceptance.confidence_threshold` (default
+  0.80), and `verdict.touched_sensitive_paths` is empty. Any failed
+  precondition skips the merge and the PR comment names the specific reason
+  (e.g. *"overall confidence 0.65 is below the configured threshold 0.80"*),
+  so the gate's behavior is auditable from the PR thread alone. When the
+  merge call itself returns False — GitHub branch protection, required
+  reviews, or a stale head sha — the runtime falls back to the human-
+  escalation comment path; nothing silently fails. `auto_merge` stays
+  `False` by default in `AcceptanceConfig` and in the onboarding scaffold
+  (`symphony init` writes `auto_merge: false` even when the user opts the
+  gate in), because auto-merge is the only Symphony feature that
+  irreversibly touches `main` — flipping it on must be an explicit edit.
+  Tested in `tests/test_acceptance_runtime.py`: the new `AutoMergeTests`
+  suite walks each of the four preconditions plus the GitHub-rejects-merge
+  fallback, and `RenderVerdictCommentTests` covers the merged / skip-reason
+  comment shapes.
 
 ### 7.6 Phase 4: Multi-Agent Runners
 
