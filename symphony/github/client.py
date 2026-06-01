@@ -123,7 +123,21 @@ class GitHubClient:
             return None
 
     def get_pr_failed_check_runs(self, pr_number: int) -> list[dict]:
-        """Return failed check runs for a PR's HEAD commit as list of {id, name, details_url}."""
+        """Return failed check runs for a PR's HEAD commit as list of
+        ``{id, name, details_url, summary}``.
+
+        GitHub's ``?filter=latest`` returns the latest check run **per
+        check_suite**, not per check name. When the same check (e.g.
+        ``validate-pr-description``) is re-triggered against the same
+        commit via a different mechanism — a PR description edit
+        spawning a new check_suite, a manual re-run, a workflow_dispatch
+        — the response contains multiple entries for that name: the old
+        failure AND the new success. Without per-name deduplication the
+        old failure looks "still failing" forever and the silent
+        acceptance branch never sees ``ci_green=True``. Keep only the
+        most recent run per name (by ``started_at``) so a successful
+        re-run actually supersedes the earlier failure.
+        """
         try:
             pr_data = self.get_pr(pr_number)
             if not pr_data:
@@ -137,6 +151,17 @@ class GitHubClient:
                 f"?filter=latest&per_page=100",
             )
             runs = result.get("check_runs", []) if isinstance(result, dict) else []
+            latest_by_name: dict[str, dict] = {}
+            for r in runs:
+                if not isinstance(r, dict):
+                    continue
+                name = str(r.get("name") or "")
+                if not name:
+                    continue
+                started = str(r.get("started_at") or "")
+                prev = latest_by_name.get(name)
+                if prev is None or started > str(prev.get("started_at") or ""):
+                    latest_by_name[name] = r
             return [
                 {
                     "id": int(r["id"]),
@@ -144,7 +169,7 @@ class GitHubClient:
                     "details_url": str(r.get("details_url") or r.get("html_url") or ""),
                     "summary": str((r.get("output") or {}).get("summary") or ""),
                 }
-                for r in runs
+                for r in latest_by_name.values()
                 if str(r.get("conclusion") or "") == "failure"
             ]
         except (GitHubClientError, KeyError, TypeError, ValueError):
