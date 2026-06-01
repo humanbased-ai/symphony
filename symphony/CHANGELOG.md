@@ -3,6 +3,53 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.13 — 2026-06-01
+
+**[PR #148](https://github.com/humanbased-ai/symphony/pull/148)**: feat(acceptance): Phase 2 — gated auto-merge for the safest PRs
+
+## Linear
+
+- Issue: N/A — Phase 2 follow-up to merged PR #138/#145/#146. Closes the `[Acceptance: structured verdict + auto-merge]` task in `prd.md` §7.5.1.
+
+## Summary
+
+- ``GitHubClient.merge_pr(pr_number, *, sha=None, merge_method="squash", commit_title=None)`` — squash-merges via `PUT /repos/{owner}/{repo}/pulls/{n}/merge`. The optional ``sha`` is forwarded to GitHub's ``required_head`` check so a commit pushed after the judge ran blocks the merge instead of slipping past Symphony.
+- ``maybe_run_acceptance`` now fires auto-merge only when **all four** preconditions hold:
+  1. ``config.acceptance.auto_merge`` is true (default false — flipping it on requires an explicit WORKFLOW.md edit)
+  2. ``verdict.overall == "pass"``
+  3. ``verdict.confidence >= config.acceptance.confidence_threshold`` (default 0.80)
+  4. ``verdict.touched_sensitive_paths`` is empty
+- Any failed precondition skips the merge; `_auto_merge_skip_reason` produces a human-readable explanation that the PR comment surfaces (e.g. *"overall confidence 0.65 is below the configured threshold 0.80"*). When ``merge_pr`` itself returns False (GH branch protection / stale head sha / missing required reviews), we fall back to the human-escalation comment with the rejection reason named.
+- ``render_verdict_comment`` gains ``merged`` and ``auto_merge_skip_reason`` parameters. Merged comments celebrate the auto-merge and skip the human-escalation tail; non-merged comments surface the skip reason so the gate's behavior is auditable from the PR thread alone.
+
+## Decision Context
+
+- **Default off** rationale: auto-merge is the only Symphony feature that irreversibly touches ``main``. Flipping it on must remain an explicit edit, not a side-effect of enabling acceptance. The onboarding scaffold from PR #147 already writes ``auto_merge: false`` for this reason.
+- **Squash merge** rationale: implementer agents typically take multiple turns on a feature branch (initial diff, CI fixes, review responses). Squashing keeps ``main`` history flat and readable; ``merge_method`` is configurable on the client for callers that want a different mode.
+- **Head-sha forwarding** rationale: there is a window between the judge running and the merge call landing — closing that race with GitHub's ``required_head`` field is cheaper than re-judging.
+- Alternatives considered:
+  - Calibration-data collection before unlocking auto-merge — rejected for this PR: collection can stand up alongside auto-merge once enough verdicts exist to measure. Shipping auto-merge first lets users start generating that data on real PRs.
+  - Server-side / external decision (a separate "auto-merger" workflow) — rejected: the acceptance verdict already carries the four signals we need; routing through another component buys nothing but latency.
+  - Merging on ``uncertain`` with very high confidence — rejected: ``uncertain`` exists specifically because the judge has doubts. Hard-gating on ``pass`` keeps the contract simple.
+- Follow-up work: bounce-back (judge ``fail`` → re-implement with ``max_pr_turns``); structured calibration metrics for tuning ``confidence_threshold``.
+
+## Validation
+
+- Targeted checks: ``uv run python -m unittest tests.test_acceptance tests.test_acceptance_runtime`` — 76 tests pass (30 core + 46 runtime, of which 8 new auto-merge / comment-shape tests).
+- New ``AutoMergeTests`` suite walks each of the four preconditions plus the GitHub-rejects-merge fallback. ``RenderVerdictCommentTests`` covers the merged / skip-reason comment shapes.
+- Not run: live end-to-end against a real PR (auto-merge would actually merge — would need a sacrificial PR). Live validation is deferred until ``auto_merge`` is enabled in the production WORKFLOW.md.
+
+## UI Evidence
+
+- Not applicable: backend-only change. The PR comment text now varies based on whether auto-merge fired or not.
+
+## Review
+
+- Reviewer / agent requested: ``@motivation-labs/crosscheck``.
+- Blocking comments resolved: N/A — new PR.
+
+---
+
 ## v0.1.0.11 — 2026-06-01
 
 **[PR #145](https://github.com/humanbased-ai/symphony/pull/145)**: feat(acceptance): judge system prompt with scope-boundary tests
