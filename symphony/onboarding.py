@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Literal, Mapping
 
 import yaml
 
@@ -13,6 +14,18 @@ DEFAULT_WORKFLOW_PATH = "WORKFLOW.md"
 DEFAULT_ACTIVE_STATES = ("Todo", "In Progress")
 DEFAULT_TERMINAL_STATES = ("Done", "Canceled", "Duplicate")
 DEFAULT_RUNNER = "claude_code"
+
+# IN-285: code review strategy in WORKFLOW.md. Cross-vendor wires the primary
+# runner against the OTHER vendor's reviewer (the crosscheck pipeline runs as
+# a separate dispatch after the implementing PR opens). Single-vendor uses the
+# same vendor for review. Skip writes nothing.
+ReviewStrategy = Literal["cross-vendor", "single-vendor", "skip"]
+DEFAULT_REVIEW_STRATEGY: ReviewStrategy = "skip"
+
+_RUNNER_COMMANDS: Mapping[str, str] = {
+    "claude_code": "claude",
+    "codex": "codex",
+}
 
 
 @dataclass(frozen=True)
@@ -64,6 +77,7 @@ class InitConfig:
     runner: str = DEFAULT_RUNNER
     github_org: str = ""
     github_repo: str = ""
+    review_strategy: ReviewStrategy = DEFAULT_REVIEW_STRATEGY
 
 
 class OnboardingError(ValueError):
@@ -123,7 +137,42 @@ def generate_workflow(config: InitConfig) -> str:
         }
         prompt = _CODEX_PROMPT
 
+    # IN-285: cross-vendor / single-vendor review block. Skip writes nothing.
+    review_block = _review_block(runner, config.review_strategy)
+    if review_block is not None:
+        front_matter["review"] = review_block
+
     return f"---\n{yaml.safe_dump(front_matter, sort_keys=False)}---\n\n{prompt}"
+
+
+def detect_available_runners() -> tuple[str, ...]:
+    """Return the agent runners whose CLI is on $PATH right now (IN-285).
+
+    Used by the onboard flow to decide whether to show an interactive picker
+    (both available) or silently default (only one). The check is per
+    invocation; PATH changes between runs are picked up automatically.
+    """
+
+    return tuple(name for name, command in _RUNNER_COMMANDS.items() if shutil.which(command))
+
+
+def _review_block(primary_runner: str, strategy: ReviewStrategy) -> dict[str, object] | None:
+    if strategy == "skip":
+        return None
+    if strategy == "single-vendor":
+        return {
+            "enabled": True,
+            "strategy": "single-vendor",
+            "reviewer": primary_runner,
+        }
+    if strategy == "cross-vendor":
+        reviewer = "codex" if primary_runner == "claude_code" else "claude_code"
+        return {
+            "enabled": True,
+            "strategy": "cross-vendor",
+            "reviewer": reviewer,
+        }
+    raise OnboardingError(f"unknown_review_strategy:{strategy}")
 
 
 _CODEX_PROMPT = """You are working on Linear issue {{ issue.identifier }}.
