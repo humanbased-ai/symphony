@@ -1266,12 +1266,25 @@ buttons.
   as feedback. Phase 1 always escalates: the comment trails a "Symphony does
   not auto-merge" notice and no merge call is wired. Re-judging the same
   head sha is suppressed by tracking the last judged sha per branch.
-  Bounce-back (judge `fail` → re-implement, reusing `max_pr_turns`) is not
-  yet wired and remains a follow-up. Tested in
-  `tests/test_acceptance_runtime.py` (38 unit tests covering verdict
-  parsing, prompt/comment rendering, diff path extraction, convergence-input
-  gathering, and the orchestrator's converged / not-converged / already-
-  judged / sensitive-path / unparseable / post-failure paths).
+  Bounce-back: when the judge returns `fail`, the runtime calls
+  `_handle_pr_feedback` with the verdict's unmet checks rendered through
+  `render_bounce_back_feedback`, so the implementer agent gets another
+  turn on the same channel CI failures and reviewer comments use. Only
+  `fail` triggers bounce-back; `uncertain` stays human-escalated because
+  retrying cannot resolve the judge's doubt. The existing `max_pr_turns`
+  budget caps the loop — once exhausted, the standard "Maximum feedback
+  iterations reached" comment escalates to a human. Startup recovery:
+  `SymphonyRuntime.record_startup_open_prs()` scans tracker review-state
+  issues at boot and re-seeds `_branch_to_issue` / `_branch_pr_numbers`
+  from the ones with an open PR, so a daemon restart does not orphan
+  in-flight PRs from acceptance / PR-poll tracking. Tested in
+  `tests/test_acceptance_runtime.py` and `tests/test_pr_polling.py`
+  (covering verdict parsing, prompt/comment rendering, diff path
+  extraction, convergence-input gathering, the orchestrator's
+  converged / not-converged / already-judged / sensitive-path /
+  unparseable / post-failure paths, plus bounce-back fail-vs-uncertain
+  routing, max_pr_turns capping, and startup-recovery branch / PR /
+  tracker-error / no-client cases).
 - [x] **[Acceptance: structured verdict + auto-merge]** — Phase 2 auto-merge
   shipped. `GitHubClient.merge_pr()` calls
   `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with `merge_method=squash` and
@@ -1287,8 +1300,17 @@ buttons.
   so the gate's behavior is auditable from the PR thread alone. When the
   merge call itself returns False — GitHub branch protection, required
   reviews, or a stale head sha — the runtime falls back to the human-
-  escalation comment path; nothing silently fails. `auto_merge` stays
-  `False` by default in `AcceptanceConfig` and in the onboarding scaffold
+  escalation comment path; nothing silently fails. On a successful
+  auto-merge the runtime immediately calls
+  `tracker.update_issue_state_by_name(issue.id, done_state)` in the same
+  tick instead of waiting for the PR-poll loop's next `_handle_pr_closed`
+  round-trip; the loop is best-effort (it only fires while
+  `_branch_to_issue` still carries the branch, which is not guaranteed
+  after a daemon restart or out-of-band merge), so the direct
+  transition closes the gap. Tracker failures (return False or raise)
+  log a warning and are otherwise swallowed — a tracker hiccup must
+  not undo a successful GitHub merge. `auto_merge` stays `False` by
+  default in `AcceptanceConfig` and in the onboarding scaffold
   (`symphony init` writes `auto_merge: false` even when the user opts the
   gate in), because auto-merge is the only Symphony feature that
   irreversibly touches `main` — flipping it on must be an explicit edit.
