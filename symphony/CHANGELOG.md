@@ -3,6 +3,44 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.15 — 2026-06-01
+
+**[PR #150](https://github.com/humanbased-ai/symphony/pull/150)**: fix(github): dedup check runs by name in get_pr_failed_check_runs
+
+## Linear
+
+- Issue: N/A — bug surfaced during the acceptance-gate end-to-end on PR #149 (the verification run for the Phase 2 auto-merge PR #148).
+
+## Summary
+
+- GitHub's ``?filter=latest`` on ``/repos/{owner}/{repo}/commits/{sha}/check-runs`` returns the latest run **per check_suite**, not per check name. When the same check (e.g. ``validate-pr-description``) is re-run on the same commit via a different mechanism — a PR description edit spawning a new check_suite, a manual re-run, a workflow_dispatch — the response carries multiple entries for that name: the old failure AND the new success.
+- ``get_pr_failed_check_runs`` filtered by ``conclusion == "failure"`` without deduplicating across suites, so a stale failure looked "still failing" forever and the silent acceptance branch never saw ``ci_green=True``.
+- Fix: keep only the most recent run per check name (by ``started_at``) before filtering. Successful re-runs supersede earlier failures; later failures supersede earlier successes; distinct names all come through.
+
+## Decision Context
+
+- **Live repro on PR #149**: Symphony's implementer agent rewrote the PR description to satisfy ``validate-pr-description`` (the check came back green in a new suite). ``get_pr_failed_check_runs`` still reported the old failure id, ``ci_green`` stayed False, the silent branch never converged, and acceptance never fired. The bug had been masked until now because Phase 1 wiring only landed in PR #146 and the silent branch was not exercised end-to-end before.
+- Dedup-by-name keyed on ``started_at`` was chosen over (a) trusting only the highest run-id, because run-id ordering by recency is not contractually documented, and (b) querying ``check_suites`` separately, which would double the API calls.
+- Follow-up work: none — this is a contained correctness fix.
+
+## Validation
+
+- Targeted checks: ``uv run python -m unittest tests.test_github_client tests.test_acceptance tests.test_acceptance_runtime`` — 82 tests pass.
+- ``tests/test_github_client.py`` is new and covers: the PR #149 scenario (success rerun supersedes failure → empty list), the symmetric case (later failure supersedes earlier success → returned), unique failures, multi-name failures, malformed PR responses, and API errors.
+- Live verification: the acceptance gate end-to-end on PR #149 was blocked by this exact bug; once this branch is checked out the silent branch converges and acceptance fires.
+- Not run: full ``make all`` (pre-existing unrelated failures in ``test_runtime`` and ``test_linear_tracker`` exist on ``main``).
+
+## UI Evidence
+
+- Not applicable: backend correctness fix to a single method.
+
+## Review
+
+- Reviewer / agent requested: ``@motivation-labs/crosscheck``.
+- Blocking comments resolved: N/A — new PR.
+
+---
+
 ## v0.1.0.14 — 2026-06-01
 
 **[PR #149](https://github.com/humanbased-ai/symphony/pull/149)**: Update CHANGELOG.md and README.md for acceptance gate
