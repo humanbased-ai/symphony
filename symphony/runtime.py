@@ -8,9 +8,15 @@ import time
 import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from symphony.acceptance_runtime import (
+    ClaudeCodeJudgeRunner,
+    ConvergenceSnapshot,
+    maybe_run_acceptance,
+)
 from symphony.agents.base import AgentEvent, AgentEventCallback, TokenUsage
 from symphony.config import WorkflowConfig
 from symphony.github.webhooks import GitHubEvent, PRClosedEvent, PRCommentEvent, PRReviewEvent
@@ -120,6 +126,15 @@ class SymphonyRuntime:
         self._pr_conflict_dispatched: set[str] = set()
         # All RunningEntry objects ever dispatched, keyed by issue.id.
         self._dispatched_entries: dict[str, Any] = {}
+        # Acceptance gate per-branch state (Phase 1: judge + comment + escalate).
+        # ``_convergence_snapshots`` clocks quiet_for_seconds and pr_turn_advancing
+        # between ticks; ``_acceptance_judged_sha`` suppresses re-judging the same
+        # head sha so a long-quiet PR does not get a fresh verdict every poll.
+        self._convergence_snapshots: dict[str, ConvergenceSnapshot] = {}
+        self._acceptance_judged_sha: dict[str, str] = {}
+        # Lazily-built judge runner; only constructed once acceptance.enabled
+        # fires for a branch, so disabled deployments pay no startup cost.
+        self._acceptance_judge: ClaudeCodeJudgeRunner | None = None
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -546,6 +561,8 @@ class SymphonyRuntime:
                 self._branch_pr_numbers.pop(branch, None)
                 self._pr_comment_seen.pop(branch, None)
                 self._pr_conflict_dispatched.discard(branch)
+                self._convergence_snapshots.pop(branch, None)
+                self._acceptance_judged_sha.pop(branch, None)
                 return
             pr_number = cached_pr
         else:
@@ -618,14 +635,17 @@ class SymphonyRuntime:
 
         self._pr_comment_seen[branch] = seen | frozenset(new_seen_ids)
 
+        pr_turns_before = self._pr_turns.get(branch, 0)
         if feedback_parts:
             combined = "\n\n---\n\n".join(feedback_parts)
             await self._handle_pr_feedback(branch, pr_number, combined)
-            return
+        else:
+            # Check for new CI failures only when there is no human feedback this
+            # tick, so the agent addresses human comments before retrying CI.
+            await self._handle_ci_failures(branch, pr_number, issue)
 
-        # Check for new CI failures only when there is no human feedback this tick,
-        # so the agent addresses human comments before retrying CI.
-        await self._handle_ci_failures(branch, pr_number, issue)
+        saw_new_feedback = self._pr_turns.get(branch, 0) > pr_turns_before
+        await self._maybe_run_acceptance(branch, pr_number, issue, saw_new_feedback)
 
     async def _handle_ci_failures(self, branch: str, pr_number: int, issue: Issue) -> None:
         """Trigger a PR-feedback agent run when new CI check failures appear."""
@@ -658,6 +678,46 @@ class SymphonyRuntime:
         if self.on_pr_update is not None:
             self.on_pr_update(branch, pr_number, "ci_fail")
         await self._handle_pr_feedback(branch, pr_number, feedback_text)
+
+    async def _maybe_run_acceptance(
+        self,
+        branch: str,
+        pr_number: int,
+        issue: Issue,
+        saw_new_feedback_this_tick: bool,
+    ) -> None:
+        """Acceptance gate hook — runs at the tail of every PR-poll tick.
+
+        Delegates the whole decision (convergence + judge dispatch + comment) to
+        ``acceptance_runtime.maybe_run_acceptance``. We only own the per-branch
+        snapshots and the lazy judge runner here; everything else is pure or
+        I/O-isolated for testability.
+        """
+        if not self.config.acceptance.enabled or self.github_client is None:
+            return
+        if self._acceptance_judge is None:
+            self._acceptance_judge = ClaudeCodeJudgeRunner(model=self.config.acceptance.vendor)
+        now = datetime.now(timezone.utc)
+        try:
+            snapshot, judged_sha, _verdict, _result = await maybe_run_acceptance(
+                github_client=self.github_client,
+                judge=self._acceptance_judge,
+                config=self.config.acceptance,
+                issue=issue,
+                branch=branch,
+                pr_number=pr_number,
+                pr_turns=self._pr_turns.get(branch, 0),
+                snapshot=self._convergence_snapshots.get(branch),
+                now=now,
+                saw_new_feedback_this_tick=saw_new_feedback_this_tick,
+                already_judged_sha=self._acceptance_judged_sha.get(branch),
+            )
+        except Exception:  # noqa: BLE001 - acceptance must never crash the tick.
+            LOGGER.debug("acceptance_check_error for branch %r", branch, exc_info=True)
+            return
+        self._convergence_snapshots[branch] = snapshot
+        if judged_sha:
+            self._acceptance_judged_sha[branch] = judged_sha
 
     async def handle_github_pr_event(self, event: GitHubEvent) -> None:
         """Route a GitHub PR event to the appropriate handler."""
@@ -698,6 +758,8 @@ class SymphonyRuntime:
 
         self._branch_to_issue.pop(event.pr_head_branch, None)
         self._pr_turns.pop(event.pr_head_branch, None)
+        self._convergence_snapshots.pop(event.pr_head_branch, None)
+        self._acceptance_judged_sha.pop(event.pr_head_branch, None)
         if issue is not None:
             release_issue(issue.id, self.state)
 
