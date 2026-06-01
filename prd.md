@@ -1252,10 +1252,26 @@ buttons.
   ndjson log fallback with sha binding, guard-path detection, and convergence
   evaluation for both the crosscheck and silent branches. Unit-tested in
   `tests/test_acceptance.py`.
-- [ ] **[Acceptance: runtime wiring + judge]** — gather convergence inputs in
-  the PR poller, dispatch a one-shot acceptance judge (issue text + diff +
-  crosscheck verdict) at the post-poll/approval quiet point, and post a
-  human-readable verdict comment that escalates. Reuse `max_pr_turns`.
+- [x] **[Acceptance: runtime wiring + judge]** — `SymphonyRuntime` now calls
+  `acceptance_runtime.maybe_run_acceptance` at the tail of every PR-poll tick
+  (post-feedback, post-CI). The runtime owns per-branch
+  `ConvergenceSnapshot` (clocks `quiet_for_seconds`, `pr_turn_advancing`) and
+  the lazy `ClaudeCodeJudgeRunner`. The runtime glue gathers convergence
+  inputs from live GitHub state, dispatches the one-shot judge (issue text +
+  truncated diff + crosscheck verdict label, with
+  `ACCEPTANCE_JUDGE_SYSTEM_PROMPT` injected via `--append-system-prompt`),
+  parses the JSON verdict, applies a guard-path override (force `uncertain`
+  on `pass` verdicts that touch sensitive paths), and posts a Markdown
+  comment carrying the bot marker so the next tick does not re-classify it
+  as feedback. Phase 1 always escalates: the comment trails a "Symphony does
+  not auto-merge" notice and no merge call is wired. Re-judging the same
+  head sha is suppressed by tracking the last judged sha per branch.
+  Bounce-back (judge `fail` → re-implement, reusing `max_pr_turns`) is not
+  yet wired and remains a follow-up. Tested in
+  `tests/test_acceptance_runtime.py` (38 unit tests covering verdict
+  parsing, prompt/comment rendering, diff path extraction, convergence-input
+  gathering, and the orchestrator's converged / not-converged / already-
+  judged / sensitive-path / unparseable / post-failure paths).
 - [ ] **[Acceptance: structured verdict + auto-merge]** — Phase 2 machine-
   readable verdict, `merge_pr()`, and gated auto-merge for the safest PRs.
 
