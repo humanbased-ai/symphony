@@ -29,6 +29,11 @@ DEFAULT_MAX_PR_TURNS = 10
 DEFAULT_ACCEPTANCE_REVIEW_SOURCE = "auto"
 DEFAULT_ACCEPTANCE_CONFIDENCE_THRESHOLD = 0.8
 DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS = 300
+# How long ``auto`` mode holds open for crosscheck before falling through to
+# the silent branch. crosscheck typically takes several minutes between PR
+# open and posting its ``VERDICT:`` comment; without a grace window the
+# silent branch can fire first and judge before code review has happened.
+DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS = 1_200  # 20 minutes
 DEFAULT_ACCEPTANCE_GUARD_PATHS = (
     "SPEC.md",
     "**/migrations/**",
@@ -323,6 +328,7 @@ class AcceptanceConfig:
     auto_merge: bool = False
     confidence_threshold: float = DEFAULT_ACCEPTANCE_CONFIDENCE_THRESHOLD
     quiet_period_seconds: int = DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS
+    crosscheck_wait_seconds: int = DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS
     guard_paths: tuple[str, ...] = DEFAULT_ACCEPTANCE_GUARD_PATHS
 
     @classmethod
@@ -346,6 +352,11 @@ class AcceptanceConfig:
                 acceptance.get("quiet_period_seconds"),
                 DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
                 "acceptance_quiet_period_seconds",
+            ),
+            crosscheck_wait_seconds=_non_negative_int(
+                acceptance.get("crosscheck_wait_seconds"),
+                DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS,
+                "acceptance_crosscheck_wait_seconds",
             ),
             guard_paths=_string_tuple(acceptance.get("guard_paths"), DEFAULT_ACCEPTANCE_GUARD_PATHS),
         )

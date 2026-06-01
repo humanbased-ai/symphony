@@ -73,11 +73,16 @@ class OnboardingTests(unittest.TestCase):
         self.assertTrue(acceptance_block["enabled"])
         self.assertFalse(acceptance_block["auto_merge"])
         self.assertEqual("auto", acceptance_block["review_source"])
+        # ``crosscheck_wait_seconds`` is written explicitly so a user reading
+        # the generated WORKFLOW.md sees the grace-window knob and knows it
+        # is tunable, rather than having to discover the default in source.
+        self.assertIn("crosscheck_wait_seconds", acceptance_block)
         # Sanity: the block round-trips through the same parser the runtime uses.
         # If a future edit drifts the scaffold away from the schema, this fails.
         parsed = AcceptanceConfig.from_mapping(workflow.config)
         self.assertTrue(parsed.enabled)
         self.assertFalse(parsed.auto_merge)
+        self.assertGreater(parsed.crosscheck_wait_seconds, 0)
         self.assertIn("SPEC.md", parsed.guard_paths)
 
     def test_generate_workflow_omits_acceptance_block_when_opted_out(self):

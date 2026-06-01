@@ -590,6 +590,46 @@ class GatherConvergenceInputsTests(unittest.TestCase):
         )
         self.assertTrue(inputs.pr_turn_advancing)
 
+    def test_pr_age_seconds_computed_from_created_at(self):
+        """The ``auto`` mode wait window needs to know how long the PR has
+        been open. ``gather_convergence_inputs`` derives that from
+        ``pr.created_at`` so ``evaluate_convergence`` can clock the grace
+        window without an extra API round-trip."""
+        gh = FakeGitHubClient(pr={
+            "head": {"sha": "x"},
+            "created_at": "2026-05-30T00:00:00Z",
+        })
+        cfg = AcceptanceConfig(enabled=True, crosscheck_wait_seconds=1800)
+        inputs, _ = gather_convergence_inputs(
+            github_client=gh,
+            pr_number=1,
+            config=cfg,
+            pr_turns=0,
+            snapshot=None,
+            now=datetime(2026, 5, 30, 0, 10, 0, tzinfo=UTC),
+            saw_new_feedback_this_tick=False,
+        )
+        # 10 minutes after PR open.
+        self.assertEqual(inputs.pr_age_seconds, 600.0)
+        self.assertEqual(inputs.crosscheck_wait_seconds, 1800.0)
+
+    def test_pr_age_seconds_is_none_when_created_at_missing(self):
+        """A PR response without a parseable ``created_at`` must leave
+        ``pr_age_seconds`` as None so ``evaluate_convergence`` skips the
+        wait check rather than treating the PR as freshly opened."""
+        gh = FakeGitHubClient(pr={"head": {"sha": "x"}})
+        cfg = AcceptanceConfig(enabled=True, crosscheck_wait_seconds=1800)
+        inputs, _ = gather_convergence_inputs(
+            github_client=gh,
+            pr_number=1,
+            config=cfg,
+            pr_turns=0,
+            snapshot=None,
+            now=datetime(2026, 5, 30, tzinfo=UTC),
+            saw_new_feedback_this_tick=False,
+        )
+        self.assertIsNone(inputs.pr_age_seconds)
+
 
 # --------------------------------------------------------------------------- #
 # maybe_run_acceptance

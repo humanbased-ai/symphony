@@ -8,6 +8,7 @@ from typing import Mapping
 import yaml
 
 from symphony.config import (
+    DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS,
     DEFAULT_ACCEPTANCE_GUARD_PATHS,
     DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
     DEFAULT_ACCEPTANCE_REVIEW_SOURCE,
@@ -131,6 +132,7 @@ def generate_workflow(config: InitConfig) -> str:
                 "review_source": DEFAULT_ACCEPTANCE_REVIEW_SOURCE,
                 "auto_merge": False,
                 "quiet_period_seconds": DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
+                "crosscheck_wait_seconds": DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS,
                 "guard_paths": list(DEFAULT_ACCEPTANCE_GUARD_PATHS),
             }
 
