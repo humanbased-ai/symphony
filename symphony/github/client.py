@@ -88,6 +88,28 @@ class GitHubClient:
         except (GitHubClientError, KeyError, TypeError, ValueError):
             return None
 
+    def find_pr_for_issue(self, issue_identifier: str) -> int | None:
+        """Return the most recently updated PR mentioning the issue identifier,
+        regardless of state (open, closed, or merged).
+
+        Used by startup reconciliation to recover the PR for an issue still sitting
+        in the review state after a restart, when the in-memory branch->PR map has
+        been lost. Unlike ``find_open_pr_for_issue`` this does not filter on
+        ``is:open``, so it surfaces PRs that were merged while the daemon was down.
+        """
+        try:
+            result = self._request(
+                "GET",
+                f"/search/issues?q=is:pr+{issue_identifier}"
+                f"+repo:{self.owner}/{self.repo}&sort=updated&order=desc&per_page=1",
+            )
+            items = (result or {}).get("items", [])
+            if items:
+                return int(items[0]["number"])
+            return None
+        except (GitHubClientError, KeyError, TypeError, ValueError):
+            return None
+
     def get_pr_failed_check_runs(self, pr_number: int) -> list[dict]:
         """Return failed check runs for a PR's HEAD commit as list of {id, name, details_url}."""
         try:

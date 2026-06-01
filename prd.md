@@ -1071,6 +1071,25 @@ be the first Phase 2 gate before desktop or productionization work expands.
     called from the poll-loop startup. `WorkspaceManager.logs_root` plumbs
     per-run log paths through the runtime. PRD §8.1 documents the deliberate
     narrowing of SPEC §9.1–§9.2.
+- [x] **[Core: Restart reconciliation of review-state issues]** — The
+  PR-merged → `done_state` transition is driven by the in-memory
+  `_branch_to_issue` / `_branch_pr_numbers` maps, which are deliberately not
+  persisted across restarts (§8.1). Before this fix, any issue that reached the
+  review (handoff) state before a process restart lost its PR watcher: a PR
+  merged while the daemon was down left the issue stranded in the review state
+  forever, with no error. Fix: a best-effort, stateless startup pass
+  (`SymphonyRuntime.reconcile_review_state_issues`, called from the poll-loop
+  startup right after `record_startup_issues`) re-derives the transition from the
+  external sources of truth — the tracker's review-state issues plus live GitHub
+  PR state. For each review-state issue it resolves the PR via
+  `GitHubClient.find_pr_for_issue` (any state, unlike the open-only
+  `find_open_pr_for_issue`) and then: merged → transition to `done_state`; still
+  open → re-register in the in-memory maps so the normal per-tick
+  `poll_github_pr_feedback` resumes watching; closed-unmerged → leave in review
+  and log for manual attention (reconciliation never auto-cancels). A reference
+  guard (issue URL/identifier in the PR body/title, or identifier in the head
+  branch) prevents a substring identifier collision in GitHub search from
+  matching an unrelated PR. Shipped on `fix/restart-review-reconciliation`.
 - [ ] **[Core: Blocker eligibility gate] (Linear: IN-287)** — Before dispatching
   any issue, check Linear for unresolved blocking relationships. Skip (log
   `blocker_skip`) without modifying tracker state. Reconsider on the next tick.

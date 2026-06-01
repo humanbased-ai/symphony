@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 import os
+import re
 import time
 import dataclasses
 from collections.abc import Callable
@@ -230,6 +231,130 @@ class SymphonyRuntime:
         candidates = list(await _call_sync(self.tracker.fetch_candidate_issues))
         self._prev_candidate_ids = {issue.id for issue in candidates}
         LOGGER.info("Startup snapshot: %d pre-existing issue(s) will be skipped.", len(self._prev_candidate_ids))
+
+    async def reconcile_review_state_issues(self) -> None:
+        """Rebuild PR tracking for issues already in the review state at startup.
+
+        Symphony does not persist its in-memory ``_branch_to_issue`` /
+        ``_branch_pr_numbers`` maps across restarts (PRD §8.1 — the in-memory
+        running set is deliberately ephemeral). Those maps are the only thing the
+        per-tick ``poll_github_pr_feedback`` path consults to fire the
+        PR-merged -> done transition. So an issue that reached the review state
+        before a restart loses its PR watcher: if the PR is merged while the daemon
+        is down (or after it restarts) the issue is stranded in review forever.
+
+        This best-effort startup pass re-derives the state from the external
+        sources of truth — the tracker's review-state issues plus live GitHub PR
+        state — and is therefore stateless and safe to run on every boot:
+
+        * PR already merged  -> transition the issue to ``done_state`` now.
+        * PR still open       -> re-register it in the in-memory maps so the normal
+                                 per-tick poll resumes watching for the merge.
+        * PR closed unmerged  -> leave the issue in review and log for manual
+                                 attention (never auto-cancel from reconciliation).
+
+        Called once from the poll-loop startup, after ``record_startup_issues``.
+        """
+        if self.github_client is None:
+            LOGGER.warning(
+                "Review-state reconciliation skipped: no GitHub client is configured "
+                "(GITHUB_TOKEN did not resolve). PR automation — merge -> done "
+                "transitions, PR feedback polling, and this reconciliation — is disabled "
+                "until a valid GitHub token is provided."
+            )
+            return
+        if not hasattr(self.tracker, "fetch_issues_by_states"):
+            return
+        review_state = self.config.tracker.review_state
+        if not review_state:
+            return
+
+        try:
+            review_issues = list(
+                await _call_sync(self.tracker.fetch_issues_by_states, [review_state])
+            )
+        except Exception as exc:  # noqa: BLE001 - reconciliation is best-effort; never block startup.
+            LOGGER.warning("Review-state reconciliation skipped (fetch failed): %s", exc)
+            return
+
+        reconciled = 0
+        resumed = 0
+        for issue in review_issues:
+            try:
+                pr_number = await asyncio.to_thread(
+                    self.github_client.find_pr_for_issue, issue.identifier
+                )
+                if pr_number is None:
+                    continue
+                pr_data = await asyncio.to_thread(self.github_client.get_pr, pr_number)
+                if not pr_data:
+                    continue
+
+                head_branch = ((pr_data.get("head") or {}).get("ref")) or issue.branch_name
+                # Guard against the search matching an unrelated PR. GitHub issue
+                # search treats "IN-489" as a substring, so it can return the PR
+                # for "IN-4890". Require the identifier to appear as a delimited
+                # token (not followed by another alphanumeric) in the PR body,
+                # title, or head branch — or the issue's full URL to be present.
+                body = str(pr_data.get("body") or "")
+                title = str(pr_data.get("title") or "")
+                ident = issue.identifier
+                token = re.compile(
+                    rf"(?<![0-9A-Za-z]){re.escape(ident)}(?![0-9A-Za-z])", re.IGNORECASE
+                )
+                references_issue = (
+                    (issue.url is not None and issue.url in body)
+                    or bool(token.search(title))
+                    or bool(token.search(body))
+                    or (head_branch is not None and bool(token.search(head_branch)))
+                )
+                if not references_issue:
+                    LOGGER.debug(
+                        "Reconcile: PR #%d does not reference %s — skipping.",
+                        pr_number, issue.identifier,
+                    )
+                    continue
+
+                state = str(pr_data.get("state") or "").lower()
+                merged = bool(pr_data.get("merged", False))
+
+                if merged:
+                    LOGGER.info(
+                        "Reconcile: PR #%d for %s already merged → transitioning to %s.",
+                        pr_number, issue.identifier, self.config.tracker.done_state,
+                    )
+                    if hasattr(self.tracker, "update_issue_state_by_name"):
+                        await _call_sync(
+                            self.tracker.update_issue_state_by_name,
+                            issue.id,
+                            self.config.tracker.done_state,
+                        )
+                    if head_branch is not None:
+                        self._branch_to_issue.pop(head_branch, None)
+                        self._branch_pr_numbers.pop(head_branch, None)
+                    reconciled += 1
+                elif state == "open" and head_branch is not None:
+                    self._branch_to_issue[head_branch] = issue
+                    self._branch_pr_numbers[head_branch] = pr_number
+                    resumed += 1
+                    LOGGER.info(
+                        "Reconcile: resumed watching open PR #%d for %s on %s.",
+                        pr_number, issue.identifier, head_branch,
+                    )
+                else:
+                    LOGGER.warning(
+                        "Reconcile: PR #%d for %s is closed without merge — "
+                        "leaving in %s for manual review.",
+                        pr_number, issue.identifier, review_state,
+                    )
+            except Exception:  # noqa: BLE001 - one issue's failure must not abort the rest.
+                LOGGER.debug("Reconcile error for %s", issue.identifier, exc_info=True)
+
+        if reconciled or resumed:
+            LOGGER.info(
+                "Review-state reconciliation: %d issue(s) → %s, %d open PR(s) re-tracked.",
+                reconciled, self.config.tracker.done_state, resumed,
+            )
 
     def snapshot(self) -> OrchestratorState:
         return self.state

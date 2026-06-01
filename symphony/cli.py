@@ -636,9 +636,11 @@ async def run_poll_loop(
         async with tick_lock:
             await _startup_workspace_sweep(runtime.workspace_manager)
             await runtime.record_startup_issues()
+            await runtime.reconcile_review_state_issues()
     else:
         await _startup_workspace_sweep(runtime.workspace_manager)
         await runtime.record_startup_issues()
+        await runtime.reconcile_review_state_issues()
     while True:
         try:
             if before_tick is not None:
