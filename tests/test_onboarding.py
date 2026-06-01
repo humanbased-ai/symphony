@@ -1,11 +1,19 @@
+import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from symphony.auth import load_local_linear_token, save_local_linear_token
-from symphony.onboarding import InitConfig, default_workspace_root, generate_workflow, write_workflow
+from symphony.onboarding import (
+    InitConfig,
+    default_workspace_root,
+    detect_repo_shape,
+    generate_workflow,
+    write_workflow,
+)
 from symphony.workflow import parse_workflow
 
 
@@ -68,6 +76,115 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual("lin_secret", load_local_linear_token(path=path))
             if os.name == "posix":
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+
+def _git_available() -> bool:
+    import shutil as _shutil
+    return _shutil.which("git") is not None
+
+
+def _init_git_with_remote(path: Path) -> None:
+    subprocess.check_call(["git", "init", "-q", str(path)])
+    subprocess.check_call(
+        ["git", "-C", str(path), "remote", "add", "origin", "https://example.com/x.git"]
+    )
+
+
+@unittest.skipUnless(_git_available(), "git is required for repo-shape detection tests")
+class DetectRepoShapeTests(unittest.TestCase):
+    def test_returns_new_when_no_git_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual("new", detect_repo_shape(tmp))
+
+    def test_returns_new_when_no_remote_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.check_call(["git", "init", "-q", tmp])
+            self.assertEqual("new", detect_repo_shape(tmp))
+
+    def test_returns_single_when_remote_set_and_no_monorepo_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_git_with_remote(Path(tmp))
+            self.assertEqual("single", detect_repo_shape(tmp))
+
+    def test_detects_pnpm_workspace_as_monorepo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_git_with_remote(Path(tmp))
+            (Path(tmp) / "pnpm-workspace.yaml").write_text("packages:\n  - 'apps/*'\n")
+            self.assertEqual("monorepo", detect_repo_shape(tmp))
+
+    def test_detects_nx_json_as_monorepo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_git_with_remote(Path(tmp))
+            (Path(tmp) / "nx.json").write_text("{}")
+            self.assertEqual("monorepo", detect_repo_shape(tmp))
+
+    def test_detects_go_work_as_monorepo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_git_with_remote(Path(tmp))
+            (Path(tmp) / "go.work").write_text("go 1.22\n")
+            self.assertEqual("monorepo", detect_repo_shape(tmp))
+
+    def test_detects_npm_workspaces_field_as_monorepo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_git_with_remote(Path(tmp))
+            (Path(tmp) / "package.json").write_text(json.dumps({"workspaces": ["packages/*"]}))
+            self.assertEqual("monorepo", detect_repo_shape(tmp))
+
+    def test_detects_packages_directory_as_monorepo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_git_with_remote(Path(tmp))
+            packages = Path(tmp) / "packages"
+            packages.mkdir()
+            (packages / "core").mkdir()
+            self.assertEqual("monorepo", detect_repo_shape(tmp))
+
+    def test_empty_packages_directory_is_not_monorepo_signal(self):
+        # A bare `packages/` with no children isn't a workspace setup.
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_git_with_remote(Path(tmp))
+            (Path(tmp) / "packages").mkdir()
+            self.assertEqual("single", detect_repo_shape(tmp))
+
+
+class GenerateWorkflowRepoModeTests(unittest.TestCase):
+    def test_monorepo_mode_prepends_self_scoping_preamble(self):
+        content = generate_workflow(
+            InitConfig(
+                project_slug="example",
+                runner="claude_code",
+                github_org="acme",
+                github_repo="repo",
+                repo_mode="monorepo",
+            )
+        )
+        self.assertIn("Monorepo scope", content)
+        self.assertIn("smallest", content)
+
+    def test_new_mode_includes_gh_repo_create_hint(self):
+        content = generate_workflow(
+            InitConfig(
+                project_slug="example",
+                runner="claude_code",
+                github_org="acme",
+                github_repo="repo",
+                repo_mode="new",
+            )
+        )
+        self.assertIn("New project scope", content)
+        self.assertIn("gh repo create acme/repo", content)
+
+    def test_single_mode_has_no_preamble(self):
+        content = generate_workflow(
+            InitConfig(
+                project_slug="example",
+                runner="claude_code",
+                github_org="acme",
+                github_repo="repo",
+                repo_mode="single",
+            )
+        )
+        self.assertNotIn("Monorepo scope", content)
+        self.assertNotIn("New project scope", content)
 
 
 if __name__ == "__main__":
