@@ -32,6 +32,17 @@ supported.
 - **Fail-closed approval gate** — `symphony doctor` hard-fails when the runner
   can request approval but no resolution path is configured. Approval requests
   are routed to a configured `approval_state` instead of looping.
+- **Acceptance gate** — opt-in via `acceptance.enabled` in `WORKFLOW.md`. Once
+  a PR converges (CI green, no new feedback for the quiet period), Symphony
+  dispatches a one-shot judge that compares the diff against the original
+  Linear issue and posts a `pass` / `fail` / `uncertain` verdict comment on
+  the PR. Phase 1 only judges and escalates to a human; Phase 2 can
+  auto-merge when the user explicitly sets `acceptance.auto_merge: true` and
+  the four-condition gate passes (pass verdict, confidence at or above
+  `confidence_threshold` (default `0.80`), no guard-rail paths touched, and
+  GitHub branch protection still gets the final say). Guard-rail paths
+  (`SPEC.md`, migrations, `.github/**`, secrets) force a `pass` down to
+  `uncertain` so a human still reviews.
 - **Failure-state transition** — non-recoverable runs move to a configured
   `failure_state` and clean up the workspace; no auto-retry into a dirty tree.
 - **WORKFLOW.md hot reload** — change YAML front matter or the prompt body and
