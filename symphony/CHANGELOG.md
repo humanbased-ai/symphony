@@ -3,6 +3,49 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.19 — 2026-06-01
+
+**[PR #153](https://github.com/humanbased-ai/symphony/pull/153)**: fix(acceptance): gate bounce-back behind opt-in flag (default off)
+
+## Linear
+
+- Issue: N/A — operator feedback after PR #151: bounce-back on judge ``fail`` was unconditional, but early rollouts should keep "judge → comment → human decides" semantics until verdict quality is trusted.
+
+## Summary
+
+- New config field ``acceptance.bounce_back_on_fail`` (default ``false``).
+- When false (default): a ``fail`` verdict still posts the full evaluation report on the PR; the loop then waits for a human to decide what to do.
+- When true: the historical PR #151 behavior — verdict's unmet checks are forwarded through ``_handle_pr_feedback`` and the implementer agent gets another turn, capped by ``max_pr_turns``.
+- ``symphony init`` writes ``bounce_back_on_fail: false`` explicitly so users see the knob and know it's the off-by-default opt-in.
+- Verdict ``uncertain`` and ``pass`` are unaffected — they never triggered bounce-back, so no flag check is needed.
+
+## Decision Context
+
+- **Default off rationale**: a verdict from the acceptance judge is still a model output — confidence calibration on real workloads is not yet built. Spending agent budget on a retry before an operator has seen even one fail verdict on a real PR is too aggressive. The verdict comment IS the evaluation report (summary + per-check evidence) — that's the human's data to act on.
+- **Why not remove bounce-back entirely**: the code path is small, tested, and useful once trust is established. Removing it would mean re-implementing later. Gating it behind a flag keeps the option live without imposing it.
+- **Why write the false explicitly in ``symphony init``**: same reason ``auto_merge: false`` is written explicitly — the file should disclose every irreversible automation knob, not hide them behind library defaults. Users discover what's tunable by reading the generated file.
+- Alternatives considered:
+  - Couple ``bounce_back_on_fail`` to ``auto_merge`` (only auto-bounce if auto-merge is on) — rejected: they answer different questions ("can the system retry a fail" vs "can the system merge a pass"); coupling them would confuse the mental model.
+  - Make the default true and let operators opt out — rejected: the safe direction for an unproven feature is "off → user explicitly opts in", not the reverse.
+- Follow-up: a future PR can add a separate threshold (only bounce when verdict confidence is above N) once we have data on how often the judge's fails are themselves wrong.
+
+## Validation
+
+- 135 tests pass (``test_acceptance test_acceptance_runtime test_github_client test_onboarding test_pr_polling``).
+- New ``test_default_off_does_not_bounce_on_fail`` exercises the production-safe default.
+- Existing ``TestAcceptanceBounceBack`` fixture takes a kwarg, defaulting to ``True`` so the bounce-loop tests keep covering the opt-in branch.
+- ``OnboardingTests`` asserts ``bounce_back_on_fail`` is present and false in the scaffold.
+
+## UI Evidence
+
+- Not applicable: config field + runtime gating. No graphical surface.
+
+## Review
+
+- Reviewer / agent requested: ``@motivation-labs/crosscheck``.
+
+---
+
 ## v0.1.0.18 — 2026-06-01
 
 **[PR #152](https://github.com/humanbased-ai/symphony/pull/152)**: fix(acceptance): hold auto mode for crosscheck before falling through
