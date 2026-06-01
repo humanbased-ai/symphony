@@ -7,6 +7,12 @@ from typing import Mapping
 
 import yaml
 
+from symphony.config import (
+    DEFAULT_ACCEPTANCE_GUARD_PATHS,
+    DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
+    DEFAULT_ACCEPTANCE_REVIEW_SOURCE,
+)
+
 
 DEFAULT_PRESET = "codex-safe"
 DEFAULT_WORKFLOW_PATH = "WORKFLOW.md"
@@ -107,6 +113,18 @@ def generate_workflow(config: InitConfig) -> str:
             "token": "$GITHUB_TOKEN",
             "owner": config.github_org,
             "repo": config.github_repo,
+        }
+        # Acceptance gate scaffold — disabled by default. The block is written
+        # only when github is configured because the gate posts its verdict as
+        # a PR comment and would no-op without a GitHub client. Users flip
+        # ``enabled`` to true to activate; every other field already carries
+        # the production-safe default so no further editing is required.
+        front_matter["acceptance"] = {
+            "enabled": False,
+            "review_source": DEFAULT_ACCEPTANCE_REVIEW_SOURCE,
+            "auto_merge": False,
+            "quiet_period_seconds": DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
+            "guard_paths": list(DEFAULT_ACCEPTANCE_GUARD_PATHS),
         }
 
     if runner == "claude_code":
