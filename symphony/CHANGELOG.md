@@ -3,6 +3,49 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.14 — 2026-06-01
+
+**[PR #149](https://github.com/humanbased-ai/symphony/pull/149)**: Update CHANGELOG.md and README.md for acceptance gate
+
+## Linear
+
+- Issue: https://linear.app/inductive-network/issue/IN-521/update-changelogmd-and-readmemd-for-acceptance-gate
+
+## Summary
+
+Docs-only sync for the acceptance gate that shipped across #138 (convergence core), #145 (judge prompt), #146 (runtime wiring), and #148 (Phase 2 auto-merge). No code under `symphony/` was touched.
+
+- **CHANGELOG.md** — added three bullets under the existing `## Unreleased` section covering the judge-based PR acceptance flow, the guard-rail force-downgrade (SPEC.md / migrations / `.github/**` / secrets), and the opt-in Phase 2 auto-merge with its four-condition gate.
+- **README.md** — added an `Acceptance gate` bullet to the Key Features list that names `acceptance.enabled` as the opt-in, describes the convergence → judge → verdict-comment flow, and explains that Phase 1 only judges/escalates while Phase 2 auto-merges only when the user explicitly sets `acceptance.auto_merge: true` and the four-condition gate passes.
+
+## Decision Context
+
+- Selected solution: extend the existing `## Unreleased` block in `CHANGELOG.md` with three focused bullets (judge flow, guard-rails, opt-in auto-merge) and append a single `Acceptance gate` bullet to the README Key Features list, keeping the same voice and structure as neighbouring entries.
+- Alternatives considered: (1) a dedicated "Acceptance gate" subsection in `README.md` with its own heading — rejected as out-of-scope per the issue's "no restructuring" guard-rail; (2) folding all three changelog bullets into one paragraph — rejected because the judge / guard-rail / auto-merge capabilities are independently consumable by release readers.
+- Follow-up work: none for IN-521. The acceptance gate's deeper docs continue to live in `prd.md` / `ARCHITECTURE.md` / `WORKFLOW.md` and are out of scope here.
+
+## Validation
+
+- Targeted checks: `git diff` — confirmed only `CHANGELOG.md` and `README.md` changed, additive only.
+- Full gates: not applicable; docs-only change with no code under `symphony/` touched, so no compile/test gate runs.
+- Not run: code test suites (`mix test`, etc.) — irrelevant for a docs-only diff.
+
+## UI Evidence
+
+For UI-impacted changes, include `.png` captures of the changed screens.
+Committed screenshots should live under `docs/pr-screenshots/<issue>/` or
+`review-artifacts/<issue>/` so Git LFS tracks them.
+
+- Screenshots:
+- Not applicable: docs-only change to `CHANGELOG.md` and `README.md`; no UI surface affected.
+
+## Review
+
+- Reviewer / agent requested: Symphony automation / repo maintainers.
+- Blocking comments resolved: none outstanding.
+
+---
+
 ## v0.1.0.13 — 2026-06-01
 
 **[PR #148](https://github.com/humanbased-ai/symphony/pull/148)**: feat(acceptance): Phase 2 — gated auto-merge for the safest PRs
