@@ -3,6 +3,50 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.16 — 2026-06-01
+
+**[PR #147](https://github.com/humanbased-ai/symphony/pull/147)**: feat(onboarding): scaffold disabled-by-default acceptance block
+
+## Linear
+
+- Issue: N/A — onboarding ergonomics follow-up to the acceptance gate shipped in PR #138/#145/#146. Surface the feature inside `symphony init` rather than burying it in docs.
+
+## Summary
+
+- `symphony init` / `symphony onboard` now ask **"Enable acceptance gate? [Y/n]"** after the GitHub repo step, when github is configured and the run is interactive. Pressing Enter keeps it on; "n" turns it off.
+- New CLI flags `--acceptance` / `--no-acceptance` (BooleanOptionalAction) override the prompt for non-interactive and explicit-intent callers.
+- Automated mode (`--yes` / `--mode automated`) defaults to on; force off with `--no-acceptance`.
+- `InitConfig` gains `acceptance_enabled: bool = True`. When True and github is configured, the generated `WORKFLOW.md` carries `acceptance: { enabled: true, review_source: auto, auto_merge: false, quiet_period_seconds: 300, guard_paths: [...] }`. When False the block is omitted entirely — explicit `enabled: false` would still leave config noise behind for a feature the user said no to.
+- Defaults sourced from `symphony.config.DEFAULT_ACCEPTANCE_*` so scaffold and runtime parser stay in sync.
+
+## Decision Context
+
+- Selected solution: interactive opt-in flow with default-yes + complementary CLI flags. Acceptance becomes part of the answered questions during onboarding, not a post-step the user must remember.
+- **Default-on rationale**: Phase 1 acceptance is human-escalation only (no auto-merge), so opting new projects in costs only the judge dispatch on PR convergence — there is no destructive default. Users who do not want that cost have one obvious moment to say no (the prompt) and one explicit way to encode it (`--no-acceptance`).
+- Alternatives considered:
+  - Disabled-by-default scaffold (the earlier commit on this branch, kept in history) — rejected after feedback: discoverable but still requires a post-onboarding edit, so the discoverability win is small.
+  - No prompt, default-off, no scaffold — rejected: leaves the feature buried in docs.
+  - No prompt, default-on, no flag — rejected: gives users no way to opt out without editing the generated file.
+- Follow-up work: Phase 2 (auto-merge) will need its own opt-in moment when it actually does something — that prompt will be gated behind the acceptance one.
+
+## Validation
+
+- Targeted checks: `uv run python -m unittest tests.test_onboarding tests.test_acceptance tests.test_acceptance_runtime` — 76 tests pass (combined acceptance suite).
+- `uv run symphony init --help` shows `--acceptance, --no-acceptance` with the right default-behavior text.
+- `uv run symphony --check` on the existing `WORKFLOW.md` still parses cleanly (no schema break for projects without an `acceptance:` block).
+- Not run: live `symphony onboard` interactive flow end-to-end — covered indirectly by `test_generate_workflow_enables_acceptance_by_default_with_github` and `test_generate_workflow_omits_acceptance_block_when_opted_out`.
+
+## UI Evidence
+
+- CLI flag visible in `symphony init --help` output. No graphical UI surface.
+
+## Review
+
+- Reviewer / agent requested: `@motivation-labs/crosscheck`.
+- Blocking comments resolved: N/A — open PR.
+
+---
+
 ## v0.1.0.15 — 2026-06-01
 
 **[PR #150](https://github.com/humanbased-ai/symphony/pull/150)**: fix(github): dedup check runs by name in get_pr_failed_check_runs
