@@ -70,6 +70,11 @@ class InitConfig:
     runner: str = DEFAULT_RUNNER
     github_org: str = ""
     github_repo: str = ""
+    # Acceptance gate ships enabled by default — Phase 1 only judges and
+    # escalates to a human (no auto-merge), so opting users in costs only the
+    # judge dispatch on PR convergence. Set to False (--no-acceptance) to omit
+    # the block entirely from the generated WORKFLOW.md.
+    acceptance_enabled: bool = True
 
 
 class OnboardingError(ValueError):
@@ -114,18 +119,20 @@ def generate_workflow(config: InitConfig) -> str:
             "owner": config.github_org,
             "repo": config.github_repo,
         }
-        # Acceptance gate scaffold — disabled by default. The block is written
-        # only when github is configured because the gate posts its verdict as
-        # a PR comment and would no-op without a GitHub client. Users flip
-        # ``enabled`` to true to activate; every other field already carries
-        # the production-safe default so no further editing is required.
-        front_matter["acceptance"] = {
-            "enabled": False,
-            "review_source": DEFAULT_ACCEPTANCE_REVIEW_SOURCE,
-            "auto_merge": False,
-            "quiet_period_seconds": DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
-            "guard_paths": list(DEFAULT_ACCEPTANCE_GUARD_PATHS),
-        }
+        # Acceptance gate: written only when GitHub is configured (the gate
+        # posts its verdict as a PR comment and would no-op otherwise) AND the
+        # user did not opt out. ``auto_merge`` stays False because Phase 1
+        # always escalates to a human; every other field carries the
+        # production-safe default from ``symphony.config`` so the block is
+        # immediately usable without further editing.
+        if config.acceptance_enabled:
+            front_matter["acceptance"] = {
+                "enabled": True,
+                "review_source": DEFAULT_ACCEPTANCE_REVIEW_SOURCE,
+                "auto_merge": False,
+                "quiet_period_seconds": DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
+                "guard_paths": list(DEFAULT_ACCEPTANCE_GUARD_PATHS),
+            }
 
     if runner == "claude_code":
         prompt = (

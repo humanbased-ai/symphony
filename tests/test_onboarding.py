@@ -51,11 +51,11 @@ class OnboardingTests(unittest.TestCase):
     def test_default_workspace_root_sanitizes_project_slug(self):
         self.assertEqual("~/.symphony/workspaces/A-B-C.1", default_workspace_root(" A/B C.1 "))
 
-    def test_generate_workflow_writes_disabled_acceptance_block_when_github_configured(self):
-        """``symphony init`` scaffolds an acceptance block so users do not need
-        to consult docs to enable the gate — they only flip ``enabled`` to true.
-        The block is intentionally disabled by default so existing onboarding
-        behavior does not change for anyone who ignores it."""
+    def test_generate_workflow_enables_acceptance_by_default_with_github(self):
+        """``symphony init`` ships the acceptance gate enabled by default when
+        github is configured. Phase 1 only judges and escalates to a human
+        (no auto-merge), so the safe default is to opt new projects in — the
+        user only has to act if they want it OFF."""
         content = generate_workflow(
             InitConfig(
                 project_slug="my-project",
@@ -70,15 +70,33 @@ class OnboardingTests(unittest.TestCase):
 
         self.assertIn("acceptance", workflow.config)
         acceptance_block = workflow.config["acceptance"]
-        self.assertFalse(acceptance_block["enabled"])
+        self.assertTrue(acceptance_block["enabled"])
         self.assertFalse(acceptance_block["auto_merge"])
         self.assertEqual("auto", acceptance_block["review_source"])
         # Sanity: the block round-trips through the same parser the runtime uses.
         # If a future edit drifts the scaffold away from the schema, this fails.
         parsed = AcceptanceConfig.from_mapping(workflow.config)
-        self.assertFalse(parsed.enabled)
-        self.assertEqual("auto", parsed.review_source)
+        self.assertTrue(parsed.enabled)
+        self.assertFalse(parsed.auto_merge)
         self.assertIn("SPEC.md", parsed.guard_paths)
+
+    def test_generate_workflow_omits_acceptance_block_when_opted_out(self):
+        """``--no-acceptance`` (or an interactive ``n``) must omit the block
+        entirely, not write ``enabled: false``. Empty block = no surprise gate
+        on next run; explicit ``false`` would still keep the config noise."""
+        content = generate_workflow(
+            InitConfig(
+                project_slug="my-project",
+                preset="codex-safe",
+                workspace_root="~/.symphony/workspaces/my-project",
+                runner="claude_code",
+                github_org="acme-corp",
+                github_repo="widget",
+                acceptance_enabled=False,
+            )
+        )
+        workflow = parse_workflow(content)
+        self.assertNotIn("acceptance", workflow.config)
 
     def test_generate_workflow_omits_acceptance_block_without_github(self):
         """Without github configured the acceptance gate would no-op (it posts

@@ -352,6 +352,17 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
         choices=("interactive", "automated"),
         help="Setup mode. Defaults to interactive in a TTY and automated otherwise.",
     )
+    parser.add_argument(
+        "--acceptance",
+        dest="acceptance_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Whether the generated WORKFLOW.md ships with the acceptance gate "
+            "enabled. --acceptance forces on, --no-acceptance forces off. "
+            "Default in interactive mode: prompt; in automated mode: on."
+        ),
+    )
     return parser
 
 
@@ -1446,6 +1457,27 @@ def _run_init_with_args(
             if failures:
                 raise OnboardingError(_format_setup_failures(failures))
 
+        # --- Optional step: Acceptance gate ---
+        # Only meaningful when github is configured (the gate posts as a PR
+        # comment); skipped otherwise. Explicit --acceptance / --no-acceptance
+        # always wins; interactive prompts default to "on" because Phase 1
+        # judging is human-escalation only — opting in is the safe default.
+        if args.acceptance_enabled is not None:
+            acceptance_enabled = args.acceptance_enabled
+        elif not (github_org and github_repo):
+            acceptance_enabled = False
+        elif automated:
+            acceptance_enabled = True
+        else:
+            print("\nOptional — Acceptance gate")
+            print("  When a PR converges (CI green, no new feedback for a quiet")
+            print("  period), a separate judge agent re-checks the diff against")
+            print("  the original Linear issue and posts a verdict comment on")
+            print("  the PR. Phase 1 always escalates to a human — Symphony will")
+            print("  not auto-merge.")
+            answer = input("Enable acceptance gate? [Y/n]: ").strip().lower()
+            acceptance_enabled = answer in ("", "y", "yes")
+
         workflow = generate_workflow(
             InitConfig(
                 project_slug=project_slug,
@@ -1457,6 +1489,7 @@ def _run_init_with_args(
                 runner=runner,
                 github_org=github_org,
                 github_repo=github_repo,
+                acceptance_enabled=acceptance_enabled,
             )
         )
         workflow_path = write_workflow(args.workflow_path, workflow, overwrite=args.overwrite)
