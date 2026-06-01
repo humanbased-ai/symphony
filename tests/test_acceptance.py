@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from symphony.acceptance import (
+    ACCEPTANCE_JUDGE_SYSTEM_PROMPT,
     AcceptanceVerdict,
     ConvergenceInputs,
     CrosscheckVerdict,
@@ -257,6 +258,51 @@ class AcceptanceVerdictModelTests(unittest.TestCase):
         v = AcceptanceVerdict(overall="uncertain")
         self.assertEqual(v.checks, ())
         self.assertEqual(v.touched_sensitive_paths, ())
+
+
+class AcceptanceJudgeSystemPromptTests(unittest.TestCase):
+    """Lock in the judge's scope boundary at the prompt layer.
+
+    These assertions are intentionally specific: if a future edit drifts the
+    prompt into code-review territory or weakens the guard-rail wording, the
+    test fails and surfaces the regression in review rather than at runtime.
+    """
+
+    def test_declares_scope_as_requirements_not_code_quality(self):
+        prompt = ACCEPTANCE_JUDGE_SYSTEM_PROMPT.lower()
+        # Affirms the in-scope frame.
+        self.assertIn("requirements done item by item", prompt)
+        self.assertIn("acceptance judge", prompt)
+        # Names the boundary explicitly so a reader cannot miss it.
+        self.assertIn("out of scope", prompt)
+        self.assertIn("code review", prompt)
+
+    def test_excludes_code_quality_dimensions_by_name(self):
+        prompt = ACCEPTANCE_JUDGE_SYSTEM_PROMPT.lower()
+        for banned_dimension in (
+            "code style",
+            "naming",
+            "refactor",
+            "latent bug",
+            "performance",
+        ):
+            self.assertIn(
+                banned_dimension,
+                prompt,
+                f"prompt must name '{banned_dimension}' as out of scope",
+            )
+
+    def test_enforces_guard_rails_and_output_contract(self):
+        prompt = ACCEPTANCE_JUDGE_SYSTEM_PROMPT
+        # Guard rails force escalation regardless of confidence.
+        self.assertIn("SPEC.md", prompt)
+        self.assertIn("migrations/", prompt)
+        self.assertIn(".github/**", prompt)
+        # Output shape mirrors AcceptanceVerdict so the runner can parse it.
+        for key in ("overall", "checks", "touched_sensitive_paths", "summary_for_human"):
+            self.assertIn(f'"{key}"', prompt)
+        # The judge must not propose side effects.
+        self.assertIn("Do not propose merging", prompt)
 
 
 if __name__ == "__main__":
