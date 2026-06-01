@@ -1224,6 +1224,17 @@ implement/review loop has actually settled. The signal source is pluggable via
   quiet: no new feedback this tick, CI green, the PR-turn counter not still
   advancing, and a quiet period elapsed.
 - `auto` uses crosscheck when a `[crosscheck]` comment is present, else silent.
+  To avoid racing a slow crosscheck — crosscheck typically posts its
+  `VERDICT:` comment minutes after a PR opens, well after CI usually goes
+  green — `auto` mode holds open for `acceptance.crosscheck_wait_seconds`
+  (default 1800s = 30 min) before allowing the silent branch to fire. Inside
+  the grace window, the gate returns `not converged` with reason
+  *"holding for crosscheck — Ns left in the grace window"* so the wait is
+  visible from the convergence log. Once the PR is older than the wait or
+  the runtime fails to parse `pr.created_at`, the silent branch becomes
+  eligible as before. The wait does not apply to the `crosscheck` mode (a
+  missing verdict is already a not-converged reason) or to `none` (which
+  explicitly opts out of crosscheck).
 
 **Layering.** Verdict generation (a one-shot, no-session judge mirroring
 `APIAgentRunner`) is pure judgment and never touches merge/Linear. The decision

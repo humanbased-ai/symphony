@@ -114,6 +114,18 @@ def gather_convergence_inputs(
 
     pr_turn_advancing = snapshot is not None and pr_turns > snapshot.pr_turns_observed
 
+    # ``pr_age_seconds`` powers the ``auto`` mode grace window: while the PR
+    # is younger than ``crosscheck_wait_seconds`` and crosscheck has not
+    # posted yet, the gate holds instead of falling through to the silent
+    # branch. None disables the wait (older clients without the field still
+    # get the legacy fall-through behavior).
+    created_at = _coerce_datetime(pr.get("created_at"))
+    pr_age_seconds: float | None
+    if created_at is not None:
+        pr_age_seconds = max(0.0, (now - created_at).total_seconds())
+    else:
+        pr_age_seconds = None
+
     inputs = ConvergenceInputs(
         review_source=config.review_source,
         head_sha=head_sha,
@@ -130,6 +142,8 @@ def gather_convergence_inputs(
         pr_turn_advancing=pr_turn_advancing,
         quiet_for_seconds=quiet_for,
         quiet_period_seconds=float(config.quiet_period_seconds),
+        pr_age_seconds=pr_age_seconds,
+        crosscheck_wait_seconds=float(config.crosscheck_wait_seconds),
     )
     return inputs, {"pr": pr, "comments": comments, "head_sha": head_sha}
 

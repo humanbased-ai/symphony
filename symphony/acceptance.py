@@ -246,6 +246,13 @@ class ConvergenceInputs:
     pr_turn_advancing: bool = False
     quiet_for_seconds: float = 0.0
     quiet_period_seconds: float = 0.0
+    # ``pr_age_seconds`` is "how long has this PR been open". ``auto`` mode
+    # uses it to wait for crosscheck before falling back to the silent
+    # branch: if crosscheck has not yet had time to post, a premature silent
+    # convergence would judge the PR before the code-review step landed.
+    # Runtime fills this from ``pr.created_at``; None disables the wait.
+    pr_age_seconds: float | None = None
+    crosscheck_wait_seconds: float = 0.0
 
 
 def evaluate_convergence(inputs: ConvergenceInputs) -> ConvergenceResult:
@@ -254,6 +261,12 @@ def evaluate_convergence(inputs: ConvergenceInputs) -> ConvergenceResult:
     Routes to the crosscheck branch when a verdict is present (or required), and
     to the silent branch otherwise. The decision is deliberately conservative:
     judging early is far more dangerous than judging late.
+
+    In ``auto`` mode there is a race: a PR can sit "CI green, quiet period
+    elapsed, no implementer turn" before crosscheck has had time to post
+    its ``VERDICT:`` comment. The silent branch alone would fire too
+    early. ``crosscheck_wait_seconds`` adds a per-PR grace window during
+    which ``auto`` holds for crosscheck instead of falling through.
     """
     quiet_ok = inputs.quiet_for_seconds >= inputs.quiet_period_seconds
 
@@ -276,6 +289,24 @@ def evaluate_convergence(inputs: ConvergenceInputs) -> ConvergenceResult:
         if not quiet_ok:
             return ConvergenceResult(False, "crosscheck", "quiet period has not elapsed")
         return ConvergenceResult(True, "crosscheck", "crosscheck APPROVE on current head; converged")
+
+    # ``auto`` with no crosscheck verdict yet: hold for the grace window
+    # before allowing the silent branch to fire, so a slow crosscheck
+    # cannot be raced by a premature silent convergence. After the grace
+    # window we treat crosscheck as "not connected" and fall through.
+    if (
+        inputs.review_source == "auto"
+        and inputs.crosscheck_verdict is None
+        and inputs.crosscheck_wait_seconds > 0
+        and inputs.pr_age_seconds is not None
+        and inputs.pr_age_seconds < inputs.crosscheck_wait_seconds
+    ):
+        remaining = inputs.crosscheck_wait_seconds - inputs.pr_age_seconds
+        return ConvergenceResult(
+            False,
+            "auto",
+            f"holding for crosscheck — {remaining:.0f}s left in the grace window",
+        )
 
     # Silent branch — no external reviewer.
     if inputs.has_new_feedback:

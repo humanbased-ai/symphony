@@ -253,6 +253,122 @@ class ConvergenceAutoSourceTests(unittest.TestCase):
         self.assertTrue(result.converged)
 
 
+class ConvergenceCrosscheckWaitTests(unittest.TestCase):
+    """``auto`` mode grace window for slow crosscheck.
+
+    crosscheck typically posts its ``VERDICT:`` comment minutes after a PR
+    opens — well after CI usually goes green. Without a wait window the
+    silent branch can race crosscheck and judge before code review
+    happens. The grace window holds ``auto`` open until either crosscheck
+    arrives or the PR is older than ``crosscheck_wait_seconds``."""
+
+    def _silent_ready_inputs(self, **overrides):
+        """All silent-branch preconditions met, so any non-converged
+        result must come from the grace window, not a silent block."""
+        base = dict(
+            review_source="auto",
+            crosscheck_verdict=None,
+            has_new_feedback=False,
+            ci_green=True,
+            pr_turn_advancing=False,
+            quiet_for_seconds=400,
+            quiet_period_seconds=300,
+            crosscheck_wait_seconds=1800,
+        )
+        base.update(overrides)
+        return ConvergenceInputs(**base)
+
+    def test_holds_for_crosscheck_when_pr_is_young(self):
+        result = evaluate_convergence(self._silent_ready_inputs(pr_age_seconds=120))
+        self.assertFalse(result.converged)
+        self.assertEqual(result.source, "auto")
+        self.assertIn("holding for crosscheck", result.reason)
+        # The reason names the remaining seconds so an operator can tell at
+        # a glance how long Symphony will wait.
+        self.assertIn("1680s", result.reason)
+
+    def test_falls_through_to_silent_after_grace_window(self):
+        """Once the PR is older than ``crosscheck_wait_seconds``, treat
+        crosscheck as not-connected and let silent fire as before."""
+        result = evaluate_convergence(
+            self._silent_ready_inputs(pr_age_seconds=1801)
+        )
+        self.assertTrue(result.converged)
+        self.assertEqual(result.source, "silent")
+
+    def test_falls_through_when_pr_age_unknown(self):
+        """If runtime could not parse a PR ``created_at`` the wait cannot
+        clock — fall through to silent so a parsing hiccup does not freeze
+        every acceptance forever."""
+        result = evaluate_convergence(self._silent_ready_inputs(pr_age_seconds=None))
+        self.assertTrue(result.converged)
+        self.assertEqual(result.source, "silent")
+
+    def test_wait_disabled_by_zero_keeps_legacy_behavior(self):
+        """``crosscheck_wait_seconds=0`` is the back-compat escape: legacy
+        configs and tests that never set the field must keep falling
+        through to silent immediately."""
+        result = evaluate_convergence(
+            self._silent_ready_inputs(crosscheck_wait_seconds=0, pr_age_seconds=10)
+        )
+        self.assertTrue(result.converged)
+        self.assertEqual(result.source, "silent")
+
+    def test_crosscheck_verdict_short_circuits_wait(self):
+        """When crosscheck DID post a verdict, the wait window is moot —
+        the crosscheck branch handles it directly."""
+        v = ReviewVerdict(
+            verdict=CrosscheckVerdict.APPROVE,
+            source="comment",
+            created_at=datetime(2026, 5, 30, tzinfo=timezone.utc),
+            sha="head1",
+        )
+        result = evaluate_convergence(
+            self._silent_ready_inputs(
+                crosscheck_verdict=v,
+                pr_age_seconds=10,
+                head_sha="head1",
+                last_commit_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
+            )
+        )
+        self.assertTrue(result.converged)
+        self.assertEqual(result.source, "crosscheck")
+
+    def test_review_source_crosscheck_ignores_wait(self):
+        """In ``crosscheck`` mode the absence of a verdict is already a
+        ``not converged`` reason on its own. The wait window only matters
+        for ``auto`` mode, which is the only mode that can fall through."""
+        result = evaluate_convergence(
+            ConvergenceInputs(
+                review_source="crosscheck",
+                crosscheck_verdict=None,
+                pr_age_seconds=10,
+                crosscheck_wait_seconds=1800,
+            )
+        )
+        self.assertFalse(result.converged)
+        self.assertEqual(result.source, "crosscheck")
+
+    def test_review_source_none_ignores_wait(self):
+        """``none`` says 'I do not use crosscheck'; the wait window must
+        not stall a user who explicitly opted out of code review."""
+        result = evaluate_convergence(
+            ConvergenceInputs(
+                review_source="none",
+                crosscheck_verdict=None,
+                has_new_feedback=False,
+                ci_green=True,
+                pr_turn_advancing=False,
+                quiet_for_seconds=400,
+                quiet_period_seconds=300,
+                pr_age_seconds=10,
+                crosscheck_wait_seconds=1800,
+            )
+        )
+        self.assertTrue(result.converged)
+        self.assertEqual(result.source, "silent")
+
+
 class AcceptanceVerdictModelTests(unittest.TestCase):
     def test_defaults(self):
         v = AcceptanceVerdict(overall="uncertain")
