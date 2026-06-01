@@ -3,6 +3,45 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.18 — 2026-06-01
+
+**[PR #152](https://github.com/humanbased-ai/symphony/pull/152)**: fix(acceptance): hold auto mode for crosscheck before falling through
+
+## Linear
+
+- Issue: N/A — surfaced by review of the acceptance gate intro doc: ``auto`` mode could race a slow crosscheck and judge a PR before code review posted.
+
+## Summary
+
+- ``auto`` mode holds open for ``acceptance.crosscheck_wait_seconds`` (default **1200 = 20 min**) before letting the silent branch fire. Inside that window, ``evaluate_convergence`` returns *"holding for crosscheck — Ns left in the grace window"* so the wait is observable from the log.
+- After the window expires (or when ``pr.created_at`` is unparseable), the silent branch becomes eligible again — crosscheck is treated as not connected, ``auto`` falls back to legacy behavior.
+- The wait does NOT apply to ``review_source: crosscheck`` (missing verdict is already a not-converged reason) or to ``review_source: none`` (explicit opt-out).
+- ``symphony init`` writes ``crosscheck_wait_seconds`` into the generated WORKFLOW.md so the knob is discoverable.
+
+## Decision Context
+
+- **Grace window not forever-wait**: a project may disconnect crosscheck mid-flight; ``auto`` is meant to be "use crosscheck if it shows up, else carry on". Forever-wait freezes acceptance on any project that drops crosscheck without flipping ``review_source: none``.
+- **Default 20 min**: crosscheck typically takes 1-5 min, worst case (long diffs, retries, queue depth) extends it. 20 min leaves headroom without making operators wait half an hour to discover crosscheck is offline. Tunable per project.
+- **``pr_age_seconds`` from ``pr.created_at``**: cheap signal already in the PR response. ``None`` (missing/malformed field) disables the wait so a parsing hiccup never freezes acceptance forever.
+- **``crosscheck_wait_seconds=0`` is the escape hatch**: legacy callers default to 0, keep working unchanged.
+
+## Validation
+
+- 134 tests pass (``test_acceptance test_acceptance_runtime test_github_client test_onboarding test_pr_polling``).
+- New ``ConvergenceCrosscheckWaitTests`` (7 cases) covers young/old/unknown PR age, wait=0 legacy, crosscheck verdict short-circuit, ``crosscheck`` / ``none`` modes ignored.
+- New ``GatherConvergenceInputsTests`` cases for ``pr_age_seconds`` computation.
+- ``OnboardingTests`` asserts scaffold writes the new field with a positive value.
+
+## UI Evidence
+
+- Not applicable: convergence logic + config field. No graphical surface.
+
+## Review
+
+- Reviewer / agent requested: ``@motivation-labs/crosscheck``.
+
+---
+
 ## v0.1.0.16 — 2026-06-01
 
 **[PR #147](https://github.com/humanbased-ai/symphony/pull/147)**: feat(onboarding): scaffold disabled-by-default acceptance block
