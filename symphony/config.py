@@ -326,6 +326,13 @@ class AcceptanceConfig:
     review_source: str = DEFAULT_ACCEPTANCE_REVIEW_SOURCE
     vendor: str | None = None
     auto_merge: bool = False
+    # When the judge returns ``fail``, ``bounce_back_on_fail=True`` forwards
+    # the unmet checks through ``_handle_pr_feedback`` so the implementer
+    # gets another turn (bounded by ``max_pr_turns``). Default OFF — early
+    # rollouts keep "judge → comment → human decides" semantics so an
+    # operator confirms each failed verdict before the loop spends agent
+    # budget on a retry. Flip to True once verdict quality is trusted.
+    bounce_back_on_fail: bool = False
     confidence_threshold: float = DEFAULT_ACCEPTANCE_CONFIDENCE_THRESHOLD
     quiet_period_seconds: int = DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS
     crosscheck_wait_seconds: int = DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS
@@ -347,6 +354,9 @@ class AcceptanceConfig:
             review_source=review_source,
             vendor=_string_value(acceptance.get("vendor")),
             auto_merge=_bool_value(acceptance.get("auto_merge"), False, "acceptance_auto_merge"),
+            bounce_back_on_fail=_bool_value(
+                acceptance.get("bounce_back_on_fail"), False, "acceptance_bounce_back_on_fail",
+            ),
             confidence_threshold=threshold,
             quiet_period_seconds=_non_negative_int(
                 acceptance.get("quiet_period_seconds"),

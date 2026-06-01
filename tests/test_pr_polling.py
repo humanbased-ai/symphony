@@ -461,10 +461,12 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
     trigger bounce-back — a retry can't resolve judge doubt, and pass is
     obviously success."""
 
-    def _run_with_verdict(self, tmp: Path, overall: str):
+    def _run_with_verdict(self, tmp: Path, overall: str, *, bounce_back_on_fail: bool = True):
         """Spin up a runtime where ``maybe_run_acceptance`` is patched to
-        return a synthetic verdict of the chosen overall. Returns the runner
-        so tests can assert whether the implementer was dispatched."""
+        return a synthetic verdict of the chosen overall. ``bounce_back_on_fail``
+        is opt-in in production (default False); tests targeting the bounce
+        loop pass True explicitly, the off-by-default behavior is exercised
+        by ``test_default_off_does_not_bounce_on_fail`` below."""
         from unittest.mock import patch
         from datetime import datetime, timezone
 
@@ -474,7 +476,11 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
         # Enable the acceptance block on this config (default is disabled).
         runtime.config = dataclasses.replace(
             runtime.config,
-            acceptance=dataclasses.replace(runtime.config.acceptance, enabled=True),
+            acceptance=dataclasses.replace(
+                runtime.config.acceptance,
+                enabled=True,
+                bounce_back_on_fail=bounce_back_on_fail,
+            ),
         )
         issue = make_issue()
         branch = "feat/sym-42-run1"
@@ -555,6 +561,21 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
                 await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
 
             self.assertEqual(runner.prompts, [], "max_pr_turns must cap bounce-back")
+
+    async def test_default_off_does_not_bounce_on_fail(self) -> None:
+        """``bounce_back_on_fail`` defaults to False — fail verdicts must
+        ONLY post the evaluation comment and wait for a human, NOT trigger
+        a re-dispatch. This is the production-safe behavior for new
+        rollouts; users who trust the verdict quality flip the flag on."""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, runner, branch, fake = self._run_with_verdict(
+                Path(tmp), "fail", bounce_back_on_fail=False,
+            )
+            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+                await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
+
+            self.assertEqual(runner.prompts, [], "default-off must skip the bounce")
 
 
 # ---------------------------------------------------------------------------
