@@ -77,6 +77,11 @@ class OnboardingTests(unittest.TestCase):
         # the generated WORKFLOW.md sees the grace-window knob and knows it
         # is tunable, rather than having to discover the default in source.
         self.assertIn("crosscheck_wait_seconds", acceptance_block)
+        # ``bounce_back_on_fail`` is written explicitly false. Production
+        # default is "judge → comment → human decides"; flipping this to
+        # true is the opt-in for fully-automated re-dispatch.
+        self.assertIn("bounce_back_on_fail", acceptance_block)
+        self.assertFalse(acceptance_block["bounce_back_on_fail"])
         # Sanity: the block round-trips through the same parser the runtime uses.
         # If a future edit drifts the scaffold away from the schema, this fails.
         parsed = AcceptanceConfig.from_mapping(workflow.config)

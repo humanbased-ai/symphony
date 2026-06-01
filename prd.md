@@ -1277,14 +1277,19 @@ buttons.
   as feedback. Phase 1 always escalates: the comment trails a "Symphony does
   not auto-merge" notice and no merge call is wired. Re-judging the same
   head sha is suppressed by tracking the last judged sha per branch.
-  Bounce-back: when the judge returns `fail`, the runtime calls
-  `_handle_pr_feedback` with the verdict's unmet checks rendered through
-  `render_bounce_back_feedback`, so the implementer agent gets another
-  turn on the same channel CI failures and reviewer comments use. Only
-  `fail` triggers bounce-back; `uncertain` stays human-escalated because
-  retrying cannot resolve the judge's doubt. The existing `max_pr_turns`
-  budget caps the loop — once exhausted, the standard "Maximum feedback
-  iterations reached" comment escalates to a human. Startup recovery:
+  Bounce-back: when the judge returns `fail`, the runtime can re-dispatch
+  the implementer with the verdict's unmet checks rendered through
+  `render_bounce_back_feedback` — same channel CI failures and reviewer
+  comments use. Gated on `acceptance.bounce_back_on_fail`, **default
+  `false`** so early rollouts keep "judge → comment → human decides"
+  semantics: the verdict comment is posted (the evaluation report a
+  human reads) and the loop waits. Operators flip
+  `bounce_back_on_fail: true` once they trust the judge's verdict
+  quality and want fully-automated retries. Only `fail` ever triggers
+  bounce-back; `uncertain` stays human-escalated because retrying cannot
+  resolve the judge's doubt. The existing `max_pr_turns` budget caps the
+  loop — once exhausted, the standard "Maximum feedback iterations
+  reached" comment escalates to a human. Startup recovery:
   `SymphonyRuntime.record_startup_open_prs()` scans tracker review-state
   issues at boot and re-seeds `_branch_to_issue` / `_branch_pr_numbers`
   from the ones with an open PR, so a daemon restart does not orphan

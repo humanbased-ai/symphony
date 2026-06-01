@@ -131,6 +131,7 @@ def generate_workflow(config: InitConfig) -> str:
                 "enabled": True,
                 "review_source": DEFAULT_ACCEPTANCE_REVIEW_SOURCE,
                 "auto_merge": False,
+                "bounce_back_on_fail": False,
                 "quiet_period_seconds": DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS,
                 "crosscheck_wait_seconds": DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS,
                 "guard_paths": list(DEFAULT_ACCEPTANCE_GUARD_PATHS),

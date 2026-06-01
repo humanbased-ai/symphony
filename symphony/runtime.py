@@ -723,17 +723,23 @@ class SymphonyRuntime:
             self._acceptance_judged_sha[branch] = judged_sha
 
         # Bounce-back: when the judge says the work doesn't meet the issue,
-        # re-dispatch the implementer with the verdict's unmet checks as
-        # feedback. Only ``fail`` triggers a retry — ``uncertain`` stays
-        # human-escalated because the judge's doubt is precisely what a
-        # retry can't resolve. ``judged_sha`` gates this so we only act on
-        # a verdict that we actually posted in this tick (not a cached
-        # already-judged short-circuit). ``_handle_pr_feedback`` already
-        # enforces ``max_pr_turns``, so a chronically-failing PR stops
-        # bouncing once the budget is exhausted and the standard "max
-        # iterations reached" comment escalates to a human.
+        # optionally re-dispatch the implementer with the verdict's unmet
+        # checks as feedback. Gated on ``config.acceptance.bounce_back_on_fail``
+        # (default False) — early rollouts keep "judge → comment → human
+        # decides" semantics so an operator confirms each failed verdict
+        # before the loop spends agent budget on a retry. Flip the config
+        # field to True once verdict quality is trusted. Only ``fail``
+        # triggers a retry — ``uncertain`` always stays human-escalated
+        # because the judge's doubt is precisely what a retry can't
+        # resolve. ``judged_sha`` gates this so we only act on a verdict
+        # that we actually posted in this tick (not a cached already-judged
+        # short-circuit). ``_handle_pr_feedback`` enforces ``max_pr_turns``,
+        # so a chronically-failing PR stops bouncing once the budget is
+        # exhausted and the standard "max iterations reached" comment
+        # escalates to a human.
         if (
-            judged_sha
+            self.config.acceptance.bounce_back_on_fail
+            and judged_sha
             and verdict is not None
             and verdict.overall == "fail"
         ):
