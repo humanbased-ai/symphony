@@ -1227,7 +1227,7 @@ implement/review loop has actually settled. The signal source is pluggable via
   To avoid racing a slow crosscheck — crosscheck typically posts its
   `VERDICT:` comment minutes after a PR opens, well after CI usually goes
   green — `auto` mode holds open for `acceptance.crosscheck_wait_seconds`
-  (default 1800s = 30 min) before allowing the silent branch to fire. Inside
+  (default 1200s = 20 min) before allowing the silent branch to fire. Inside
   the grace window, the gate returns `not converged` with reason
   *"holding for crosscheck — Ns left in the grace window"* so the wait is
   visible from the convergence log. Once the PR is older than the wait or

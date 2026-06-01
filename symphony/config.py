@@ -33,7 +33,7 @@ DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS = 300
 # the silent branch. crosscheck typically takes several minutes between PR
 # open and posting its ``VERDICT:`` comment; without a grace window the
 # silent branch can fire first and judge before code review has happened.
-DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS = 1_800  # 30 minutes
+DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS = 1_200  # 20 minutes
 DEFAULT_ACCEPTANCE_GUARD_PATHS = (
     "SPEC.md",
     "**/migrations/**",
