@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -57,6 +58,11 @@ class FakeWorkspace:
 class FakeTracker:
     def __init__(self) -> None:
         self.state_updates: list[tuple[str, str]] = []
+        # Issues the tracker is told to return when the runtime asks for a
+        # specific state-name set — used by ``record_startup_open_prs`` to
+        # rebuild PR tracking from the review-state cohort at startup.
+        self.issues_by_state: dict[str, list[Issue]] = {}
+        self.fetch_by_states_should_raise: bool = False
 
     async def fetch_candidate_issues(self) -> list[Issue]:
         return []
@@ -67,6 +73,14 @@ class FakeTracker:
     async def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
         self.state_updates.append((issue_id, state_name))
         return True
+
+    async def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
+        if self.fetch_by_states_should_raise:
+            raise RuntimeError("tracker fetch failed")
+        collected: list[Issue] = []
+        for state in state_names:
+            collected.extend(self.issues_by_state.get(state, []))
+        return collected
 
 
 class FakeWorkspaceManager:
@@ -433,3 +447,193 @@ class TestPRClosedDetection(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(branch, runtime._branch_pr_numbers)
             await runtime.poll_github_pr_feedback()
             self.assertEqual(runtime._branch_pr_numbers[branch], 99)
+
+
+# ---------------------------------------------------------------------------
+# Acceptance bounce-back: judge fail → re-dispatch implementer
+# ---------------------------------------------------------------------------
+
+
+class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
+    """When the acceptance judge says ``fail``, the runtime should funnel the
+    verdict through ``_handle_pr_feedback`` so the implementer gets another
+    turn (bounded by ``max_pr_turns``). ``uncertain`` and ``pass`` must not
+    trigger bounce-back — a retry can't resolve judge doubt, and pass is
+    obviously success."""
+
+    def _run_with_verdict(self, tmp: Path, overall: str):
+        """Spin up a runtime where ``maybe_run_acceptance`` is patched to
+        return a synthetic verdict of the chosen overall. Returns the runner
+        so tests can assert whether the implementer was dispatched."""
+        from unittest.mock import patch
+        from datetime import datetime, timezone
+
+        from symphony.acceptance import AcceptanceCheck, AcceptanceVerdict, ConvergenceResult
+
+        runtime, _, runner, _ = make_runtime(tmp)
+        # Enable the acceptance block on this config (default is disabled).
+        runtime.config = dataclasses.replace(
+            runtime.config,
+            acceptance=dataclasses.replace(runtime.config.acceptance, enabled=True),
+        )
+        issue = make_issue()
+        branch = "feat/sym-42-run1"
+        runtime._branch_to_issue[branch] = issue
+
+        verdict = AcceptanceVerdict(
+            overall=overall,
+            checks=(
+                AcceptanceCheck(
+                    requirement="widget must turn purple",
+                    status="unmet" if overall != "pass" else "met",
+                    evidence="Widget.tsx still emits blue",
+                    confidence=0.9,
+                ),
+            ),
+            confidence=0.9,
+            summary_for_human="Widget is still blue, not purple.",
+        )
+        convergence = ConvergenceResult(True, "silent", "converged")
+        snapshot = runtime._convergence_snapshots.get(branch)
+        from symphony.acceptance_runtime import ConvergenceSnapshot
+        fake_snapshot = ConvergenceSnapshot(
+            last_feedback_at=datetime(2026, 5, 30, tzinfo=timezone.utc),
+            pr_turns_observed=0,
+        )
+
+        async def fake_maybe_run_acceptance(*args, **kwargs):
+            return (fake_snapshot, "head-abc", verdict, convergence)
+
+        return runtime, runner, branch, fake_maybe_run_acceptance
+
+    async def test_fail_verdict_bounces_back_to_implementer(self) -> None:
+        """The contract: fail → ``_handle_pr_feedback`` runs → FakeRunner
+        receives a prompt containing the unmet requirement."""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, runner, branch, fake = self._run_with_verdict(Path(tmp), "fail")
+            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+                await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
+
+            self.assertEqual(len(runner.prompts), 1, "fail verdict must dispatch the implementer once")
+            prompt = runner.prompts[0]
+            self.assertIn("widget must turn purple", prompt)
+            self.assertIn("acceptance judge", prompt.lower())
+
+    async def test_uncertain_verdict_escalates_without_bouncing(self) -> None:
+        """``uncertain`` is the judge admitting it cannot tell — retrying
+        the implementer would not resolve that. Must NOT bounce-back."""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, runner, branch, fake = self._run_with_verdict(Path(tmp), "uncertain")
+            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+                await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
+
+            self.assertEqual(runner.prompts, [])
+
+    async def test_pass_verdict_does_not_bounce(self) -> None:
+        """Pass is success — no bounce-back, obviously."""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, runner, branch, fake = self._run_with_verdict(Path(tmp), "pass")
+            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+                await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
+
+            self.assertEqual(runner.prompts, [])
+
+    async def test_bounce_back_respects_max_pr_turns(self) -> None:
+        """Once ``max_pr_turns`` is exhausted, bounce-back must stop. The
+        runtime's existing ``_handle_pr_feedback`` enforces this; the test
+        verifies the integration end-to-end: pre-set _pr_turns to the cap,
+        verify no further dispatch and the standard max-turns comment."""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, runner, branch, fake = self._run_with_verdict(Path(tmp), "fail")
+            # Exhaust the budget so the next bounce attempt must be vetoed.
+            runtime._pr_turns[branch] = runtime.config.github.max_pr_turns
+            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+                await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
+
+            self.assertEqual(runner.prompts, [], "max_pr_turns must cap bounce-back")
+
+
+# ---------------------------------------------------------------------------
+# Startup recovery: rebuild branch→issue from review-state cohort
+# ---------------------------------------------------------------------------
+
+
+class TestRecordStartupOpenPRs(unittest.IsolatedAsyncioTestCase):
+    """The PR-poll loop only follows branches stored in ``_branch_to_issue``.
+    That map is process-local, so a daemon restart drops every PR that was
+    opened in a previous session. ``record_startup_open_prs`` rebuilds the
+    map from tracker-side review-state issues paired with their open PRs."""
+
+    async def test_review_issue_with_open_pr_is_recovered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, tracker, _, github = make_runtime(Path(tmp))
+            issue = make_issue(issue_id="issue-recover", identifier="SYM-99")
+            tracker.issues_by_state["In Review"] = [issue]
+            github.add_open_pr(issue.branch_name, 42)
+
+            await runtime.record_startup_open_prs()
+
+            self.assertEqual(runtime._branch_to_issue.get(issue.branch_name), issue)
+            self.assertEqual(runtime._branch_pr_numbers.get(issue.branch_name), 42)
+
+    async def test_review_issue_with_no_open_pr_is_skipped(self) -> None:
+        """Don't re-attach issues whose PR was already closed in the
+        previous session — they have nothing the poller can act on."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, tracker, _, _ = make_runtime(Path(tmp))
+            issue = make_issue(issue_id="issue-no-pr", identifier="SYM-100")
+            tracker.issues_by_state["In Review"] = [issue]
+            # No open PR added to github fake.
+
+            await runtime.record_startup_open_prs()
+
+            self.assertNotIn(issue.branch_name, runtime._branch_to_issue)
+            self.assertNotIn(issue.branch_name, runtime._branch_pr_numbers)
+
+    async def test_issue_without_branch_name_is_skipped(self) -> None:
+        """Issues that never spawned a workspace branch (e.g. moved to
+        review manually) cannot be paired with a PR — skip silently."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, tracker, _, _ = make_runtime(Path(tmp))
+            issue = dataclasses.replace(
+                make_issue(issue_id="issue-no-branch", identifier="SYM-101"),
+                branch_name=None,
+            )
+            tracker.issues_by_state["In Review"] = [issue]
+
+            await runtime.record_startup_open_prs()
+
+            self.assertEqual(runtime._branch_to_issue, {})
+
+    async def test_tracker_failure_does_not_crash_startup(self) -> None:
+        """Startup recovery is best-effort — a tracker outage must not
+        block the daemon from booting and serving the normal poll loop."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, tracker, _, _ = make_runtime(Path(tmp))
+            tracker.fetch_by_states_should_raise = True
+
+            # Must not raise.
+            await runtime.record_startup_open_prs()
+            self.assertEqual(runtime._branch_to_issue, {})
+
+    async def test_no_github_client_is_safe(self) -> None:
+        """No github client → no PRs to recover. Method must be a no-op
+        rather than raise an AttributeError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(Path(tmp))
+            tracker = FakeTracker()
+            runtime = SymphonyRuntime(
+                config=config,
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(tmp)),
+                runner=FakeRunner(),
+                github_client=None,
+            )
+            tracker.issues_by_state["In Review"] = [make_issue()]
+
+            await runtime.record_startup_open_prs()
+            self.assertEqual(runtime._branch_to_issue, {})

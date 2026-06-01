@@ -28,6 +28,7 @@ from symphony.acceptance_runtime import (
     gather_convergence_inputs,
     maybe_run_acceptance,
     parse_acceptance_verdict,
+    render_bounce_back_feedback,
     render_judge_user_prompt,
     render_verdict_comment,
 )
@@ -372,6 +373,69 @@ class RenderVerdictCommentTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # extract_changed_files_from_diff
 # --------------------------------------------------------------------------- #
+
+
+class RenderBounceBackFeedbackTests(unittest.TestCase):
+    """The bounce-back text the runtime forwards through
+    ``_handle_pr_feedback`` when the judge says ``fail``. Only unmet /
+    ``cannot_tell`` checks should surface — met checks would dilute the
+    implementer's attention budget."""
+
+    def _verdict(self, **kw) -> AcceptanceVerdict:
+        defaults = dict(
+            overall="fail",
+            checks=(
+                AcceptanceCheck(
+                    requirement="widget must turn purple",
+                    status="unmet",
+                    evidence="Widget.tsx:42 still emits blue",
+                    confidence=0.9,
+                ),
+                AcceptanceCheck(
+                    requirement="logs the change",
+                    status="met",
+                    evidence="logger.info call added",
+                    confidence=0.9,
+                ),
+            ),
+            confidence=0.85,
+            summary_for_human="Widget is still blue, not purple.",
+        )
+        defaults.update(kw)
+        return AcceptanceVerdict(**defaults)
+
+    def test_includes_summary_and_unmet_only(self):
+        text = render_bounce_back_feedback(self._verdict())
+        self.assertIn("widget must turn purple", text)
+        self.assertIn("Widget.tsx:42", text)
+        self.assertIn("Widget is still blue", text)
+        # The met check must not be repeated — it would just be noise.
+        self.assertNotIn("logs the change", text)
+        self.assertNotIn("logger.info", text)
+
+    def test_handles_missing_summary(self):
+        text = render_bounce_back_feedback(self._verdict(summary_for_human=""))
+        self.assertIn("(judge returned no summary)", text)
+
+    def test_handles_no_unmet_checks_gracefully(self):
+        """If somehow all checks are met but verdict overall is still fail
+        (shouldn't happen, but defensive), the message still asks for a
+        fix without listing nothing."""
+        verdict = self._verdict(
+            checks=(
+                AcceptanceCheck(requirement="x", status="met", evidence="", confidence=0.9),
+            ),
+        )
+        text = render_bounce_back_feedback(verdict)
+        self.assertIn("Please address", text)
+        self.assertNotIn("Unmet requirements:", text)
+
+    def test_mentions_fail_verdict_explicitly(self):
+        """The implementer agent needs to know the request originates from
+        the judge, not a reviewer comment, so it doesn't second-guess."""
+        text = render_bounce_back_feedback(self._verdict())
+        self.assertIn("acceptance judge", text.lower())
+        self.assertIn("fail", text.lower())
 
 
 class ExtractChangedFilesTests(unittest.TestCase):

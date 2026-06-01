@@ -1266,12 +1266,25 @@ buttons.
   as feedback. Phase 1 always escalates: the comment trails a "Symphony does
   not auto-merge" notice and no merge call is wired. Re-judging the same
   head sha is suppressed by tracking the last judged sha per branch.
-  Bounce-back (judge `fail` → re-implement, reusing `max_pr_turns`) is not
-  yet wired and remains a follow-up. Tested in
-  `tests/test_acceptance_runtime.py` (38 unit tests covering verdict
-  parsing, prompt/comment rendering, diff path extraction, convergence-input
-  gathering, and the orchestrator's converged / not-converged / already-
-  judged / sensitive-path / unparseable / post-failure paths).
+  Bounce-back: when the judge returns `fail`, the runtime calls
+  `_handle_pr_feedback` with the verdict's unmet checks rendered through
+  `render_bounce_back_feedback`, so the implementer agent gets another
+  turn on the same channel CI failures and reviewer comments use. Only
+  `fail` triggers bounce-back; `uncertain` stays human-escalated because
+  retrying cannot resolve the judge's doubt. The existing `max_pr_turns`
+  budget caps the loop — once exhausted, the standard "Maximum feedback
+  iterations reached" comment escalates to a human. Startup recovery:
+  `SymphonyRuntime.record_startup_open_prs()` scans tracker review-state
+  issues at boot and re-seeds `_branch_to_issue` / `_branch_pr_numbers`
+  from the ones with an open PR, so a daemon restart does not orphan
+  in-flight PRs from acceptance / PR-poll tracking. Tested in
+  `tests/test_acceptance_runtime.py` and `tests/test_pr_polling.py`
+  (covering verdict parsing, prompt/comment rendering, diff path
+  extraction, convergence-input gathering, the orchestrator's
+  converged / not-converged / already-judged / sensitive-path /
+  unparseable / post-failure paths, plus bounce-back fail-vs-uncertain
+  routing, max_pr_turns capping, and startup-recovery branch / PR /
+  tracker-error / no-client cases).
 - [x] **[Acceptance: structured verdict + auto-merge]** — Phase 2 auto-merge
   shipped. `GitHubClient.merge_pr()` calls
   `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with `merge_method=squash` and

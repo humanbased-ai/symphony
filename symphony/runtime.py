@@ -16,6 +16,7 @@ from symphony.acceptance_runtime import (
     ClaudeCodeJudgeRunner,
     ConvergenceSnapshot,
     maybe_run_acceptance,
+    render_bounce_back_feedback,
 )
 from symphony.agents.base import AgentEvent, AgentEventCallback, TokenUsage
 from symphony.config import WorkflowConfig
@@ -699,7 +700,7 @@ class SymphonyRuntime:
             self._acceptance_judge = ClaudeCodeJudgeRunner(model=self.config.acceptance.vendor)
         now = datetime.now(timezone.utc)
         try:
-            snapshot, judged_sha, _verdict, _result = await maybe_run_acceptance(
+            snapshot, judged_sha, verdict, _result = await maybe_run_acceptance(
                 github_client=self.github_client,
                 judge=self._acceptance_judge,
                 config=self.config.acceptance,
@@ -720,6 +721,70 @@ class SymphonyRuntime:
         self._convergence_snapshots[branch] = snapshot
         if judged_sha:
             self._acceptance_judged_sha[branch] = judged_sha
+
+        # Bounce-back: when the judge says the work doesn't meet the issue,
+        # re-dispatch the implementer with the verdict's unmet checks as
+        # feedback. Only ``fail`` triggers a retry — ``uncertain`` stays
+        # human-escalated because the judge's doubt is precisely what a
+        # retry can't resolve. ``judged_sha`` gates this so we only act on
+        # a verdict that we actually posted in this tick (not a cached
+        # already-judged short-circuit). ``_handle_pr_feedback`` already
+        # enforces ``max_pr_turns``, so a chronically-failing PR stops
+        # bouncing once the budget is exhausted and the standard "max
+        # iterations reached" comment escalates to a human.
+        if (
+            judged_sha
+            and verdict is not None
+            and verdict.overall == "fail"
+        ):
+            LOGGER.info(
+                "Acceptance verdict fail on PR #%d (%s) — bouncing back to implementer.",
+                pr_number, issue.identifier,
+            )
+            await self._handle_pr_feedback(
+                branch, pr_number, render_bounce_back_feedback(verdict),
+            )
+
+    async def record_startup_open_prs(self) -> None:
+        """Rebuild ``_branch_to_issue`` / ``_branch_pr_numbers`` from tracker
+        review-state issues whose branch still has an open PR.
+
+        Both maps live in process memory only, so a daemon restart wipes
+        them — and the PR-poll loop then ignores any PR that was opened in
+        a previous session. Without this scan, acceptance never fires on
+        recovered PRs and merges/closes never sync back to the tracker.
+        Best-effort: a tracker or GitHub hiccup logs and continues so the
+        daemon can still start.
+        """
+        if self.github_client is None or not hasattr(self.tracker, "fetch_issues_by_states"):
+            return
+        review_state = self.config.tracker.review_state
+        try:
+            review_issues = list(await _call_sync(self.tracker.fetch_issues_by_states, [review_state]))
+        except Exception:  # noqa: BLE001 — startup recovery must not block boot.
+            LOGGER.debug("startup_open_prs_fetch_failed", exc_info=True)
+            return
+
+        recovered = 0
+        for issue in review_issues:
+            branch = issue.branch_name
+            if not branch:
+                continue
+            try:
+                pr_number = await asyncio.to_thread(self.github_client.find_open_pr_for_branch, branch)
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("startup_open_prs_lookup_failed for %s", issue.identifier, exc_info=True)
+                continue
+            if pr_number is None:
+                continue
+            self._branch_to_issue[branch] = issue
+            self._branch_pr_numbers[branch] = pr_number
+            recovered += 1
+        if recovered:
+            LOGGER.info(
+                "Startup recovery: %d open PR(s) re-attached to PR-poll tracking.",
+                recovered,
+            )
 
     async def handle_github_pr_event(self, event: GitHubEvent) -> None:
         """Route a GitHub PR event to the appropriate handler."""

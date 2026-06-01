@@ -68,6 +68,7 @@ __all__ = (
     "parse_acceptance_verdict",
     "render_verdict_comment",
     "render_judge_user_prompt",
+    "render_bounce_back_feedback",
     "extract_changed_files_from_diff",
 )
 
@@ -504,6 +505,46 @@ def render_verdict_comment(
                 "makes the final call."
             )
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Bounce-back feedback rendering
+# --------------------------------------------------------------------------- #
+
+
+def render_bounce_back_feedback(verdict: AcceptanceVerdict) -> str:
+    """Render a ``fail`` verdict as feedback the implementer agent can act on.
+
+    The PR already carries the full ``render_verdict_comment`` text. This
+    helper produces a shorter, action-oriented restatement that the runtime
+    forwards through ``_handle_pr_feedback`` — the same channel CI failures
+    and reviewer comments use — so the implementer sees the unmet
+    requirements with the same shape as any other feedback turn.
+
+    Only the unmet / ``cannot_tell`` checks are surfaced; ``met`` checks
+    would just be noise and would dilute the agent's attention budget.
+    """
+    parts = [
+        "The acceptance judge re-checked this PR against the original issue and the verdict was **fail**.",
+        "",
+        verdict.summary_for_human or "(judge returned no summary)",
+        "",
+    ]
+    unmet = tuple(c for c in verdict.checks if c.status != "met")
+    if unmet:
+        parts.append("Unmet requirements:")
+        parts.append("")
+        for check in unmet:
+            line = f"- [{check.status}] {check.requirement}"
+            parts.append(line)
+            if check.evidence:
+                parts.append(f"  - judge noted: {check.evidence}")
+        parts.append("")
+    parts.append(
+        "Please address each unmet requirement and push the fix. Do not "
+        "rewrite the parts the judge already accepted — keep the diff focused."
+    )
+    return "\n".join(parts)
 
 
 # --------------------------------------------------------------------------- #
