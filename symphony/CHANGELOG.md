@@ -3,6 +3,46 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.11 — 2026-06-01
+
+**[PR #145](https://github.com/humanbased-ai/symphony/pull/145)**: feat(acceptance): judge system prompt with scope-boundary tests
+
+## Linear
+
+- Issue: N/A — extends the `feat/acceptance-agent` branch (commit `2af3731` already shipped the convergence core). This PR completes the prompt layer ahead of the runtime-wiring follow-up tracked under `prd.md` §7.5.1 `[Acceptance: runtime wiring + judge]`.
+
+## Summary
+
+- Add `ACCEPTANCE_JUDGE_SYSTEM_PROMPT` in `symphony/acceptance.py` — the system prompt the runner must pass verbatim when it dispatches the one-shot acceptance judge.
+- Prompt frames scope as "did it do the right thing" (issue requirements, item by item) and explicitly lists out-of-scope dimensions (style, naming, refactoring, latent bugs, performance, security) so the judge does not drift into code review.
+- Prompt mirrors the `AcceptanceVerdict` output shape so the runner can parse the response, and names guard-path triggers that force `overall = "uncertain"` regardless of per-check confidence.
+- Lock the prompt with 3 regression tests that fail review if a future edit weakens scope or guard-rail wording.
+
+## Decision Context
+
+- Selected solution: keep the prompt as a single module-level constant co-located with the convergence core, so the gate's scope boundary is reviewable in one place and the runner imports a stable, version-controlled string.
+- Alternatives considered:
+  - Inline the prompt inside the future runner module — rejected: the prompt is product contract; co-locating with the core keeps scope visible without cross-file hunting.
+  - Defer the prompt to the runtime-wiring PR — rejected: the prompt is independently reviewable today, and shipping it separately keeps the next PR purely about I/O (poller integration, judge dispatch, verdict comment).
+- Follow-up work: `[Acceptance: runtime wiring + judge]` — gather convergence inputs in the PR poller, dispatch the judge with this prompt + issue text + diff at the post-poll quiet point, and post the human-readable verdict comment. Reuses `max_pr_turns`.
+
+## Validation
+
+- Targeted checks: `uv run python -m unittest tests.test_acceptance` — 30 tests pass (27 from the prior commit + 3 new prompt-lock tests).
+- Full gates: not run locally — this change is a pure-string constant plus assertions, no UI/runtime surface to exercise.
+- Not run: integration / end-to-end (the acceptance runner does not exist yet; it lands in the follow-up PR).
+
+## UI Evidence
+
+- Not applicable: backend-only change to a pure-string constant.
+
+## Review
+
+- Reviewer / agent requested: `@motivation-labs/crosscheck`.
+- Blocking comments resolved: N/A — new PR.
+
+---
+
 ## v0.1.0.10 — 2026-05-29
 
 **[PR #142](https://github.com/codatta/symphony/pull/142)**: chore: default codex-safe preset to 3 concurrent agents
