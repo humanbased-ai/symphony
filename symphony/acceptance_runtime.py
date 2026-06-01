@@ -441,11 +441,19 @@ def render_verdict_comment(
     *,
     escalation: bool = True,
     convergence: ConvergenceResult | None = None,
+    merged: bool = False,
+    auto_merge_skip_reason: str | None = None,
 ) -> str:
     """Render the judge verdict as a Markdown PR comment for human reviewers.
 
     The first line is the ``SYMPHONY_BOT_MARKER`` so the poller's own filtering
     skips it on the next tick rather than re-classifying it as user feedback.
+
+    ``merged`` reflects the actual auto-merge outcome — when True the comment
+    celebrates the auto-merge and skips the human-escalation tail. When False
+    and ``auto_merge_skip_reason`` is set, the comment names the specific
+    reason auto-merge did not fire, so the gate's behavior stays auditable
+    from the PR thread alone without digging into Symphony logs.
     """
     overall_label = verdict.overall.upper()
     lines: list[str] = [
@@ -476,11 +484,25 @@ def render_verdict_comment(
         lines.append(f"_Convergence source: {convergence.source} — {convergence.reason}_")
         lines.append("")
     lines.append(f"_Overall confidence: {verdict.confidence:.2f}_")
-    if escalation:
+    if merged:
         lines.append("")
         lines.append(
-            "**Phase 1: Symphony does not auto-merge. A human reviewer makes the final call.**"
+            "**Auto-merged by acceptance gate** — pass verdict at confidence "
+            "at or above threshold and no guard-rail paths touched. The PR was "
+            "squash-merged via GitHub's merge API."
         )
+    elif escalation:
+        lines.append("")
+        if auto_merge_skip_reason:
+            lines.append(
+                f"**Auto-merge did not fire** — {auto_merge_skip_reason}. "
+                "A human reviewer makes the final call."
+            )
+        else:
+            lines.append(
+                "**Symphony will not auto-merge this PR.** A human reviewer "
+                "makes the final call."
+            )
     return "\n".join(lines)
 
 
@@ -607,17 +629,47 @@ async def maybe_run_acceptance(
                 touched_sensitive_paths=merged_touched,
             )
 
+    # Phase 2 auto-merge decision. Off by default — ``config.auto_merge`` must
+    # be explicitly true. Even then we only fire on the safest combination:
+    # pass + confidence at or above the threshold + zero touched guard paths.
+    # GitHub branch protection / required reviews remain the final tripwire:
+    # if ``merge_pr`` returns False (e.g. GH says CI is not green, reviews are
+    # missing, or HEAD has advanced past ``head_sha``), we fall back to the
+    # human-escalation comment path so nothing slips through silently.
+    merged = False
+    skip_reason: str | None = None
+    if config.auto_merge:
+        skip_reason = _auto_merge_skip_reason(verdict, config.confidence_threshold)
+        if skip_reason is None:
+            merged = await asyncio.to_thread(
+                github_client.merge_pr,
+                pr_number,
+                sha=head_sha,
+                merge_method="squash",
+            )
+            if not merged:
+                # GitHub-side rejection (branch protection, stale sha, missing
+                # reviews). Surface it on the PR rather than silently failing.
+                skip_reason = "GitHub rejected the merge (branch protection, stale head sha, or missing required reviews)"
+
     body = render_verdict_comment(
         verdict,
-        escalation=not config.auto_merge,
+        escalation=not merged,
         convergence=result,
+        merged=merged,
+        auto_merge_skip_reason=skip_reason if config.auto_merge and not merged else None,
     )
     posted = await asyncio.to_thread(github_client.post_pr_comment, pr_number, body)
     judged_sha = head_sha if posted else None
+    if merged:
+        LOGGER.info(
+            "acceptance_auto_merged pr=#%d issue=%s confidence=%.2f sha=%s",
+            pr_number, issue.identifier, verdict.confidence, head_sha,
+        )
     if posted:
         LOGGER.info(
-            "acceptance_verdict_posted pr=#%d issue=%s overall=%s confidence=%.2f",
-            pr_number, issue.identifier, verdict.overall, verdict.confidence,
+            "acceptance_verdict_posted pr=#%d issue=%s overall=%s confidence=%.2f merged=%s",
+            pr_number, issue.identifier, verdict.overall, verdict.confidence, merged,
         )
     else:
         LOGGER.warning(
@@ -625,6 +677,28 @@ async def maybe_run_acceptance(
             pr_number, issue.identifier,
         )
     return (new_snapshot, judged_sha, verdict, result)
+
+
+def _auto_merge_skip_reason(
+    verdict: AcceptanceVerdict, confidence_threshold: float
+) -> str | None:
+    """Return why auto-merge should be skipped, or None when all four
+    preconditions hold. Returning a string also gives the PR comment a
+    human-readable explanation without forcing every caller to recompute it.
+    """
+    if verdict.overall != "pass":
+        return f"verdict is {verdict.overall}, not pass"
+    if verdict.confidence < confidence_threshold:
+        return (
+            f"overall confidence {verdict.confidence:.2f} is below the "
+            f"configured threshold {confidence_threshold:.2f}"
+        )
+    if verdict.touched_sensitive_paths:
+        return (
+            "diff touches guard-rail paths "
+            f"({', '.join(verdict.touched_sensitive_paths)})"
+        )
+    return None
 
 
 def _initial_snapshot(now: datetime, pr_turns: int) -> ConvergenceSnapshot:
