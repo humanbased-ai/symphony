@@ -778,6 +778,8 @@ class AutoMergeTests(unittest.IsolatedAsyncioTestCase):
         judge_response: str | None = None,
         pr_head_sha: str = "head-auto",
         merge_succeeds: bool = True,
+        tracker: object | None = None,
+        done_state: str = "Done",
     ):
         gh = FakeGitHubClient(
             pr={"head": {"sha": pr_head_sha}, "updated_at": "2026-05-30T00:00:00Z"},
@@ -804,6 +806,8 @@ class AutoMergeTests(unittest.IsolatedAsyncioTestCase):
             now=datetime(2026, 5, 30, 0, 0, 0, tzinfo=UTC),
             saw_new_feedback_this_tick=False,
             already_judged_sha=None,
+            tracker=tracker,
+            done_state=done_state,
         )
         return gh, verdict, judged_sha
 
@@ -892,6 +896,131 @@ class AutoMergeTests(unittest.IsolatedAsyncioTestCase):
         body = gh.posted_comments[0][1]
         self.assertIn("GitHub rejected", body)
         self.assertNotIn("Auto-merged by acceptance gate", body)
+
+
+class _FakeTracker:
+    """In-process double for the Linear tracker used by acceptance.
+
+    Only ``update_issue_state_by_name`` is implemented because that is the
+    only method ``maybe_run_acceptance`` calls. ``calls`` records every
+    invocation so tests can assert the right ``(issue_id, state_name)``
+    pair was forwarded."""
+
+    def __init__(self, *, should_succeed: bool = True, should_raise: bool = False) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.should_succeed = should_succeed
+        self.should_raise = should_raise
+
+    def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
+        if self.should_raise:
+            raise RuntimeError("tracker boom")
+        self.calls.append((issue_id, state_name))
+        return self.should_succeed
+
+
+class AutoMergeTrackerTransitionTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 2 add-on: when auto-merge succeeds we immediately transition
+    the tracker card to ``done_state`` in the same tick, instead of waiting
+    for the PR poll loop's next ``_handle_pr_closed`` round-trip. That
+    round-trip is best-effort — it only fires while ``_branch_to_issue``
+    still carries the branch, which is not guaranteed after a daemon
+    restart or an out-of-band merge.
+    """
+
+    async def _run(
+        self,
+        *,
+        tracker: object | None,
+        merge_succeeds: bool = True,
+        judge_response: str | None = None,
+        done_state: str = "Done",
+    ):
+        gh = FakeGitHubClient(
+            pr={"head": {"sha": "head-auto"}, "updated_at": "2026-05-30T00:00:00Z"},
+            diff="diff --git a/foo.py b/foo.py\n+y\n",
+        )
+        gh.merge_pr_should_succeed = merge_succeeds
+        cfg = AcceptanceConfig(
+            enabled=True, review_source="none", quiet_period_seconds=60,
+            auto_merge=True, confidence_threshold=0.8,
+        )
+        judge = StubJudge(response=judge_response or _passing_judge_response())
+        _, judged_sha, verdict, _ = await maybe_run_acceptance(
+            github_client=gh,
+            judge=judge,  # type: ignore[arg-type]
+            config=cfg,
+            issue=_issue(),
+            branch="branch-1",
+            pr_number=42,
+            pr_turns=1,
+            snapshot=_make_snap(),
+            now=datetime(2026, 5, 30, 0, 0, 0, tzinfo=UTC),
+            saw_new_feedback_this_tick=False,
+            already_judged_sha=None,
+            tracker=tracker,
+            done_state=done_state,
+        )
+        return gh, verdict, judged_sha
+
+    async def test_successful_auto_merge_transitions_tracker_to_done(self):
+        tracker = _FakeTracker()
+        gh, verdict, _ = await self._run(tracker=tracker)
+        assert verdict is not None
+        self.assertEqual(len(gh.merge_calls), 1)
+        self.assertEqual(tracker.calls, [(_issue().id, "Done")])
+
+    async def test_custom_done_state_is_forwarded(self):
+        """``done_state`` flows through from the runtime config — pass a
+        non-default value to confirm there's no hard-coded ``"Done"``."""
+        tracker = _FakeTracker()
+        await self._run(tracker=tracker, done_state="Shipped")
+        self.assertEqual(tracker.calls, [(_issue().id, "Shipped")])
+
+    async def test_skipped_auto_merge_does_not_touch_tracker(self):
+        """Low confidence → no merge → no tracker transition. Otherwise
+        we would move the card forward on an untrusted verdict."""
+        tracker = _FakeTracker()
+        low_conf = _passing_judge_response().replace('"confidence": 0.92', '"confidence": 0.50')
+        gh, _, _ = await self._run(tracker=tracker, judge_response=low_conf)
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(tracker.calls, [])
+
+    async def test_github_rejection_does_not_transition_tracker(self):
+        """GH rejected the merge → PR still open → tracker must stay put."""
+        tracker = _FakeTracker()
+        gh, _, _ = await self._run(tracker=tracker, merge_succeeds=False)
+        self.assertEqual(len(gh.merge_calls), 1)
+        self.assertEqual(tracker.calls, [])
+
+    async def test_tracker_returning_false_does_not_undo_merge(self):
+        """The merge succeeded; a tracker hiccup must not undo it."""
+        tracker = _FakeTracker(should_succeed=False)
+        gh, _, judged_sha = await self._run(tracker=tracker)
+        self.assertEqual(len(gh.merge_calls), 1)
+        self.assertEqual(len(tracker.calls), 1)
+        self.assertEqual(judged_sha, "head-auto")
+
+    async def test_tracker_raising_exception_does_not_undo_merge(self):
+        """Any tracker exception is swallowed so the GitHub-merge success
+        stays the source of truth."""
+        tracker = _FakeTracker(should_raise=True)
+        gh, _, judged_sha = await self._run(tracker=tracker)
+        self.assertEqual(len(gh.merge_calls), 1)
+        self.assertEqual(judged_sha, "head-auto")
+
+    async def test_no_tracker_argument_is_safe(self):
+        """``tracker=None`` (the default) must work — old call sites that
+        do not pass a tracker still get the original behavior."""
+        gh, _, _ = await self._run(tracker=None)
+        self.assertEqual(len(gh.merge_calls), 1)
+
+    async def test_tracker_without_update_method_is_safe(self):
+        """Defensive: an object that does not implement
+        ``update_issue_state_by_name`` must be a no-op, not an AttributeError."""
+        class _Bare:
+            pass
+        gh, _, _ = await self._run(tracker=_Bare())
+        self.assertEqual(len(gh.merge_calls), 1)
 
 
 if __name__ == "__main__":

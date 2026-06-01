@@ -711,6 +711,8 @@ class SymphonyRuntime:
                 now=now,
                 saw_new_feedback_this_tick=saw_new_feedback_this_tick,
                 already_judged_sha=self._acceptance_judged_sha.get(branch),
+                tracker=self.tracker,
+                done_state=self.config.tracker.done_state,
             )
         except Exception:  # noqa: BLE001 - acceptance must never crash the tick.
             LOGGER.debug("acceptance_check_error for branch %r", branch, exc_info=True)

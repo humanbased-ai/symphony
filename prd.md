@@ -1287,8 +1287,17 @@ buttons.
   so the gate's behavior is auditable from the PR thread alone. When the
   merge call itself returns False — GitHub branch protection, required
   reviews, or a stale head sha — the runtime falls back to the human-
-  escalation comment path; nothing silently fails. `auto_merge` stays
-  `False` by default in `AcceptanceConfig` and in the onboarding scaffold
+  escalation comment path; nothing silently fails. On a successful
+  auto-merge the runtime immediately calls
+  `tracker.update_issue_state_by_name(issue.id, done_state)` in the same
+  tick instead of waiting for the PR-poll loop's next `_handle_pr_closed`
+  round-trip; the loop is best-effort (it only fires while
+  `_branch_to_issue` still carries the branch, which is not guaranteed
+  after a daemon restart or out-of-band merge), so the direct
+  transition closes the gap. Tracker failures (return False or raise)
+  log a warning and are otherwise swallowed — a tracker hiccup must
+  not undo a successful GitHub merge. `auto_merge` stays `False` by
+  default in `AcceptanceConfig` and in the onboarding scaffold
   (`symphony init` writes `auto_merge: false` even when the user opts the
   gate in), because auto-merge is the only Symphony feature that
   irreversibly touches `main` — flipping it on must be an explicit edit.

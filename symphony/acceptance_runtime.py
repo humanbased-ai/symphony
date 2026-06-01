@@ -550,6 +550,8 @@ async def maybe_run_acceptance(
     now: datetime,
     saw_new_feedback_this_tick: bool,
     already_judged_sha: str | None,
+    tracker: Any | None = None,
+    done_state: str = "Done",
 ) -> tuple[ConvergenceSnapshot, str | None, AcceptanceVerdict | None, ConvergenceResult | None]:
     """Run the acceptance check for one PR-poll tick.
 
@@ -557,6 +559,13 @@ async def maybe_run_acceptance(
     can update its per-branch state. ``judged_sha`` is non-None only when this
     tick actually posted a verdict; the caller uses it to suppress re-judging
     the same head sha on subsequent ticks.
+
+    When auto-merge fires and ``tracker`` is provided, the issue's tracker
+    state is transitioned to ``done_state`` immediately. The PR-poll loop's
+    ``_handle_pr_closed`` path would eventually do the same on its next tick,
+    but that fallback only fires if the closed PR is still in
+    ``_branch_to_issue``; transitioning here closes that gap and keeps the
+    Linear card in sync with the merged PR within the same tick.
     """
     if not config.enabled or github_client is None:
         return (snapshot or _initial_snapshot(now, pr_turns), None, None, None)
@@ -666,6 +675,32 @@ async def maybe_run_acceptance(
             "acceptance_auto_merged pr=#%d issue=%s confidence=%.2f sha=%s",
             pr_number, issue.identifier, verdict.confidence, head_sha,
         )
+        # Sync the tracker card to ``done_state`` in the same tick as the
+        # merge. The PR-poll loop's ``_handle_pr_closed`` path would normally
+        # cover this, but it only fires while ``_branch_to_issue`` still
+        # carries the branch (which is not guaranteed after a daemon restart
+        # or out-of-band merge). Best-effort: log and continue on failure so
+        # a tracker hiccup never undoes a successful GitHub merge.
+        if tracker is not None and hasattr(tracker, "update_issue_state_by_name"):
+            try:
+                ok = await asyncio.to_thread(
+                    tracker.update_issue_state_by_name, issue.id, done_state,
+                )
+                if ok:
+                    LOGGER.info(
+                        "acceptance_tracker_transitioned pr=#%d issue=%s → %s",
+                        pr_number, issue.identifier, done_state,
+                    )
+                else:
+                    LOGGER.warning(
+                        "acceptance_tracker_transition_failed pr=#%d issue=%s target=%s",
+                        pr_number, issue.identifier, done_state,
+                    )
+            except Exception:  # noqa: BLE001 — must not undo a successful merge.
+                LOGGER.warning(
+                    "acceptance_tracker_transition_error pr=#%d issue=%s target=%s",
+                    pr_number, issue.identifier, done_state, exc_info=True,
+                )
     if posted:
         LOGGER.info(
             "acceptance_verdict_posted pr=#%d issue=%s overall=%s confidence=%.2f merged=%s",
