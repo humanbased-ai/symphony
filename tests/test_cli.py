@@ -1147,5 +1147,76 @@ class FirstRunWizardTests(unittest.TestCase):
         self.assertEqual(2, raised.exception.code)
 
 
+class InfoCommandTests(unittest.TestCase):
+    _WORKFLOW = """---
+tracker:
+  kind: linear
+  project_slug: symphony-ai-agent-orchestration
+agent:
+  runner: claude_code
+---
+Body
+"""
+
+    def test_info_text_prints_three_sections(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(self._WORKFLOW, encoding="utf-8")
+
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = main(["info", str(workflow_path)])
+
+            output = out.getvalue()
+            self.assertEqual(0, exit_code)
+            self.assertIn(f"Symphony {__version__}", output)
+            self.assertIn(str(workflow_path.resolve()), output)
+            self.assertIn("claude_code", output)
+            self.assertIn("linear", output)
+
+    def test_info_json_emits_six_keys(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(self._WORKFLOW, encoding="utf-8")
+
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = main(["info", str(workflow_path), "--json"])
+
+            self.assertEqual(0, exit_code)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(
+                {"version", "python", "platform", "workflow_path", "runner", "tracker"},
+                set(payload),
+            )
+            self.assertEqual(__version__, payload["version"])
+            self.assertEqual("claude_code", payload["runner"])
+            self.assertEqual("linear", payload["tracker"])
+            self.assertEqual(str(workflow_path.resolve()), payload["workflow_path"])
+
+    def test_info_missing_workflow_does_not_crash(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "WORKFLOW.md"
+
+            text_out = StringIO()
+            with redirect_stdout(text_out):
+                text_code = main(["info", str(missing)])
+            self.assertEqual(0, text_code)
+            self.assertIn("not found", text_out.getvalue())
+
+            json_out = StringIO()
+            with redirect_stdout(json_out):
+                json_code = main(["info", str(missing), "--json"])
+            self.assertEqual(0, json_code)
+            payload = json.loads(json_out.getvalue())
+            self.assertEqual("not found", payload["workflow_path"])
+            self.assertEqual("not found", payload["runner"])
+            self.assertEqual("not found", payload["tracker"])
+
+
 if __name__ == "__main__":
     unittest.main()

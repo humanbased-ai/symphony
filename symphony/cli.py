@@ -6,6 +6,7 @@ import getpass
 import logging
 import logging.handlers
 import os
+import platform
 import re
 import secrets
 import shlex
@@ -387,6 +388,26 @@ def build_doctor_parser() -> argparse.ArgumentParser:
         default="WARNING",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
         help="Console log level. Defaults to WARNING.",
+    )
+    return parser
+
+
+def build_info_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=f"{_cli_name()} info",
+        description="Print Symphony version, platform, and workflow diagnostics.",
+    )
+    _add_version_argument(parser)
+    parser.add_argument(
+        "workflow_path",
+        nargs="?",
+        default=DEFAULT_WORKFLOW_PATH,
+        help="Path to repository WORKFLOW.md. Defaults to ./WORKFLOW.md.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the diagnostics as a single JSON object instead of text.",
     )
     return parser
 
@@ -940,6 +961,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return onboard_main(raw_args[1:])
         if command == "doctor":
             return doctor_main(raw_args[1:])
+        if command == "info":
+            return info_main(raw_args[1:])
         if command == "run":
             return run_main(raw_args[1:])
         if command == "webhooks":
@@ -1799,6 +1822,53 @@ def doctor_checks(
         port_ok, port_detail = _check_port_available(context.port)
         checks.append((port_ok, "status api port", port_detail))
     return checks
+
+
+def info_main(argv: Sequence[str] | None = None) -> int:
+    parser = build_info_parser()
+    args = parser.parse_args(argv)
+
+    info = gather_info(args.workflow_path)
+
+    if args.json:
+        import json
+
+        print(json.dumps(info))
+        return 0
+
+    print(f"Symphony {info['version']} — Python {info['python']} on {info['platform']}")
+    print(f"Workflow: {info['workflow_path']}")
+    print(f"Runner:   {info['runner']}")
+    print(f"Tracker:  {info['tracker']}")
+    return 0
+
+
+def gather_info(workflow_path: str | Path) -> dict[str, str]:
+    """Collect environment diagnostics for the ``info`` command.
+
+    Workflow fields fall back to ``not found`` when WORKFLOW.md is missing or
+    cannot be parsed, so neither output mode crashes on a misconfigured repo.
+    """
+    info: dict[str, str] = {
+        "version": __version__,
+        "python": platform.python_version(),
+        "platform": sys.platform,
+        "workflow_path": "not found",
+        "runner": "not found",
+        "tracker": "not found",
+    }
+
+    workflow_file = Path(workflow_path).expanduser()
+    try:
+        definition = load_workflow(workflow_file)
+        config = definition.typed_config(workflow_path=workflow_file)
+    except (WorkflowError, ConfigError):
+        return info
+
+    info["workflow_path"] = str(workflow_file.resolve())
+    info["runner"] = config.agent.runner
+    info["tracker"] = config.tracker.kind
+    return info
 
 
 def build_webhooks_parser() -> argparse.ArgumentParser:
