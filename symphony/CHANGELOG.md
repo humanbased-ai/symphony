@@ -3,6 +3,33 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.21 — 2026-06-03
+
+**[PR #157](https://github.com/humanbased-ai/symphony/pull/157)**: feat(verifyflow): ci_green trigger for repos without Crosscheck (IN-570)
+
+## Linear
+
+- Issue: https://linear.app/inductive-network/issue/IN-570/verifyflow优化
+
+## What
+
+Stacked on #156 (IN-569). Decouples the verifyflow step's entry condition from Crosscheck:
+
+- New `verifyflow.trigger` config: `crosscheck` (default — behavior unchanged) | `ci_green`.
+- **`ci_green`**: enter once the PR head's latest check runs carry no failures — the exact green convention the acceptance subsystem already uses (`acceptance_runtime.py`: `ci_green = len(failed) == 0`; pending/no checks count as green, the once-per-head-SHA dedup bounds the cost). This unblocks repos that don't run Crosscheck, where the default trigger would never fire and the step would silently do nothing.
+- A crosscheck verdict, when one happens to exist, is still passed via `--crosscheck-verdict` for traceability — `ci_green` records it but never gates on it.
+- Unknown trigger values fail at config parse (`unsupported_verifyflow_trigger`).
+
+PRD synced in §7.5.2.
+
+## Tests
+
+4 new in `tests/test_verifyflow_runtime.py` (12 pass): ci_green runs with no crosscheck comment (and omits the verdict arg), skips on failed checks, records a present verdict without gating on it, invalid trigger raises ConfigError. Full suite: 454 passed; the 13 pre-existing `classify_feedback` failures on main remain untouched.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---
+
 ## v0.1.0.20 — 2026-06-03
 
 **[PR #155](https://github.com/humanbased-ai/symphony/pull/155)**: fix(onboarding): default acceptance gate to off in init/onboard
