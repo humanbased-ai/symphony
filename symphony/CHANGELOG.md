@@ -3,6 +3,45 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.23 — 2026-06-03
+
+**[PR #154](https://github.com/humanbased-ai/symphony/pull/154)**: Add `symphony info` command to print environment diagnostics
+
+## Linear
+
+- Issue: https://linear.app/inductive-network/issue/IN-545/add-symphony-info-command-to-print-environment-diagnostics
+
+## Summary
+
+- Add `symphony info` (alias `sy info`) printing read-only environment diagnostics.
+- **Version & platform**: `Symphony <version> — Python <pyver> on <platform>`.
+- **Workflow summary**: resolved absolute `WORKFLOW.md` path, configured `agent.runner`, and `tracker.kind`. Accepts an optional `workflow_path` positional (default `./WORKFLOW.md`), matching the main CLI.
+- **`--json` flag**: emits the same six fields (`version`, `python`, `platform`, `workflow_path`, `runner`, `tracker`) as one JSON object; without it, readable multi-line text.
+- Missing/unparseable workflow reports `not found` for the workflow fields instead of crashing in either mode.
+
+## Decision Context
+
+- Selected solution: route `info` through the existing manual subcommand dispatch in `main()` (same pattern as `doctor`/`run`). Parse the workflow with `load_workflow` + `typed_config` only — deliberately skipping `validate_dispatch_config` so the command never requires a Linear/GitHub token or makes network calls.
+- Alternatives considered: reusing `load_startup_context` (rejected — it validates dispatch config and resolves auth, which would make a pure diagnostics command fail without credentials).
+- Follow-up work: none required. Out of scope per the issue: no orchestrator/polling/dispatch changes, no network calls.
+
+## Validation
+
+- Targeted checks: `python -m pytest tests/test_cli.py -k Info` (3 new tests, all pass) covering text output, `--json` output, and missing-workflow handling in both modes. Manual runs of all four invocations confirmed.
+- Full gates: `python -m pytest tests/test_cli.py` — all pass except one pre-existing failure (`test_init_automated_reports_all_missing_inputs_without_prompting`) caused by `GITHUB_TOKEN` being set in the local environment; confirmed failing on the base commit before my changes (unrelated).
+- Not run: Elixir `make all` (CI-only; this change is Python-only).
+
+## UI Evidence
+
+- Not applicable: CLI-only change.
+
+## Review
+
+- Reviewer / agent requested: —
+- Blocking comments resolved: —
+
+---
+
 ## v0.1.0.22 — 2026-06-03
 
 **[PR #158](https://github.com/humanbased-ai/symphony/pull/158)**: fix(acceptance): parse modern crosscheck comment formats (IN-572 live-run finding)

@@ -1,6 +1,6 @@
 [project]
 name = "symphony"
-version = "0.1.0.22"
+version = "0.1.0.23"
 description = "Python implementation of the Symphony agent orchestration service"
 readme = "README.md"
 requires-python = ">=3.12"
