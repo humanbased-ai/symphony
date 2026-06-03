@@ -1334,6 +1334,20 @@ buttons.
   suite walks each of the four preconditions plus the GitHub-rejects-merge
   fallback, and `RenderVerdictCommentTests` covers the merged / skip-reason
   comment shapes.
+- [x] **[Acceptance: onboarding default off]** — `symphony init` /
+  `symphony onboard` now ship the acceptance gate **disabled by default**:
+  `InitConfig.acceptance_enabled` defaults to `False`, automated mode no
+  longer auto-enables the gate, and the interactive prompt defaults to
+  `[y/N]`. The gate dispatches an extra judge agent on every PR
+  convergence, so enabling it must be an explicit opt-in (`--acceptance`
+  or an interactive `y`) rather than a default users discover by cost.
+  This aligns the onboarding scaffold with `AcceptanceConfig`, whose
+  master switch has always defaulted to off. Explicit `--acceptance` /
+  `--no-acceptance` continue to win over every default, and opting in
+  still writes the full production-safe block (`auto_merge: false`,
+  `bounce_back_on_fail: false`). Tested in `tests/test_onboarding.py`
+  (default omits the block; explicit opt-in writes it; opt-in without
+  GitHub still omits it).
 
 ### 7.6 Phase 4: Multi-Agent Runners
 
