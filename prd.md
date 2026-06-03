@@ -688,6 +688,15 @@ inside repository files.
   writability, logs root, and status API address before users run a live poll.
 - `symphony run` is the clear long-term command for the daemon while the legacy
   `symphony WORKFLOW.md --once/--check` invocation remains compatible.
+- `symphony info` (alias `sy info`) prints read-only environment diagnostics:
+  the Symphony version with the running Python and OS platform, plus the
+  resolved `WORKFLOW.md` path, configured `agent.runner`, and `tracker.kind`.
+  It accepts an optional `workflow_path` positional (default `./WORKFLOW.md`)
+  and a `--json` flag that emits the same six fields (`version`, `python`,
+  `platform`, `workflow_path`, `runner`, `tracker`) as one JSON object. A
+  missing or unparseable workflow reports `not found` for the workflow fields
+  instead of crashing, in either output mode. The command makes no network
+  calls and never touches the orchestrator, polling, or dispatch paths.
 - Package first through normal Python CLI channels (`uv tool install`, `pipx`,
   and release artifacts). Native single-file binaries and Homebrew are follow-on
   distribution channels once the command surface stabilizes.
