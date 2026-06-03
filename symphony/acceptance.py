@@ -35,8 +35,24 @@ from typing import Any, Iterable, Mapping, Sequence
 # case-insensitive and substring-based so brand customization (e.g. a custom
 # service_name wrapped in brackets) still matches the default.
 CROSSCHECK_COMMENT_MARKER = "[crosscheck]"
+# Deployed crosscheck comment formats, oldest first (IN-572 live-run finding:
+# 0.9.0-beta.6 posts neither the "[crosscheck]" marker nor a "VERDICT:" line):
+#  - legacy: "[crosscheck]"-marked comment ending in "VERDICT: <word>"
+#  - 0.9.x:  "### Code Review by <brand>" header with a "✅ **APPROVE**" badge line
+#  - newer:  adds a machine annotation "<!-- crosscheck: ... verdict=<word> ... -->"
+_CROSSCHECK_COMMENT_MARKERS = (
+    CROSSCHECK_COMMENT_MARKER,
+    "<!-- crosscheck:",
+    "### code review by",
+)
 # crosscheck ends every review with a line like ``VERDICT: APPROVE``.
 _VERDICT_LINE = re.compile(r"VERDICT:\s*(APPROVE|NEEDS WORK|BLOCK)", re.IGNORECASE)
+_VERDICT_ANNOTATION = re.compile(
+    r"<!--\s*crosscheck:[^>]*\bverdict=(APPROVE|NEEDS[_ ]WORK|BLOCK)\b", re.IGNORECASE
+)
+_VERDICT_BADGE = re.compile(
+    r"^\W*\*\*(APPROVE|NEEDS WORK|BLOCK)\*\*\s*$", re.IGNORECASE | re.MULTILINE
+)
 
 
 class CrosscheckVerdict(Enum):
@@ -112,12 +128,26 @@ def _coerce_dt(value: Any) -> datetime | None:
     return None
 
 
+def _is_crosscheck_comment(body: str) -> bool:
+    lowered = (body or "").lower()
+    return any(marker in lowered for marker in _CROSSCHECK_COMMENT_MARKERS)
+
+
 def parse_verdict_word(body: str) -> CrosscheckVerdict | None:
-    """Extract the VERDICT word from a review body, or None if absent."""
-    match = _VERDICT_LINE.search(body or "")
+    """Extract the verdict from a review body, or None if absent.
+
+    Tries the explicit ``VERDICT:`` line (legacy), then the machine annotation
+    (``verdict=`` inside the ``<!-- crosscheck: ... -->`` tag), then the badge
+    line crosscheck 0.9.x renders instead (``✅ **APPROVE**``).
+    """
+    match = (
+        _VERDICT_LINE.search(body or "")
+        or _VERDICT_ANNOTATION.search(body or "")
+        or _VERDICT_BADGE.search(body or "")
+    )
     if not match:
         return None
-    token = match.group(1).strip().upper()
+    token = match.group(1).strip().upper().replace("_", " ")
     if token == "APPROVE":
         return CrosscheckVerdict.APPROVE
     if token == "BLOCK":
@@ -136,7 +166,7 @@ def parse_crosscheck_verdict(comments: Iterable[Mapping[str, Any]]) -> ReviewVer
     candidates: list[tuple[datetime, ReviewVerdict]] = []
     for comment in comments:
         body = str(comment.get("body") or "")
-        if CROSSCHECK_COMMENT_MARKER.lower() not in body.lower():
+        if not _is_crosscheck_comment(body):
             continue
         verdict = parse_verdict_word(body)
         if verdict is None:
