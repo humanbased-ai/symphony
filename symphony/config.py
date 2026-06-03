@@ -38,6 +38,10 @@ DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS = 1_200  # 20 minutes
 # clone + setup + probes for typical repos without letting a hung run
 # stall the poll loop forever.
 DEFAULT_VERIFYFLOW_TIMEOUT_SECONDS = 900
+# crosscheck: run after the latest [crosscheck] verdict is APPROVE (default).
+# ci_green:   run once the head's latest check runs have no failures — for
+#             repos without Crosscheck (same green convention as acceptance).
+VERIFYFLOW_TRIGGERS = ("crosscheck", "ci_green")
 DEFAULT_ACCEPTANCE_GUARD_PATHS = (
     "SPEC.md",
     "**/migrations/**",
@@ -395,21 +399,27 @@ class VerifyflowConfig:
           enabled: true
           command: vf          # binary on PATH
           level: functional
+          trigger: crosscheck  # or ci_green for repos without Crosscheck
           timeout_seconds: 900
     """
 
     enabled: bool = False
     command: str = "vf"
     level: str = "functional"
+    trigger: str = "crosscheck"
     timeout_seconds: int = DEFAULT_VERIFYFLOW_TIMEOUT_SECONDS
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "VerifyflowConfig":
         verifyflow = _mapping(config.get("verifyflow"), "verifyflow_config_must_be_map")
+        trigger = _string_value(verifyflow.get("trigger")) or "crosscheck"
+        if trigger not in VERIFYFLOW_TRIGGERS:
+            raise ConfigError(f"unsupported_verifyflow_trigger:{trigger}")
         return cls(
             enabled=_bool_value(verifyflow.get("enabled"), False, "verifyflow_enabled"),
             command=_string_value(verifyflow.get("command")) or "vf",
             level=_string_value(verifyflow.get("level")) or "functional",
+            trigger=trigger,
             timeout_seconds=_positive_int(
                 verifyflow.get("timeout_seconds"),
                 DEFAULT_VERIFYFLOW_TIMEOUT_SECONDS,
