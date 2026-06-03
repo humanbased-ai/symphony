@@ -3,6 +3,46 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.20 — 2026-06-03
+
+**[PR #155](https://github.com/humanbased-ai/symphony/pull/155)**: fix(onboarding): default acceptance gate to off in init/onboard
+
+## Linear
+
+- Issue: None — onboarding default-behavior change, no product-intent change to the gate itself; prd.md updated in this PR per repo workflow.
+
+## Summary
+
+- `symphony init` / `symphony onboard` now ship the acceptance gate **disabled by default**: `InitConfig.acceptance_enabled` defaults to `False`, automated mode no longer auto-enables the gate, and the interactive prompt defaults to `[y/N]`.
+- Explicit `--acceptance` / `--no-acceptance` continue to win over every default; opting in still writes the full production-safe block (`auto_merge: false`, `bounce_back_on_fail: false`).
+- This aligns the onboarding scaffold with `AcceptanceConfig`, whose master switch has always defaulted to off.
+
+## Decision Context
+
+- Selected solution: flip the three onboarding defaults (dataclass default, automated-mode branch, interactive prompt) and keep everything else — opt-in path, GitHub gating, block omission semantics — unchanged.
+- Alternatives considered: keeping automated mode on while flipping only the interactive prompt (rejected — automated runs are exactly where a silent extra judge agent is least visible); writing `enabled: false` instead of omitting the block (rejected — existing convention is to omit, avoiding config noise).
+- Follow-up work: none.
+
+## Validation
+
+- Targeted checks: `uv run python -m pytest tests/test_onboarding.py tests/test_cli.py -q` — 69 passed.
+- Full gates: `uv run python -m pytest -q` — 442 passed, 13 failed; the 13 failures (`FeedbackSignalTests` in `tests/test_linear_tracker.py`, `FeedbackGateTests` in `tests/test_runtime.py`) reproduce identically on a clean `origin/main` checkout and are unrelated to this change.
+- Not run: interactive `symphony init` end-to-end (prompt-path behavior covered by unit tests).
+
+## UI Evidence
+
+- Screenshots:
+- Not applicable: CLI-only change.
+
+## Review
+
+- Reviewer / agent requested: maintainers
+- Blocking comments resolved: n/a
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---
+
 ## v0.1.0.19 — 2026-06-01
 
 **[PR #153](https://github.com/humanbased-ai/symphony/pull/153)**: fix(acceptance): gate bounce-back behind opt-in flag (default off)
