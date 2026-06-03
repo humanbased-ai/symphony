@@ -71,11 +71,12 @@ class InitConfig:
     runner: str = DEFAULT_RUNNER
     github_org: str = ""
     github_repo: str = ""
-    # Acceptance gate ships enabled by default — Phase 1 only judges and
-    # escalates to a human (no auto-merge), so opting users in costs only the
-    # judge dispatch on PR convergence. Set to False (--no-acceptance) to omit
-    # the block entirely from the generated WORKFLOW.md.
-    acceptance_enabled: bool = True
+    # Acceptance gate ships disabled by default — it dispatches an extra judge
+    # agent on every PR convergence, so new projects must opt in explicitly
+    # (--acceptance or an interactive ``y``) rather than discover the cost
+    # after the fact. When False the block is omitted entirely from the
+    # generated WORKFLOW.md, matching ``AcceptanceConfig``'s off-by-default.
+    acceptance_enabled: bool = False
 
 
 class OnboardingError(ValueError):

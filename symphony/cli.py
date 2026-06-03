@@ -360,7 +360,7 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
         help=(
             "Whether the generated WORKFLOW.md ships with the acceptance gate "
             "enabled. --acceptance forces on, --no-acceptance forces off. "
-            "Default in interactive mode: prompt; in automated mode: on."
+            "Default in interactive mode: prompt; in automated mode: off."
         ),
     )
     return parser
@@ -1462,14 +1462,15 @@ def _run_init_with_args(
         # --- Optional step: Acceptance gate ---
         # Only meaningful when github is configured (the gate posts as a PR
         # comment); skipped otherwise. Explicit --acceptance / --no-acceptance
-        # always wins; interactive prompts default to "on" because Phase 1
-        # judging is human-escalation only — opting in is the safe default.
+        # always wins; everything else defaults to "off" — the gate dispatches
+        # an extra judge agent on every PR convergence, so enabling it must be
+        # an explicit opt-in rather than a default users discover by cost.
         if args.acceptance_enabled is not None:
             acceptance_enabled = args.acceptance_enabled
         elif not (github_org and github_repo):
             acceptance_enabled = False
         elif automated:
-            acceptance_enabled = True
+            acceptance_enabled = False
         else:
             print("\nOptional — Acceptance gate")
             print("  When a PR converges (CI green, no new feedback for a quiet")
@@ -1477,8 +1478,8 @@ def _run_init_with_args(
             print("  the original Linear issue and posts a verdict comment on")
             print("  the PR. Phase 1 always escalates to a human — Symphony will")
             print("  not auto-merge.")
-            answer = input("Enable acceptance gate? [Y/n]: ").strip().lower()
-            acceptance_enabled = answer in ("", "y", "yes")
+            answer = input("Enable acceptance gate? [y/N]: ").strip().lower()
+            acceptance_enabled = answer in ("y", "yes")
 
         workflow = generate_workflow(
             InitConfig(

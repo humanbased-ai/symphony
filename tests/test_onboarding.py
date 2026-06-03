@@ -51,11 +51,11 @@ class OnboardingTests(unittest.TestCase):
     def test_default_workspace_root_sanitizes_project_slug(self):
         self.assertEqual("~/.symphony/workspaces/A-B-C.1", default_workspace_root(" A/B C.1 "))
 
-    def test_generate_workflow_enables_acceptance_by_default_with_github(self):
-        """``symphony init`` ships the acceptance gate enabled by default when
-        github is configured. Phase 1 only judges and escalates to a human
-        (no auto-merge), so the safe default is to opt new projects in — the
-        user only has to act if they want it OFF."""
+    def test_generate_workflow_omits_acceptance_by_default_with_github(self):
+        """``symphony init`` ships the acceptance gate disabled by default —
+        the gate dispatches an extra judge agent on every PR convergence, so
+        new projects must opt in explicitly (--acceptance or an interactive
+        ``y``) rather than discover the cost after the fact."""
         content = generate_workflow(
             InitConfig(
                 project_slug="my-project",
@@ -64,6 +64,25 @@ class OnboardingTests(unittest.TestCase):
                 runner="claude_code",
                 github_org="acme-corp",
                 github_repo="widget",
+            )
+        )
+        workflow = parse_workflow(content)
+        self.assertNotIn("acceptance", workflow.config)
+
+    def test_generate_workflow_writes_acceptance_block_when_opted_in(self):
+        """Explicit opt-in (--acceptance or an interactive ``y``) writes the
+        full block with production-safe values: ``auto_merge`` and
+        ``bounce_back_on_fail`` stay false so Phase 1 only judges and
+        escalates to a human."""
+        content = generate_workflow(
+            InitConfig(
+                project_slug="my-project",
+                preset="codex-safe",
+                workspace_root="~/.symphony/workspaces/my-project",
+                runner="claude_code",
+                github_org="acme-corp",
+                github_repo="widget",
+                acceptance_enabled=True,
             )
         )
         workflow = parse_workflow(content)
@@ -90,10 +109,11 @@ class OnboardingTests(unittest.TestCase):
         self.assertGreater(parsed.crosscheck_wait_seconds, 0)
         self.assertIn("SPEC.md", parsed.guard_paths)
 
-    def test_generate_workflow_omits_acceptance_block_when_opted_out(self):
-        """``--no-acceptance`` (or an interactive ``n``) must omit the block
-        entirely, not write ``enabled: false``. Empty block = no surprise gate
-        on next run; explicit ``false`` would still keep the config noise."""
+    def test_generate_workflow_omits_acceptance_block_when_explicitly_opted_out(self):
+        """Explicit ``--no-acceptance`` behaves the same as the default: the
+        block is omitted entirely, not written as ``enabled: false``. Empty
+        block = no surprise gate on next run; explicit ``false`` would still
+        keep the config noise."""
         content = generate_workflow(
             InitConfig(
                 project_slug="my-project",
@@ -110,14 +130,16 @@ class OnboardingTests(unittest.TestCase):
 
     def test_generate_workflow_omits_acceptance_block_without_github(self):
         """Without github configured the acceptance gate would no-op (it posts
-        verdicts as PR comments). Omitting the block avoids dangling config
-        that pretends a feature is one flag away when it actually is not."""
+        verdicts as PR comments). Even an explicit opt-in is overridden:
+        omitting the block avoids dangling config that pretends a feature is
+        one flag away when it actually is not."""
         content = generate_workflow(
             InitConfig(
                 project_slug="my-project",
                 preset="codex-safe",
                 workspace_root="~/.symphony/workspaces/my-project",
                 runner="codex",
+                acceptance_enabled=True,
             )
         )
         workflow = parse_workflow(content)
