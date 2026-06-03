@@ -34,6 +34,10 @@ DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS = 300
 # open and posting its ``VERDICT:`` comment; without a grace window the
 # silent branch can fire first and judge before code review has happened.
 DEFAULT_ACCEPTANCE_CROSSCHECK_WAIT_SECONDS = 1_200  # 20 minutes
+# vf step does a full checkout + real probe execution; 15 minutes covers
+# clone + setup + probes for typical repos without letting a hung run
+# stall the poll loop forever.
+DEFAULT_VERIFYFLOW_TIMEOUT_SECONDS = 900
 DEFAULT_ACCEPTANCE_GUARD_PATHS = (
     "SPEC.md",
     "**/migrations/**",
@@ -373,6 +377,48 @@ class AcceptanceConfig:
 
 
 @dataclass(frozen=True)
+class VerifyflowConfig:
+    """Optional post-Crosscheck delivery-verification step (VerifyFlow, IN-569).
+
+    Phase 1 is **advisory-only**: after Crosscheck approves a PR's current
+    head, Symphony spawns ``vf step --pr <url>`` once per head SHA. VerifyFlow
+    checks out the PR, really executes probes against the acceptance criteria
+    of the linked Linear issue, keeps the evidence, and posts/updates its
+    delivery-report comment on the PR. Symphony only logs the JSON result —
+    it never merges, never blocks, and never transitions Linear state on it.
+
+    Independent of the ``acceptance`` subsystem (which stays disabled).
+
+    Example WORKFLOW.md / config section::
+
+        verifyflow:
+          enabled: true
+          command: vf          # binary on PATH
+          level: functional
+          timeout_seconds: 900
+    """
+
+    enabled: bool = False
+    command: str = "vf"
+    level: str = "functional"
+    timeout_seconds: int = DEFAULT_VERIFYFLOW_TIMEOUT_SECONDS
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "VerifyflowConfig":
+        verifyflow = _mapping(config.get("verifyflow"), "verifyflow_config_must_be_map")
+        return cls(
+            enabled=_bool_value(verifyflow.get("enabled"), False, "verifyflow_enabled"),
+            command=_string_value(verifyflow.get("command")) or "vf",
+            level=_string_value(verifyflow.get("level")) or "functional",
+            timeout_seconds=_positive_int(
+                verifyflow.get("timeout_seconds"),
+                DEFAULT_VERIFYFLOW_TIMEOUT_SECONDS,
+                "verifyflow_timeout_seconds",
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class WebhookConfig:
     """Optional webhook configuration for receiving Linear events via HTTP push.
 
@@ -427,6 +473,7 @@ class WorkflowConfig:
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     acceptance: AcceptanceConfig = field(default_factory=AcceptanceConfig)
+    verifyflow: VerifyflowConfig = field(default_factory=VerifyflowConfig)
 
     @classmethod
     def from_mapping(
@@ -448,6 +495,7 @@ class WorkflowConfig:
             webhook=WebhookConfig.from_mapping(config, environ=environ),
             github=GitHubConfig.from_mapping(config, environ=environ),
             acceptance=AcceptanceConfig.from_mapping(config),
+            verifyflow=VerifyflowConfig.from_mapping(config),
         )
 
 

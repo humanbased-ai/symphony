@@ -20,6 +20,7 @@ from symphony.acceptance_runtime import (
 )
 from symphony.agents.base import AgentEvent, AgentEventCallback, TokenUsage
 from symphony.config import WorkflowConfig
+from symphony.verifyflow_runtime import maybe_run_verifyflow
 from symphony.github.webhooks import GitHubEvent, PRClosedEvent, PRCommentEvent, PRReviewEvent
 from symphony.orchestrator import (
     OrchestratorState,
@@ -136,6 +137,9 @@ class SymphonyRuntime:
         # Lazily-built judge runner; only constructed once acceptance.enabled
         # fires for a branch, so disabled deployments pay no startup cost.
         self._acceptance_judge: ClaudeCodeJudgeRunner | None = None
+        # VerifyFlow advisory step per-branch state (IN-569): the head sha
+        # last handed to ``vf step``, so each head is verified at most once.
+        self._verifyflow_run_sha: dict[str, str] = {}
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -564,6 +568,7 @@ class SymphonyRuntime:
                 self._pr_conflict_dispatched.discard(branch)
                 self._convergence_snapshots.pop(branch, None)
                 self._acceptance_judged_sha.pop(branch, None)
+                self._verifyflow_run_sha.pop(branch, None)
                 return
             pr_number = cached_pr
         else:
@@ -647,6 +652,7 @@ class SymphonyRuntime:
 
         saw_new_feedback = self._pr_turns.get(branch, 0) > pr_turns_before
         await self._maybe_run_acceptance(branch, pr_number, issue, saw_new_feedback)
+        await self._maybe_run_verifyflow(branch, pr_number, issue)
 
     async def _handle_ci_failures(self, branch: str, pr_number: int, issue: Issue) -> None:
         """Trigger a PR-feedback agent run when new CI check failures appear."""
@@ -751,6 +757,37 @@ class SymphonyRuntime:
                 branch, pr_number, render_bounce_back_feedback(verdict),
             )
 
+
+    async def _maybe_run_verifyflow(self, branch: str, pr_number: int, issue: Issue) -> None:
+        """VerifyFlow advisory step (IN-569) — tail of every PR-poll tick.
+
+        Independent of the acceptance gate: after Crosscheck approves the
+        current head, spawn ``vf step`` once for that head SHA. The verdict is
+        logged and lands on the PR as vf's own report comment; nothing is
+        merged, blocked, or transitioned here.
+        """
+        if not self.config.verifyflow.enabled or self.github_client is None:
+            return
+        try:
+            outcome = await maybe_run_verifyflow(
+                github_client=self.github_client,
+                config=self.config.verifyflow,
+                branch=branch,
+                pr_number=pr_number,
+                already_run_sha=self._verifyflow_run_sha.get(branch),
+            )
+        except Exception:  # noqa: BLE001 - verifyflow must never crash the tick.
+            LOGGER.debug("verifyflow_step_error for branch %r", branch, exc_info=True)
+            return
+        if outcome is not None:
+            # Record whatever the result: an advisory run that failed is logged,
+            # not hot-loop retried — the next push re-arms verification.
+            self._verifyflow_run_sha[branch] = outcome.head_sha
+            LOGGER.info(
+                "VerifyFlow step recorded for %s PR #%d @ %s",
+                issue.identifier, pr_number, outcome.head_sha[:12],
+            )
+
     async def record_startup_open_prs(self) -> None:
         """Rebuild ``_branch_to_issue`` / ``_branch_pr_numbers`` from tracker
         review-state issues whose branch still has an open PR.
@@ -833,6 +870,7 @@ class SymphonyRuntime:
         self._pr_turns.pop(event.pr_head_branch, None)
         self._convergence_snapshots.pop(event.pr_head_branch, None)
         self._acceptance_judged_sha.pop(event.pr_head_branch, None)
+        self._verifyflow_run_sha.pop(event.pr_head_branch, None)
         if issue is not None:
             release_issue(issue.id, self.state)
 

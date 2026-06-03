@@ -1349,6 +1349,39 @@ buttons.
   (default omits the block; explicit opt-in writes it; opt-in without
   GitHub still omits it).
 
+### 7.5.2 VerifyFlow Advisory Step (Delivery Verification, IN-569)
+
+**Goal:** After Crosscheck approves a PR, run **VerifyFlow**
+(`humanbased-ai/verifyflow`) against it — a delivery-verification agent that
+*really executes* the PR (checkout → probes → evidence) against the acceptance
+criteria of the linked Linear issue, keeps the report + artifacts on disk, and
+posts/updates its own idempotent delivery-report comment on the PR.
+
+**Phase-1 semantics (shipped):** advisory only. Symphony spawns
+`vf step --pr <url> --level <l> --crosscheck-verdict <v>` at most once per PR
+head SHA, after the latest `[crosscheck]` comment verdict is `APPROVE` (stale
+log-bound verdicts for another sha are skipped). The JSON line vf prints on
+stdout is logged; Symphony never merges, blocks, or transitions Linear state
+on the verdict, and a failed/timed-out step is recorded for that head (no
+hot-loop retry — the next push re-arms verification). Deliberately
+**independent of the acceptance gate** (7.5.1, disabled by default):
+Crosscheck = "is the code good", VerifyFlow = "does it actually deliver,
+with execution evidence", acceptance judge = off.
+
+**Config** (`verifyflow` block, parallel to `acceptance`, default disabled):
+`enabled`, `command` (default `vf`), `level` (default `functional`),
+`timeout_seconds` (default 900). Wiring: `VerifyflowConfig` in
+`symphony/config.py`, decision core in `symphony/verifyflow_runtime.py`
+(`maybe_run_verifyflow`, injectable spawn for tests), runtime hook
+`_maybe_run_verifyflow` at the tail of every PR-poll tick with per-branch
+`_verifyflow_run_sha` dedup (cleaned up on PR close alongside the acceptance
+maps). Tested in `tests/test_verifyflow_runtime.py`. Contract details live in
+verifyflow's `docs/symphony-integration-surface.md`.
+
+**Phase 2 (not built):** Symphony consumes vf's `improvement-signal.json` to
+dispatch a fix agent and re-verify (IN-564), and gating policies beyond
+advisory.
+
 ### 7.6 Phase 4: Multi-Agent Runners
 
 - [ ] **[Agent: Claude Code]** — Anthropic/Claude Code runner with streaming,
