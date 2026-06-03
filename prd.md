@@ -1370,7 +1370,10 @@ with execution evidence", acceptance judge = off.
 
 **Config** (`verifyflow` block, parallel to `acceptance`, default disabled):
 `enabled`, `command` (default `vf`), `level` (default `functional`),
-`timeout_seconds` (default 900). Wiring: `VerifyflowConfig` in
+`trigger` (default `crosscheck`; `ci_green` enters once the head's latest
+check runs carry no failures — same green convention as acceptance — for
+repos without Crosscheck; a crosscheck verdict is still recorded when one
+exists), `timeout_seconds` (default 900). Wiring: `VerifyflowConfig` in
 `symphony/config.py`, decision core in `symphony/verifyflow_runtime.py`
 (`maybe_run_verifyflow`, injectable spawn for tests), runtime hook
 `_maybe_run_verifyflow` at the tail of every PR-poll tick with per-branch

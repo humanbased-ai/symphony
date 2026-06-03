@@ -54,15 +54,24 @@ CROSSCHECK_NEEDS_WORK = {
 
 
 class FakeGitHubClient:
-    def __init__(self, pr_data: dict[str, Any] | None, comments: list[dict[str, Any]]):
+    def __init__(
+        self,
+        pr_data: dict[str, Any] | None,
+        comments: list[dict[str, Any]],
+        failed_check_runs: list[dict[str, Any]] | None = None,
+    ):
         self._pr_data = pr_data
         self._comments = comments
+        self._failed_check_runs = failed_check_runs or []
 
     def get_pr(self, pr_number: int) -> dict[str, Any] | None:
         return self._pr_data
 
     def list_pr_issue_comments(self, pr_number: int) -> list[dict[str, Any]]:
         return self._comments
+
+    def get_pr_failed_check_runs(self, pr_number: int) -> list[dict[str, Any]]:
+        return self._failed_check_runs
 
 
 def make_spawn(exit_code: int | None, summary: dict[str, Any] | None):
@@ -165,6 +174,62 @@ def test_failed_run_still_returns_outcome_for_dedup() -> None:
     assert outcome.head_sha == HEAD_SHA
     assert outcome.exit_code == 1
     assert outcome.summary is None
+
+
+def test_ci_green_trigger_runs_without_crosscheck() -> None:
+    """trigger: ci_green (IN-570) — repos without Crosscheck still get verified."""
+    gh = FakeGitHubClient({"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [], failed_check_runs=[])
+    spawn, calls = make_spawn(0, {"verdict": "accept"})
+    outcome = run(
+        maybe_run_verifyflow(
+            github_client=gh, config=_config(trigger="ci_green"), branch="b", pr_number=42,
+            already_run_sha=None, spawn=spawn,
+        )
+    )
+    assert outcome is not None
+    assert outcome.head_sha == HEAD_SHA
+    # No crosscheck comment → no --crosscheck-verdict arg.
+    assert calls == [["vf", "step", "--pr", PR_URL, "--level", "functional"]]
+
+
+def test_ci_green_trigger_skips_on_failed_checks() -> None:
+    gh = FakeGitHubClient(
+        {"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [],
+        failed_check_runs=[{"id": 1, "name": "tests", "details_url": "", "summary": "boom"}],
+    )
+    spawn, calls = make_spawn(0, {})
+    outcome = run(
+        maybe_run_verifyflow(
+            github_client=gh, config=_config(trigger="ci_green"), branch="b", pr_number=42,
+            already_run_sha=None, spawn=spawn,
+        )
+    )
+    assert outcome is None
+    assert calls == []
+
+
+def test_ci_green_trigger_still_records_crosscheck_verdict_when_present() -> None:
+    gh = FakeGitHubClient(
+        {"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [CROSSCHECK_NEEDS_WORK],
+        failed_check_runs=[],
+    )
+    spawn, calls = make_spawn(0, {"verdict": "accept"})
+    outcome = run(
+        maybe_run_verifyflow(
+            github_client=gh, config=_config(trigger="ci_green"), branch="b", pr_number=42,
+            already_run_sha=None, spawn=spawn,
+        )
+    )
+    # ci_green does not gate on the review verdict — it only records it.
+    assert outcome is not None
+    assert calls[0][-2:] == ["--crosscheck-verdict", "NEEDS WORK"]
+
+
+def test_unknown_trigger_rejected_by_config() -> None:
+    from symphony.config import ConfigError
+
+    with pytest.raises(ConfigError, match="unsupported_verifyflow_trigger"):
+        VerifyflowConfig.from_mapping({"verifyflow": {"trigger": "always"}})
 
 
 def test_custom_command_and_level_are_used() -> None:

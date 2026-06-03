@@ -91,8 +91,10 @@ async def maybe_run_verifyflow(
 
     Returns the outcome when a run happened (caller records ``head_sha`` for
     dedup), or None when this tick's conditions aren't met: no PR data, head
-    already verified, or no fresh Crosscheck APPROVE. Timing is owned here —
-    vf itself never gates on the review verdict, it only records it.
+    already verified, or the configured trigger hasn't fired — a fresh
+    Crosscheck APPROVE (``trigger: crosscheck``, default) or failure-free
+    check runs (``trigger: ci_green``, IN-570). Timing is owned here — vf
+    itself never gates on the review verdict, it only records it.
     """
     pr_data = await asyncio.to_thread(github_client.get_pr, pr_number)
     if not pr_data:
@@ -104,13 +106,23 @@ async def maybe_run_verifyflow(
 
     comments = await asyncio.to_thread(github_client.list_pr_issue_comments, pr_number)
     review = parse_crosscheck_verdict(comments)
-    if review is None or review.verdict is not CrosscheckVerdict.APPROVE:
-        return None
-    # Log-source verdicts are bound to the reviewed commit; skip a stale one.
-    # Comment-source verdicts carry no sha — the newest-comment-wins parse is
-    # the best freshness signal available there.
-    if review.sha is not None and review.sha != head_sha:
-        return None
+    if config.trigger == "ci_green":
+        # Repos without Crosscheck (IN-570): enter once the head's latest check
+        # runs carry no failures — the same green convention the acceptance
+        # subsystem uses (pending/no checks count as green; the once-per-head
+        # dedup bounds the cost). A crosscheck verdict, when one happens to
+        # exist, is still recorded below for traceability.
+        failed = await asyncio.to_thread(github_client.get_pr_failed_check_runs, pr_number)
+        if failed:
+            return None
+    else:  # "crosscheck" (default)
+        if review is None or review.verdict is not CrosscheckVerdict.APPROVE:
+            return None
+        # Log-source verdicts are bound to the reviewed commit; skip a stale one.
+        # Comment-source verdicts carry no sha — the newest-comment-wins parse is
+        # the best freshness signal available there.
+        if review.sha is not None and review.sha != head_sha:
+            return None
 
     cmd = [
         config.command,
@@ -119,9 +131,9 @@ async def maybe_run_verifyflow(
         pr_url,
         "--level",
         config.level,
-        "--crosscheck-verdict",
-        review.verdict.value,
     ]
+    if review is not None:
+        cmd += ["--crosscheck-verdict", review.verdict.value]
     LOGGER.info(
         "VerifyFlow step on PR #%d (%s) @ %s", pr_number, branch, head_sha[:12],
     )
