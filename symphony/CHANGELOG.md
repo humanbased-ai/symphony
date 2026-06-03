@@ -3,6 +3,36 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.22 — 2026-06-03
+
+**[PR #158](https://github.com/humanbased-ai/symphony/pull/158)**: fix(acceptance): parse modern crosscheck comment formats (IN-572 live-run finding)
+
+## Linear
+
+- Found during the live pipeline run for https://linear.app/inductive-network/issue/IN-572/e2e-pipeline-test-add-pipeline-smoke-test-doc
+
+## Problem
+
+The deployed crosscheck (0.9.0-beta.6) posts review comments with **neither** the legacy `[crosscheck]` marker **nor** a trailing `VERDICT:` line — the header is `### Code Review by <brand>` and the verdict is a badge line (`✅ **APPROVE**`). `parse_crosscheck_verdict` therefore returned `None` for every real review, silently breaking both the acceptance crosscheck branch and the verifyflow step's `crosscheck` trigger.
+
+## Fix
+
+- Recognise three comment generations: `[crosscheck]` (legacy), the `### Code Review by` brand header (0.9.x), and the `<!-- crosscheck: ... -->` machine annotation (newer builds).
+- Extract the verdict from the `VERDICT:` line, the annotation's `verdict=` field, or the badge line — in that order.
+- A bare human `**APPROVE**` still doesn't register (no crosscheck marker).
+
+## Live verification
+
+On humanbased-ai/verifyflow#17: real crosscheck comment now parses as APPROVE, and the full Symphony → Crosscheck → VerifyFlow advisory run completed — vf step auto-resolved IN-572, executed 2/2 criteria with evidence, posted the idempotent delivery-report comment, and per-head-SHA dedup held on the second tick.
+
+## Tests
+
+5 new cases in `ParseCrosscheckCommentTests` (badge APPROVE / NEEDS WORK, annotation, human-bold non-match); 113 pass across acceptance + verifyflow suites. (Pre-existing `classify_feedback` failures untouched; one `test_cli` failure during the run was my shell's LINEAR_API_KEY leaking into the test env — passes with `env -u LINEAR_API_KEY`.)
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---
+
 ## v0.1.0.21 — 2026-06-03
 
 **[PR #157](https://github.com/humanbased-ai/symphony/pull/157)**: feat(verifyflow): ci_green trigger for repos without Crosscheck (IN-570)
