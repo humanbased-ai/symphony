@@ -62,6 +62,40 @@ class ParseCrosscheckCommentTests(unittest.TestCase):
     def test_empty(self):
         self.assertIsNone(parse_crosscheck_verdict([]))
 
+    def test_modern_badge_format_without_verdict_line(self):
+        """crosscheck 0.9.x posts a brand header + badge, no [crosscheck] marker or
+        VERDICT: line (IN-572 live-run finding)."""
+        body = (
+            "### Code Review by 🤖 Claude Code\n\n"
+            "✅ **APPROVE**\n\n"
+            "## Summary\n\nLooks good.\n\n---\n"
+            "_Reviewed with [Claude Code](https://claude.ai/code)_"
+        )
+        verdict = parse_crosscheck_verdict([{"body": body, "created_at": "2026-06-03T08:00:00Z"}])
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.verdict, CrosscheckVerdict.APPROVE)
+
+    def test_modern_badge_needs_work(self):
+        body = "### Code Review by ⚡ Codex\n\n⚠️ **NEEDS WORK**\n\nIssues found."
+        verdict = parse_crosscheck_verdict([{"body": body, "created_at": "2026-06-03T08:00:00Z"}])
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.verdict, CrosscheckVerdict.NEEDS_WORK)
+
+    def test_annotation_format(self):
+        """Newer crosscheck builds append a machine annotation tag."""
+        body = (
+            "### Code Review by 🤖 Claude Code\n\nLooks good.\n\n"
+            "<!-- crosscheck: origin=claude reviewer=claude verdict=NEEDS_WORK type=review -->"
+        )
+        verdict = parse_crosscheck_verdict([{"body": body, "created_at": "2026-06-03T08:00:00Z"}])
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.verdict, CrosscheckVerdict.NEEDS_WORK)
+
+    def test_human_bold_word_alone_is_not_a_crosscheck_verdict(self):
+        """A human writing **APPROVE** must not register: no crosscheck marker."""
+        comments = [{"body": "I say **APPROVE**", "created_at": "2026-06-03T08:00:00Z"}]
+        self.assertIsNone(parse_crosscheck_verdict(comments))
+
 
 class ParseCrosscheckLogTests(unittest.TestCase):
     LOG = "\n".join(
