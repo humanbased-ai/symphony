@@ -787,6 +787,28 @@ class SymphonyRuntime:
                 "VerifyFlow step recorded for %s PR #%d @ %s",
                 issue.identifier, pr_number, outcome.head_sha[:12],
             )
+            # When the gate auto-merged on an accept verdict (IN-609), sync the
+            # tracker card to the done state in the same tick — mirrors the
+            # acceptance gate. Best-effort: a tracker hiccup must never undo a
+            # successful GitHub merge.
+            if outcome.merged and self.tracker is not None and hasattr(
+                self.tracker, "update_issue_state_by_name"
+            ):
+                try:
+                    ok = await asyncio.to_thread(
+                        self.tracker.update_issue_state_by_name,
+                        issue.id,
+                        self.config.tracker.done_state,
+                    )
+                    LOGGER.info(
+                        "VerifyFlow merge tracker transition pr=#%d issue=%s → %s (ok=%s)",
+                        pr_number, issue.identifier, self.config.tracker.done_state, ok,
+                    )
+                except Exception:  # noqa: BLE001 — must not undo a successful merge.
+                    LOGGER.warning(
+                        "verifyflow_merge_tracker_transition_error pr=#%d issue=%s",
+                        pr_number, issue.identifier, exc_info=True,
+                    )
 
     async def record_startup_open_prs(self) -> None:
         """Rebuild ``_branch_to_issue`` / ``_branch_pr_numbers`` from tracker

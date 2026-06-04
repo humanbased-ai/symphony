@@ -39,11 +39,34 @@ class VerifyflowOutcome:
     twice — including after a failed run: an advisory step is logged, not
     retried in a hot loop; the next push re-arms it. ``exit_code`` is None on
     timeout. ``summary`` is vf's parsed stdout JSON line, when present.
+    ``merged`` is True only when ``config.auto_merge`` fired and GitHub accepted
+    the merge (IN-609); the caller uses it to transition the tracker.
     """
 
     head_sha: str
     exit_code: int | None
     summary: Mapping[str, Any] | None
+    merged: bool = False
+
+
+# The only run verdict that may auto-merge. accept_with_risks / needs_fix /
+# manual_review_required (and any unknown value) always leave the PR for a human.
+_MERGE_VERDICT = "accept"
+
+
+def _render_gate_comment(verdict: str | None, *, merged: bool, reason: str | None) -> str:
+    """Auditable one-comment record of the auto-merge gate's decision."""
+    if merged:
+        return (
+            "<!-- verifyflow:merge-gate -->\n"
+            f"**VerifyFlow merge gate** — delivery verdict **{verdict}** → "
+            "squash-merged by Symphony. See VerifyFlow's delivery-report comment for evidence."
+        )
+    return (
+        "<!-- verifyflow:merge-gate -->\n"
+        f"**VerifyFlow merge gate** — not merged ({reason}). "
+        "A human reviewer makes the final call. See VerifyFlow's delivery-report comment for details."
+    )
 
 
 async def _spawn_vf_step(cmd: list[str], timeout_seconds: int) -> tuple[int | None, str]:
@@ -159,4 +182,64 @@ async def maybe_run_verifyflow(
             "VerifyFlow step exited %s on PR #%d (%s) — advisory, not retried for this head.",
             exit_code, pr_number, branch,
         )
-    return VerifyflowOutcome(head_sha=head_sha, exit_code=exit_code, summary=summary)
+
+    merged = False
+    if config.auto_merge:
+        merged = await _run_merge_gate(
+            github_client=github_client,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            exit_code=exit_code,
+            summary=summary,
+            config=config,
+        )
+    return VerifyflowOutcome(head_sha=head_sha, exit_code=exit_code, summary=summary, merged=merged)
+
+
+async def _run_merge_gate(
+    *,
+    github_client: Any,
+    pr_number: int,
+    head_sha: str,
+    exit_code: int | None,
+    summary: Mapping[str, Any] | None,
+    config: VerifyflowConfig,
+) -> bool:
+    """Auto-merge the PR iff VerifyFlow returned a clean ``accept`` (IN-609).
+
+    Safe by construction — every path that is not a completed ``accept`` run
+    leaves the PR open and posts an explanatory comment: a non-zero/timed-out
+    run, any non-``accept`` verdict, or a GitHub-side merge rejection (branch
+    protection, stale head sha, missing required reviews). Only the last step
+    actually merges. Never raises — a gate error must not crash the poll tick.
+    """
+    verdict = summary.get("verdict") if summary else None
+
+    if exit_code != 0 or summary is None:
+        reason = "VerifyFlow run did not complete (timeout or non-zero exit)"
+    elif verdict != _MERGE_VERDICT or summary.get("gateBlocked"):
+        reason = f"delivery verdict is {verdict!r}, not {_MERGE_VERDICT!r}"
+    else:
+        merged = await asyncio.to_thread(
+            github_client.merge_pr, pr_number, sha=head_sha, merge_method=config.merge_method,
+        )
+        if merged:
+            await asyncio.to_thread(
+                github_client.post_pr_comment,
+                pr_number,
+                _render_gate_comment(verdict, merged=True, reason=None),
+            )
+            LOGGER.info(
+                "VerifyFlow auto-merged PR #%d (verdict=%s, sha=%s)",
+                pr_number, verdict, head_sha[:12],
+            )
+            return True
+        reason = "GitHub rejected the merge (branch protection, stale head sha, or missing required reviews)"
+
+    await asyncio.to_thread(
+        github_client.post_pr_comment,
+        pr_number,
+        _render_gate_comment(verdict, merged=False, reason=reason),
+    )
+    LOGGER.info("VerifyFlow merge gate did not merge PR #%d: %s", pr_number, reason)
+    return False

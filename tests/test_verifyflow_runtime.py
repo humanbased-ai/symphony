@@ -59,10 +59,14 @@ class FakeGitHubClient:
         pr_data: dict[str, Any] | None,
         comments: list[dict[str, Any]],
         failed_check_runs: list[dict[str, Any]] | None = None,
+        merge_result: bool = True,
     ):
         self._pr_data = pr_data
         self._comments = comments
         self._failed_check_runs = failed_check_runs or []
+        self._merge_result = merge_result
+        self.merge_calls: list[dict[str, Any]] = []
+        self.posted_comments: list[str] = []
 
     def get_pr(self, pr_number: int) -> dict[str, Any] | None:
         return self._pr_data
@@ -72,6 +76,14 @@ class FakeGitHubClient:
 
     def get_pr_failed_check_runs(self, pr_number: int) -> list[dict[str, Any]]:
         return self._failed_check_runs
+
+    def merge_pr(self, pr_number: int, *, sha: str | None = None, merge_method: str = "squash") -> bool:
+        self.merge_calls.append({"pr_number": pr_number, "sha": sha, "merge_method": merge_method})
+        return self._merge_result
+
+    def post_pr_comment(self, pr_number: int, body: str) -> bool:
+        self.posted_comments.append(body)
+        return True
 
 
 def make_spawn(exit_code: int | None, summary: dict[str, Any] | None):
@@ -245,3 +257,112 @@ def test_custom_command_and_level_are_used() -> None:
     )
     assert calls[0][:2] == ["/opt/vf", "step"]
     assert "--level" in calls[0] and calls[0][calls[0].index("--level") + 1] == "ui"
+
+
+# --- merge gate (IN-609) ----------------------------------------------------
+
+
+def test_auto_merge_off_by_default_never_merges() -> None:
+    """Default config is advisory: an accept verdict does NOT merge."""
+    gh = FakeGitHubClient({"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [CROSSCHECK_APPROVE])
+    spawn, _ = make_spawn(0, {"verdict": "accept", "prCommentPosted": True})
+    outcome = run(
+        maybe_run_verifyflow(
+            github_client=gh, config=_config(), branch="b", pr_number=42,
+            already_run_sha=None, spawn=spawn,
+        )
+    )
+    assert outcome is not None
+    assert outcome.merged is False
+    assert gh.merge_calls == []
+    assert gh.posted_comments == []  # no gate comment when the gate is off
+
+
+def test_auto_merge_on_accept_merges_and_comments() -> None:
+    gh = FakeGitHubClient({"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [CROSSCHECK_APPROVE])
+    spawn, _ = make_spawn(0, {"verdict": "accept", "criteria": {"pass": 3}, "prCommentPosted": True})
+    outcome = run(
+        maybe_run_verifyflow(
+            github_client=gh, config=_config(auto_merge=True), branch="b", pr_number=42,
+            already_run_sha=None, spawn=spawn,
+        )
+    )
+    assert outcome is not None and outcome.merged is True
+    assert gh.merge_calls == [{"pr_number": 42, "sha": HEAD_SHA, "merge_method": "squash"}]
+    assert any("squash-merged" in c for c in gh.posted_comments)
+
+
+def test_non_accept_verdict_does_not_merge() -> None:
+    for verdict in ("needs_fix", "manual_review_required", "accept_with_risks"):
+        gh = FakeGitHubClient({"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [CROSSCHECK_APPROVE])
+        spawn, _ = make_spawn(0, {"verdict": verdict, "prCommentPosted": True})
+        outcome = run(
+            maybe_run_verifyflow(
+                github_client=gh, config=_config(auto_merge=True), branch="b", pr_number=42,
+                already_run_sha=None, spawn=spawn,
+            )
+        )
+        assert outcome is not None and outcome.merged is False
+        assert gh.merge_calls == []
+        assert any("not merged" in c for c in gh.posted_comments)
+
+
+def test_failed_run_does_not_merge() -> None:
+    """A non-zero / no-summary run is never merged (safe side)."""
+    gh = FakeGitHubClient({"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [CROSSCHECK_APPROVE])
+    spawn, _ = make_spawn(1, None)
+    outcome = run(
+        maybe_run_verifyflow(
+            github_client=gh, config=_config(auto_merge=True), branch="b", pr_number=42,
+            already_run_sha=None, spawn=spawn,
+        )
+    )
+    assert outcome is not None and outcome.merged is False
+    assert gh.merge_calls == []
+    assert any("did not complete" in c for c in gh.posted_comments)
+
+
+def test_github_rejection_leaves_pr_open() -> None:
+    """accept verdict but GitHub refuses the merge → not merged, comment explains."""
+    gh = FakeGitHubClient(
+        {"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [CROSSCHECK_APPROVE], merge_result=False,
+    )
+    spawn, _ = make_spawn(0, {"verdict": "accept", "prCommentPosted": True})
+    outcome = run(
+        maybe_run_verifyflow(
+            github_client=gh, config=_config(auto_merge=True), branch="b", pr_number=42,
+            already_run_sha=None, spawn=spawn,
+        )
+    )
+    assert outcome is not None and outcome.merged is False
+    assert gh.merge_calls == [{"pr_number": 42, "sha": HEAD_SHA, "merge_method": "squash"}]
+    assert any("GitHub rejected" in c for c in gh.posted_comments)
+
+
+def test_gate_blocked_accept_does_not_merge() -> None:
+    """Defensive: an accept that somehow carries gateBlocked=true is not merged."""
+    gh = FakeGitHubClient({"head": {"sha": HEAD_SHA}, "html_url": PR_URL}, [CROSSCHECK_APPROVE])
+    spawn, _ = make_spawn(0, {"verdict": "accept", "gateBlocked": True})
+    outcome = run(
+        maybe_run_verifyflow(
+            github_client=gh, config=_config(auto_merge=True), branch="b", pr_number=42,
+            already_run_sha=None, spawn=spawn,
+        )
+    )
+    assert outcome is not None and outcome.merged is False
+    assert gh.merge_calls == []
+
+
+def test_config_parses_auto_merge_and_merge_method() -> None:
+    cfg = VerifyflowConfig.from_mapping(
+        {"verifyflow": {"enabled": True, "auto_merge": True, "merge_method": "merge"}}
+    )
+    assert cfg.auto_merge is True
+    assert cfg.merge_method == "merge"
+
+
+def test_config_rejects_bad_merge_method() -> None:
+    from symphony.config import ConfigError
+
+    with pytest.raises(ConfigError, match="unsupported_verifyflow_merge_method"):
+        VerifyflowConfig.from_mapping({"verifyflow": {"merge_method": "fast-forward"}})
