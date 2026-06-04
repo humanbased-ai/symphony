@@ -408,6 +408,14 @@ class VerifyflowConfig:
     level: str = "functional"
     trigger: str = "crosscheck"
     timeout_seconds: int = DEFAULT_VERIFYFLOW_TIMEOUT_SECONDS
+    # When True, a VerifyFlow ``accept`` verdict auto-merges the PR (squash) and
+    # transitions the Linear issue to the tracker's done state — VerifyFlow
+    # becomes the delivery gate (IN-609). Default OFF: the step stays advisory
+    # (judge + comment, never merges). Only ``accept`` ever merges; every other
+    # verdict, a non-zero/timed-out run, or a GitHub-side rejection leaves the
+    # PR open with an explanatory comment for a human.
+    auto_merge: bool = False
+    merge_method: str = "squash"
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "VerifyflowConfig":
@@ -415,6 +423,9 @@ class VerifyflowConfig:
         trigger = _string_value(verifyflow.get("trigger")) or "crosscheck"
         if trigger not in VERIFYFLOW_TRIGGERS:
             raise ConfigError(f"unsupported_verifyflow_trigger:{trigger}")
+        merge_method = _string_value(verifyflow.get("merge_method")) or "squash"
+        if merge_method not in ("squash", "merge", "rebase"):
+            raise ConfigError(f"unsupported_verifyflow_merge_method:{merge_method}")
         return cls(
             enabled=_bool_value(verifyflow.get("enabled"), False, "verifyflow_enabled"),
             command=_string_value(verifyflow.get("command")) or "vf",
@@ -425,6 +436,8 @@ class VerifyflowConfig:
                 DEFAULT_VERIFYFLOW_TIMEOUT_SECONDS,
                 "verifyflow_timeout_seconds",
             ),
+            auto_merge=_bool_value(verifyflow.get("auto_merge"), False, "verifyflow_auto_merge"),
+            merge_method=merge_method,
         )
 
 
