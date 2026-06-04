@@ -3,6 +3,44 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.24 — 2026-06-04
+
+**[PR #159](https://github.com/humanbased-ai/symphony/pull/159)**: feat(verifyflow): auto-merge gate on accept verdict (IN-609)
+
+## Linear
+
+- Issue: https://linear.app/inductive-network/issue/IN-609
+
+## Summary
+
+- Turns the advisory VerifyFlow step (IN-569) into an opt-in **merge gate** (epic IN-561): when `verifyflow.auto_merge: true`, a clean VerifyFlow `accept` verdict squash-merges the PR and transitions the linked Linear issue to the done state.
+- VerifyFlow becomes the delivery merge judge; Symphony's LLM acceptance judge stays disabled (they do not both run).
+- Default off: with `auto_merge` unset, behavior is byte-for-byte the prior advisory step (no merge, no extra comment).
+
+## Decision Context
+
+- Selected solution: extend the existing `verifyflow_runtime` step with a merge gate. Pass = `accept` only; on any non-pass the PR stays open with an auditable `verifyflow:merge-gate` comment. Safe by construction — only a completed `accept` run reaches `merge_pr`; non-zero/timed-out runs, non-`accept` verdicts, a defensive `gateBlocked=true`, and GitHub-side rejections all leave the PR open and explained.
+- Alternatives considered: (a) hook VerifyFlow into the LLM acceptance judge subsystem as an extra gate — rejected as more invasive and entangled with the in-progress acceptance branch; (b) allow `accept_with_risks` to merge — rejected, too lenient given a known false-fail risk.
+- Follow-up work: wire `auto_merge` into onboarding-generated WORKFLOW.md; optional bounce-back on non-pass (IN-564). Linked verifyflow-side false-fail fix tracked in IN-608.
+
+## Validation
+
+- Targeted checks: `env -u LINEAR_API_KEY uv run --frozen pytest tests/test_verifyflow_runtime.py` → 20 passed (12 existing + 8 new: off-by-default, accept→merge, non-accept→no-merge, failed-run→no-merge, GitHub-rejection, gateBlocked, config parse/validate).
+- Full gates: `env -u LINEAR_API_KEY uv run --frozen pytest` → 469 passed, 13 failed. The 13 are the pre-existing `FeedbackGate`/`test_linear_tracker` `classify_feedback` failures on `main`, untouched by this PR. `make-all` CI job passes.
+- Not run: live `symphony run` end-to-end (requires the daemon + a real PR); covered by the unit tests' injected spawn/GitHub fakes.
+
+## UI Evidence
+
+- Screenshots:
+- Not applicable: backend/orchestrator change, no UI surface.
+
+## Review
+
+- Reviewer / agent requested: Crosscheck (claude reviewer).
+- Blocking comments resolved: none yet (new PR).
+
+---
+
 ## v0.1.0.23 — 2026-06-03
 
 **[PR #154](https://github.com/humanbased-ai/symphony/pull/154)**: Add `symphony info` command to print environment diagnostics
