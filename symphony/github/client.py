@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +32,43 @@ class GitHubClient:
             )
             return True
         except GitHubClientError:
+            return False
+
+    def list_pr_labels(self, pr_number: int) -> list[str]:
+        """Return the label names currently on a PR (issue thread). [] on failure."""
+        try:
+            result = self._request("GET", f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/labels")
+            if isinstance(result, list):
+                return [str(item.get("name")) for item in result if isinstance(item, dict) and item.get("name")]
+            return []
+        except GitHubClientError:
+            return []
+
+    def add_pr_labels(self, pr_number: int, labels: list[str]) -> bool:
+        """Add labels to a PR (additive; existing labels are kept). True on success."""
+        try:
+            self._request(
+                "POST",
+                f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/labels",
+                {"labels": labels},
+            )
+            return True
+        except GitHubClientError:
+            return False
+
+    def remove_pr_label(self, pr_number: int, label: str) -> bool:
+        """Remove a single label from a PR. A label that is already absent (404) is
+        treated as success so releasing a lock is idempotent."""
+        encoded = urllib.parse.quote(label, safe="")
+        try:
+            self._request(
+                "DELETE",
+                f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/labels/{encoded}",
+            )
+            return True
+        except GitHubClientError as exc:
+            if "github_http_error:404" in str(exc):
+                return True
             return False
 
     def get_pr_diff(self, pr_number: int) -> str:

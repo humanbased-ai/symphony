@@ -25,7 +25,14 @@ DEFAULT_CODEX_STALL_TIMEOUT_MS = 300_000
 DEFAULT_CLAUDE_COMMAND = "claude"
 DEFAULT_CLAUDE_TURN_TIMEOUT_MS = 3_600_000
 DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions"
-DEFAULT_MAX_PR_TURNS = 10
+# Lowered from 10 to 5 (IN-628): the Symphony↔Crosscheck fix loop rarely needs
+# more than a few rounds; a high ceiling let a non-converging PR thrash for ~8
+# rounds before the budget tripped. Five rounds with no resolution is a strong
+# signal to stop and escalate to a human.
+DEFAULT_MAX_PR_TURNS = 5
+# Best-effort cross-daemon lock so two Symphony daemons don't dispatch fix agents
+# for the same PR at once (IN-628). Applied as a GitHub label while a fix agent runs.
+DEFAULT_PR_LOCK_LABEL = "symphony:working"
 DEFAULT_ACCEPTANCE_REVIEW_SOURCE = "auto"
 DEFAULT_ACCEPTANCE_CONFIDENCE_THRESHOLD = 0.8
 DEFAULT_ACCEPTANCE_QUIET_PERIOD_SECONDS = 300
@@ -273,6 +280,12 @@ class GitHubConfig:
     owner: str | None = None
     repo: str | None = None
     max_pr_turns: int = DEFAULT_MAX_PR_TURNS
+    # Best-effort single-writer lock on a PR while a fix agent runs (IN-628). When
+    # enabled, a daemon sets ``pr_lock_label`` on the PR before dispatching a fix
+    # agent and removes it after; another daemon that sees the label skips the PR
+    # for that tick. Set ``pr_lock_enabled: false`` to restore the old behavior.
+    pr_lock_enabled: bool = True
+    pr_lock_label: str = DEFAULT_PR_LOCK_LABEL
 
     @classmethod
     def from_mapping(
@@ -289,11 +302,14 @@ class GitHubConfig:
                 token = resolve_env_reference(raw_token, environ)
             except ConfigError:
                 pass  # env var not set; runtime resolves token from credentials file
+        lock_enabled = github.get("pr_lock_enabled")
         return cls(
             token=token,
             owner=_string_value(github.get("owner")),
             repo=_string_value(github.get("repo")),
             max_pr_turns=_positive_int(github.get("max_pr_turns"), DEFAULT_MAX_PR_TURNS, "github_max_pr_turns"),
+            pr_lock_enabled=True if lock_enabled is None else bool(lock_enabled),
+            pr_lock_label=_string_value(github.get("pr_lock_label")) or DEFAULT_PR_LOCK_LABEL,
         )
 
 

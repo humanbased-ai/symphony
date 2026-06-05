@@ -47,16 +47,25 @@ DEFAULT_JUDGE_TIMEOUT_MS = 600_000
 JUDGE_DIFF_TRUNCATE = 60_000
 
 
+# Cap on the per-branch verdict history kept for oscillation detection (IN-628).
+# Only the relative order of recent verdicts matters, so a short tail is enough.
+VERDICT_HISTORY_CAP = 8
+
+
 @dataclass(frozen=True)
 class ConvergenceSnapshot:
     """Per-branch state the runtime carries between ticks.
 
     ``last_feedback_at`` clocks ``quiet_for_seconds``; ``pr_turns_observed`` is
     compared against the live ``_pr_turns`` counter to fill ``pr_turn_advancing``.
+    ``verdict_history`` records the sequence of crosscheck verdicts observed across
+    ticks (consecutive duplicates included; the detector collapses them) so the
+    runtime can spot a verdict that keeps re-opening after approving (IN-628).
     """
 
     last_feedback_at: datetime
     pr_turns_observed: int
+    verdict_history: tuple[CrosscheckVerdict, ...] = ()
 
 
 __all__ = (
@@ -645,9 +654,15 @@ async def maybe_run_acceptance(
         now if saw_new_feedback_this_tick
         else (snapshot.last_feedback_at if snapshot else now)
     )
+    prior_history = snapshot.verdict_history if snapshot else ()
+    new_history = _append_verdict_history(
+        prior_history,
+        inputs.crosscheck_verdict.verdict if inputs.crosscheck_verdict else None,
+    )
     new_snapshot = ConvergenceSnapshot(
         last_feedback_at=last_feedback_at,
         pr_turns_observed=pr_turns,
+        verdict_history=new_history,
     )
 
     if not result.converged:
@@ -793,3 +808,17 @@ def _auto_merge_skip_reason(
 
 def _initial_snapshot(now: datetime, pr_turns: int) -> ConvergenceSnapshot:
     return ConvergenceSnapshot(last_feedback_at=now, pr_turns_observed=pr_turns)
+
+
+def _append_verdict_history(
+    history: tuple[CrosscheckVerdict, ...],
+    verdict: CrosscheckVerdict | None,
+) -> tuple[CrosscheckVerdict, ...]:
+    """Append a newly-observed verdict, collapsing consecutive duplicates at write
+    time (the same verdict re-read across many quiet ticks is not a transition) and
+    keeping only the most recent ``VERDICT_HISTORY_CAP`` entries."""
+    if verdict is None:
+        return history
+    if history and history[-1] is verdict:
+        return history
+    return (*history, verdict)[-VERDICT_HISTORY_CAP:]

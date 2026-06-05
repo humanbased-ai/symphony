@@ -111,6 +111,7 @@ class FakeRunner:
 class FakeGitHubClient:
     def __init__(self) -> None:
         self.comments: list[tuple[int, str]] = []
+        self.labels: dict[int, set[str]] = {}
 
     def post_pr_comment(self, pr_number: int, body: str) -> bool:
         self.comments.append((pr_number, body))
@@ -118,6 +119,18 @@ class FakeGitHubClient:
 
     def get_pr_diff(self, pr_number: int) -> str:
         return f"diff for PR #{pr_number}"
+
+    # PR-lock label support (IN-628): a tiny in-memory model of the real client.
+    def list_pr_labels(self, pr_number: int) -> list[str]:
+        return sorted(self.labels.get(pr_number, set()))
+
+    def add_pr_labels(self, pr_number: int, labels: list[str]) -> bool:
+        self.labels.setdefault(pr_number, set()).update(labels)
+        return True
+
+    def remove_pr_label(self, pr_number: int, label: str) -> bool:
+        self.labels.get(pr_number, set()).discard(label)
+        return True
 
 
 def make_runtime(tmp: Path, max_pr_turns: int = 3, runner_success: bool = True) -> tuple[SymphonyRuntime, FakeTracker, FakeRunner, FakeGitHubClient]:
@@ -158,6 +171,54 @@ class TestPRCommentTriggersAgent(unittest.IsolatedAsyncioTestCase):
             self.assertIn("alice", runner.prompts[0])
             self.assertIn("Please add error handling", runner.prompts[0])
             self.assertIn(str(5), runner.prompts[0])
+
+    async def test_lock_label_set_during_run_and_released_after(self) -> None:
+        # IN-628: a fix dispatch claims the PR with the lock label and releases it
+        # when the agent run finishes, so the label is gone afterward.
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _, runner, github = make_runtime(Path(tmp))
+            branch = "feat/sym-42-run1"
+            runtime._branch_to_issue[branch] = make_issue()
+            event = PRCommentEvent(
+                pr_number=9, pr_head_branch=branch, pr_head_sha="abc",
+                comment_body="fix it", comment_author="alice",
+                comment_id=1, repo_owner="org", repo_name="repo",
+            )
+            await runtime.handle_github_pr_event(event)
+            self.assertEqual(len(runner.prompts), 1)
+            self.assertEqual(github.list_pr_labels(9), [])  # released
+
+    async def test_lock_held_by_other_daemon_skips_dispatch(self) -> None:
+        # IN-628: another daemon already holds the lock label → skip, don't dispatch,
+        # and don't burn a turn (the holder owns the budget).
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _, runner, github = make_runtime(Path(tmp))
+            branch = "feat/sym-42-run1"
+            runtime._branch_to_issue[branch] = make_issue()
+            github.add_pr_labels(9, [runtime.config.github.pr_lock_label])
+            event = PRCommentEvent(
+                pr_number=9, pr_head_branch=branch, pr_head_sha="abc",
+                comment_body="fix it", comment_author="alice",
+                comment_id=1, repo_owner="org", repo_name="repo",
+            )
+            await runtime.handle_github_pr_event(event)
+            self.assertEqual(len(runner.prompts), 0)
+            self.assertEqual(runtime._pr_turns.get(branch, 0), 0)
+
+    async def test_escalated_branch_skips_dispatch(self) -> None:
+        # IN-628: once a branch is escalated for oscillation, fix dispatch is paused.
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _, runner, _ = make_runtime(Path(tmp))
+            branch = "feat/sym-42-run1"
+            runtime._branch_to_issue[branch] = make_issue()
+            runtime._pr_escalated.add(branch)
+            event = PRCommentEvent(
+                pr_number=9, pr_head_branch=branch, pr_head_sha="abc",
+                comment_body="fix it", comment_author="alice",
+                comment_id=1, repo_owner="org", repo_name="repo",
+            )
+            await runtime.handle_github_pr_event(event)
+            self.assertEqual(len(runner.prompts), 0)
 
     async def test_unknown_branch_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

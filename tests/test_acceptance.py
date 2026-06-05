@@ -15,8 +15,43 @@ from symphony.acceptance import (
     parse_crosscheck_log_verdict,
     parse_crosscheck_verdict,
     parse_verdict_word,
+    verdict_oscillating,
 )
 from symphony.config import DEFAULT_ACCEPTANCE_GUARD_PATHS
+
+
+_AP = CrosscheckVerdict.APPROVE
+_NW = CrosscheckVerdict.NEEDS_WORK
+_BL = CrosscheckVerdict.BLOCK
+
+
+class VerdictOscillatingTests(unittest.TestCase):
+    def test_empty_or_short_history_is_not_oscillating(self) -> None:
+        self.assertFalse(verdict_oscillating([]))
+        self.assertFalse(verdict_oscillating([_NW]))
+        self.assertFalse(verdict_oscillating([_AP]))
+
+    def test_single_reopen_is_not_oscillating(self) -> None:
+        # One APPROVE→NEEDS WORK is normal review progress, not thrashing.
+        self.assertFalse(verdict_oscillating([_NW, _AP, _NW]))
+
+    def test_two_reopens_after_approve_is_oscillating(self) -> None:
+        # The IN-625 pattern: approved, re-opened, approved, re-opened again.
+        self.assertTrue(verdict_oscillating([_NW, _AP, _NW, _AP, _NW]))
+
+    def test_block_reopen_also_counts(self) -> None:
+        self.assertTrue(verdict_oscillating([_AP, _BL, _AP, _NW]))
+
+    def test_consecutive_duplicates_collapse(self) -> None:
+        # A run of identical verdicts re-read across quiet ticks is not churn.
+        self.assertFalse(verdict_oscillating([_NW, _NW, _NW, _AP, _AP, _AP]))
+
+    def test_steady_progress_to_approve_is_not_oscillating(self) -> None:
+        self.assertFalse(verdict_oscillating([_BL, _NW, _NW, _AP, _AP]))
+
+    def test_threshold_is_configurable(self) -> None:
+        self.assertTrue(verdict_oscillating([_AP, _NW], threshold=1))
+        self.assertFalse(verdict_oscillating([_AP, _NW, _AP, _NW], threshold=3))
 
 
 def _dt(text: str) -> datetime:
