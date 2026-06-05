@@ -3,6 +3,46 @@
 All notable user-facing changes to the Symphony CLI are recorded here before a
 release tag is created.
 
+## v0.1.0.25 — 2026-06-05
+
+**[PR #160](https://github.com/humanbased-ai/symphony/pull/160)**: feat(pr-loop): single-writer lock + oscillation guard, lower turn budget (IN-628)
+
+## Linear
+
+- Issue: IN-628 — Pipeline convergence: stop the Symphony↔Crosscheck↔VerifyFlow repair loop from oscillating
+
+## Summary
+
+- Symphony's slice of IN-628. Two fixes for the non-converging review/fix loop seen on IN-625 PR #28.
+- **P0 — single-writer PR lock**: `GitHubClient` gains `list_pr_labels`/`add_pr_labels`/`remove_pr_label`; `_handle_pr_feedback` claims the PR with a `symphony:working` label before dispatching a fix agent and releases it in a `finally`. A second dispatch that sees the label held skips the PR that tick without consuming a turn. Configurable via `github.pr_lock_enabled` / `pr_lock_label`.
+- **P2 — convergence guards**: new pure `acceptance.verdict_oscillating()` flags ≥2 "re-open after approve" transitions; `ConvergenceSnapshot` carries a capped `verdict_history`; on detection the runtime escalates once (PR comment + `on_pr_update("escalated")`) and pauses automated fix dispatch for the branch. `DEFAULT_MAX_PR_TURNS` lowered 10 → 5.
+
+## Decision Context
+
+- Selected solution: severity gate lives in Crosscheck (#208, the core fix); Symphony adds the orchestration-side backstops — an oscillation circuit-breaker and a best-effort PR lock.
+- Alternatives considered: a true cross-process mutex (rejected — GitHub labels can't give perfect mutual exclusion; documented as best-effort). Holding the lock across the whole loop vs only around a dispatch (chose per-dispatch + release-in-finally to limit crash-leak window).
+- Follow-up work: the heavier half of P1 (incremental review + findings ledger) is deferred to a follow-up; a label lock cannot block a human's manual push (only a second Symphony dispatch).
+
+## Validation
+
+- Targeted checks: `verdict_oscillating` unit cases incl. the IN-625 flip pattern; PR-lock acquire/skip/release; escalation-pause guard.
+- Full gates: `make all` green; full pytest suite — 478 pass.
+- Not run: nothing new skipped. 14 failures are pre-existing on `origin/main` (`test_cli`, `test_linear_tracker` FeedbackSignalTests, `test_runtime` FeedbackGateTests), confirmed against a clean baseline — unrelated to this change.
+
+## UI Evidence
+
+- Screenshots: n/a
+- Not applicable: backend/orchestration-only change, no UI.
+
+## Review
+
+- Reviewer / agent requested: Crosscheck
+- Blocking comments resolved: (pending first review)
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---
+
 ## v0.1.0.24 — 2026-06-04
 
 **[PR #159](https://github.com/humanbased-ai/symphony/pull/159)**: feat(verifyflow): auto-merge gate on accept verdict (IN-609)
