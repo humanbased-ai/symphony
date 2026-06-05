@@ -350,6 +350,33 @@ def evaluate_convergence(inputs: ConvergenceInputs) -> ConvergenceResult:
     return ConvergenceResult(True, "silent", "Symphony quiesced; CI green; converged")
 
 
+def verdict_oscillating(
+    history: Sequence[CrosscheckVerdict],
+    *,
+    threshold: int = 2,
+) -> bool:
+    """True when the review verdict has re-opened after approving too many times.
+
+    The non-converging fix loop (IN-628) shows up as a verdict that flips APPROVE →
+    NEEDS WORK / BLOCK repeatedly: the reviewer approves, a fix or re-review re-opens
+    it, it approves again, re-opens again. We collapse consecutive duplicates (a run
+    of identical verdicts is not churn) and count "re-open after approve" transitions
+    — an APPROVE immediately followed by a non-APPROVE. ``threshold`` such reopenings
+    mean the loop is thrashing rather than progressing, and Symphony should stop
+    dispatching fixes and escalate to a human instead of burning the turn budget.
+    """
+    collapsed: list[CrosscheckVerdict] = []
+    for v in history:
+        if not collapsed or collapsed[-1] is not v:
+            collapsed.append(v)
+    reopens = sum(
+        1
+        for prev, nxt in zip(collapsed, collapsed[1:])
+        if prev is CrosscheckVerdict.APPROVE and nxt is not CrosscheckVerdict.APPROVE
+    )
+    return reopens >= threshold
+
+
 def _verdict_covers_head(
     verdict: ReviewVerdict,
     head_sha: str | None,

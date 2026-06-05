@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from symphony.acceptance import verdict_oscillating
 from symphony.acceptance_runtime import (
     ClaudeCodeJudgeRunner,
     ConvergenceSnapshot,
@@ -140,6 +141,9 @@ class SymphonyRuntime:
         # VerifyFlow advisory step per-branch state (IN-569): the head sha
         # last handed to ``vf step``, so each head is verified at most once.
         self._verifyflow_run_sha: dict[str, str] = {}
+        # Branches whose review verdict has oscillated (IN-628): once escalated to a
+        # human, automated fix dispatch is paused so the loop stops thrashing.
+        self._pr_escalated: set[str] = set()
 
     async def run_tick(self) -> RuntimeTickResult:
         """Poll Linear once, dispatch eligible issues, and wait for started workers."""
@@ -569,6 +573,7 @@ class SymphonyRuntime:
                 self._convergence_snapshots.pop(branch, None)
                 self._acceptance_judged_sha.pop(branch, None)
                 self._verifyflow_run_sha.pop(branch, None)
+                self._pr_escalated.discard(branch)
                 return
             pr_number = cached_pr
         else:
@@ -727,6 +732,28 @@ class SymphonyRuntime:
         self._convergence_snapshots[branch] = snapshot
         if judged_sha:
             self._acceptance_judged_sha[branch] = judged_sha
+
+        # Oscillation guard (IN-628): if the review verdict keeps re-opening after
+        # approving, the loop is thrashing rather than progressing. Escalate to a
+        # human once and pause automated fix dispatch for this branch instead of
+        # burning the remaining turn budget on a verdict that won't settle.
+        if branch not in self._pr_escalated and verdict_oscillating(snapshot.verdict_history):
+            self._pr_escalated.add(branch)
+            LOGGER.warning(
+                "PR #%d (%s) review verdict is oscillating %s — escalating to a human; pausing automated fixes.",
+                pr_number, issue.identifier,
+                " → ".join(v.value for v in snapshot.verdict_history),
+            )
+            if self.github_client is not None:
+                self.github_client.post_pr_comment(
+                    pr_number,
+                    f"{SYMPHONY_BOT_MARKER}\nThe review verdict has gone back and forth without "
+                    "converging, so I've paused automated fixes for this PR. Please review and "
+                    "merge or close it manually.",
+                )
+            if self.on_pr_update is not None:
+                self.on_pr_update(branch, pr_number, "escalated")
+            return
 
         # Bounce-back: when the judge says the work doesn't meet the issue,
         # optionally re-dispatch the implementer with the verdict's unmet
@@ -893,6 +920,7 @@ class SymphonyRuntime:
         self._convergence_snapshots.pop(event.pr_head_branch, None)
         self._acceptance_judged_sha.pop(event.pr_head_branch, None)
         self._verifyflow_run_sha.pop(event.pr_head_branch, None)
+        self._pr_escalated.discard(event.pr_head_branch)
         if issue is not None:
             release_issue(issue.id, self.state)
 
@@ -909,10 +937,52 @@ class SymphonyRuntime:
         feedback_text = _render_pr_conflict_prompt()
         await self._handle_pr_feedback(branch, pr_number, feedback_text)
 
+    def _pr_lock_label(self) -> str | None:
+        """The lock label to use, or None when locking is off or GitHub is absent."""
+        gh = self.config.github
+        if not gh.pr_lock_enabled or self.github_client is None:
+            return None
+        return gh.pr_lock_label
+
+    async def _acquire_pr_lock(self, pr_number: int) -> bool:
+        """Best-effort cross-daemon mutex (IN-628): set the lock label if it is not
+        already held. Returns True if we now hold it (or locking is disabled), False
+        if another daemon is already working the PR.
+
+        This is a check-then-set over a shared GitHub label, not a perfect mutex: two
+        daemons listing at the same instant can both miss the label and both proceed.
+        It removes the common case — daemons picking up the same PR seconds apart —
+        and is released in a ``finally``. A hard crash mid-run can leak the label;
+        an operator clears it by removing the label (or set github.pr_lock_enabled:
+        false to disable locking entirely).
+        """
+        label = self._pr_lock_label()
+        if label is None:
+            return True
+        assert self.github_client is not None
+        labels = await asyncio.to_thread(self.github_client.list_pr_labels, pr_number)
+        if label in labels:
+            return False
+        return await asyncio.to_thread(self.github_client.add_pr_labels, pr_number, [label])
+
+    async def _release_pr_lock(self, pr_number: int) -> None:
+        label = self._pr_lock_label()
+        if label is None:
+            return
+        assert self.github_client is not None
+        await asyncio.to_thread(self.github_client.remove_pr_label, pr_number, label)
+
     async def _handle_pr_feedback(self, branch: str, pr_number: int, feedback_text: str) -> None:
         issue = self._branch_to_issue.get(branch)
         if issue is None:
             LOGGER.debug("PR #%d comment on unknown branch %r — ignoring.", pr_number, branch)
+            return
+
+        if branch in self._pr_escalated:
+            LOGGER.info(
+                "PR #%d (%s) is escalated to a human — skipping automated fix dispatch.",
+                pr_number, issue.identifier,
+            )
             return
 
         max_turns = self.config.github.max_pr_turns
@@ -930,18 +1000,31 @@ class SymphonyRuntime:
                 )
             return
 
+        # Claim the PR before dispatching so a second daemon doesn't fix it in
+        # parallel (IN-628). On failure another daemon already holds it — skip this
+        # tick; the turn counter is left untouched so the holder owns the budget.
+        if not await self._acquire_pr_lock(pr_number):
+            LOGGER.info(
+                "PR #%d (%s) is being worked by another agent (lock held) — skipping this tick.",
+                pr_number, issue.identifier,
+            )
+            return
+
         self._pr_turns[branch] = turns + 1
         LOGGER.info(
             "PR #%d feedback for %s (turn %d/%d) — dispatching agent.",
             pr_number, issue.identifier, turns + 1, max_turns,
         )
 
-        diff = ""
-        if self.github_client is not None:
-            diff = await asyncio.to_thread(self.github_client.get_pr_diff, pr_number)
+        try:
+            diff = ""
+            if self.github_client is not None:
+                diff = await asyncio.to_thread(self.github_client.get_pr_diff, pr_number)
 
-        prompt = _render_pr_feedback_prompt(issue, pr_number, branch, feedback_text, diff)
-        await self._run_pr_feedback(issue, branch, pr_number, prompt)
+            prompt = _render_pr_feedback_prompt(issue, pr_number, branch, feedback_text, diff)
+            await self._run_pr_feedback(issue, branch, pr_number, prompt)
+        finally:
+            await self._release_pr_lock(pr_number)
 
     async def _run_pr_feedback(self, issue: Issue, branch: str, pr_number: int, prompt: str) -> None:
         workspace = None

@@ -138,6 +138,7 @@ class FakeGitHubClient:
         self._review_comments: dict[int, list[dict]] = {}  # pr_number → comments
         self._issue_comments: dict[int, list[dict]] = {}
         self._reviews: dict[int, list[dict]] = {}
+        self._labels: dict[int, set[str]] = {}
         self._bot_login: str = "bot-user"
 
     def add_open_pr(self, branch: str, pr_number: int, *, merged: bool = False, open: bool = True) -> None:
@@ -179,6 +180,18 @@ class FakeGitHubClient:
 
     def get_pr_diff(self, pr_number: int) -> str:
         return f"diff for PR #{pr_number}"
+
+    # PR-lock label support (IN-628).
+    def list_pr_labels(self, pr_number: int) -> list[str]:
+        return sorted(self._labels.get(pr_number, set()))
+
+    def add_pr_labels(self, pr_number: int, labels: list[str]) -> bool:
+        self._labels.setdefault(pr_number, set()).update(labels)
+        return True
+
+    def remove_pr_label(self, pr_number: int, label: str) -> bool:
+        self._labels.get(pr_number, set()).discard(label)
+        return True
 
     def get_authenticated_login(self) -> str | None:
         return self._bot_login
