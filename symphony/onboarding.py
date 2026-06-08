@@ -126,16 +126,6 @@ def generate_workflow(config: InitConfig) -> str:
             .replace("__GITHUB_ORG__", org)
             .replace("__GITHUB_REPO__", repo)
         )
-        if config.repo_mode == "new":
-            # Replace the clone step with repo-create so dispatched agents
-            # handle new-project setup themselves (IN-284).
-            prompt = prompt.replace(
-                "1. Clone the repository (gh handles authentication \u2014 no token in the URL):\n"
-                f"   gh repo clone {org}/{repo} .",
-                "1. Create the GitHub repository and push:\n"
-                f"   gh repo create {org}/{repo} --public --source=. --remote=origin\n"
-                "   git push -u origin HEAD",
-            )
     else:
         front_matter["codex"] = {
             "command": codex_command,
@@ -166,7 +156,7 @@ _NEW_PROJECT_PREAMBLE = """\
 No git remote is configured for this workspace. Before the dispatch flow
 below can run, an operator must create the GitHub repository:
 
-  gh repo create __GITHUB_ORG__/__GITHUB_REPO__ --public --source=. --remote=origin
+  gh repo create __GITHUB_ORG__/__GITHUB_REPO__ --private --source=. --remote=origin
 
 Or replace the clone step in the prompt with the equivalent push-to-new-repo
 sequence. Until a remote exists, the dispatch will fail at the clone step.
