@@ -802,7 +802,15 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
 def init_main(argv: Sequence[str] | None = None) -> int:
     parser = build_init_parser()
     args = parser.parse_args(argv)
-    return _run_init_with_args(args, parser, command_name="init")
+    detected_repo_mode: str | None = None
+    if not getattr(args, "repo_mode", None):
+        try:
+            args.repo_mode = detect_repo_shape()
+            detected_repo_mode = args.repo_mode
+        except Exception as exc:  # noqa: BLE001 - detection is best-effort.
+            LOGGER.warning("Repo shape detection failed (%s); defaulting to 'single'.", exc)
+            args.repo_mode = DEFAULT_REPO_MODE
+    return _run_init_with_args(args, parser, command_name="init", detected_repo_mode=detected_repo_mode)
 
 
 def onboard_main(argv: Sequence[str] | None = None) -> int:

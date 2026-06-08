@@ -119,11 +119,23 @@ def generate_workflow(config: InitConfig) -> str:
     }
 
     if runner == "claude_code":
+        org = config.github_org or "YOUR_ORG"
+        repo = config.github_repo or "YOUR_REPO"
         prompt = (
             _CLAUDE_PR_PROMPT
-            .replace("__GITHUB_ORG__", config.github_org or "YOUR_ORG")
-            .replace("__GITHUB_REPO__", config.github_repo or "YOUR_REPO")
+            .replace("__GITHUB_ORG__", org)
+            .replace("__GITHUB_REPO__", repo)
         )
+        if config.repo_mode == "new":
+            # Replace the clone step with repo-create so dispatched agents
+            # handle new-project setup themselves (IN-284).
+            prompt = prompt.replace(
+                "1. Clone the repository (gh handles authentication \u2014 no token in the URL):\n"
+                f"   gh repo clone {org}/{repo} .",
+                "1. Create the GitHub repository and push:\n"
+                f"   gh repo create {org}/{repo} --public --source=. --remote=origin\n"
+                "   git push -u origin HEAD",
+            )
     else:
         front_matter["codex"] = {
             "command": codex_command,
@@ -266,9 +278,21 @@ def detect_repo_shape(cwd: str | Path | None = None) -> RepoMode:
 
     root = Path(cwd).expanduser().resolve() if cwd is not None else Path.cwd().resolve()
 
-    git_dir = root / ".git"
-    if not git_dir.exists():
+    # Walk up to the actual git root so invocations from subdirectories don't
+    # misclassify a normal repo as "new" (IN-284).
+    try:
+        toplevel = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return "new"
+    if toplevel.returncode != 0:
+        return "new"
+    root = Path(toplevel.stdout.strip())
 
     try:
         result = subprocess.run(
