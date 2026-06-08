@@ -294,7 +294,6 @@ class WorkflowConfig:
             webhook=WebhookConfig.from_mapping(config, environ=environ),
             review=ReviewConfig.from_mapping(config),
         )
-</old>
 
 
 def resolve_env_reference(value: str, environ: Mapping[str, str] | None = None) -> str:

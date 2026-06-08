@@ -935,7 +935,6 @@ def _run_init_with_args(
             else:
                 runner = "claude_code"
         runner = runner or DEFAULT_RUNNER
-</old>
 
         review_strategy = getattr(args, "review_strategy", None) or DEFAULT_REVIEW_STRATEGY
         if not automated and not getattr(args, "review_strategy", None) and len(available_runners) >= 2:
