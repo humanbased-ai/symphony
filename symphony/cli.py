@@ -208,7 +208,7 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--runner",
-        default=DEFAULT_RUNNER,
+        default=None,
         choices=("claude_code", "codex"),
         help=f"Agent runner to use. Defaults to {DEFAULT_RUNNER}.",
     )
@@ -923,9 +923,9 @@ def _run_init_with_args(
         # --runner claude_code" from "argparse filled the default", so we
         # also gate on the interactive mode (automated mode honors the
         # default without prompting).
-        runner = args.runner
+        runner = args.runner  # None when not explicitly passed
         available_runners = detect_available_runners()
-        if not automated and len(available_runners) >= 2 and runner == DEFAULT_RUNNER:
+        if not automated and len(available_runners) >= 2 and runner is None:
             print("\nBoth Claude Code and Codex are installed.")
             print("  1) claude_code (default)")
             print("  2) codex")
@@ -934,6 +934,8 @@ def _run_init_with_args(
                 runner = "codex"
             else:
                 runner = "claude_code"
+        runner = runner or DEFAULT_RUNNER
+</old>
 
         review_strategy = getattr(args, "review_strategy", None) or DEFAULT_REVIEW_STRATEGY
         if not automated and not getattr(args, "review_strategy", None) and len(available_runners) >= 2:

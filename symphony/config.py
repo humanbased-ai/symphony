@@ -244,6 +244,23 @@ class WebhookConfig:
 
 
 @dataclass(frozen=True)
+class ReviewConfig:
+    enabled: bool = False
+    strategy: str = "skip"
+    reviewer: str | None = None
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "ReviewConfig":
+        review = _mapping(config.get("review"), "review_config_must_be_map")
+        raw_enabled = review.get("enabled")
+        return cls(
+            enabled=bool(raw_enabled) if raw_enabled is not None else False,
+            strategy=_string_value(review.get("strategy")) or "skip",
+            reviewer=_string_value(review.get("reviewer")),
+        )
+
+
+@dataclass(frozen=True)
 class WorkflowConfig:
     tracker: TrackerConfig
     polling: PollingConfig = field(default_factory=PollingConfig)
@@ -255,6 +272,7 @@ class WorkflowConfig:
     codex: CodexConfig = field(default_factory=CodexConfig)
     claude_code: ClaudeCodeConfig = field(default_factory=ClaudeCodeConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
 
     @classmethod
     def from_mapping(
@@ -274,7 +292,9 @@ class WorkflowConfig:
             codex=CodexConfig.from_mapping(config),
             claude_code=ClaudeCodeConfig.from_mapping(config),
             webhook=WebhookConfig.from_mapping(config, environ=environ),
+            review=ReviewConfig.from_mapping(config),
         )
+</old>
 
 
 def resolve_env_reference(value: str, environ: Mapping[str, str] | None = None) -> str:
