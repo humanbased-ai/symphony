@@ -166,12 +166,9 @@ sequence. Until a remote exists, the dispatch will fail at the clone step.
 def _repo_mode_preamble(mode: RepoMode, github_org: str, github_repo: str) -> str:
     if mode == "monorepo":
         return _MONOREPO_PREAMBLE
-    if mode == "new":
-        return (
-            _NEW_PROJECT_PREAMBLE
-            .replace("__GITHUB_ORG__", github_org or "YOUR_ORG")
-            .replace("__GITHUB_REPO__", github_repo or "YOUR_REPO")
-        )
+    # "new" project setup must happen in the original project directory during
+    # onboarding, not inside per-issue agent workspaces where cwd is an
+    # isolated issue workspace (IN-284). The operator is notified in cli.py.
     return ""
 
 
