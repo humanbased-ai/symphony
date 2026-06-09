@@ -1050,6 +1050,13 @@ def _run_init_with_args(
         print("GitHub token not stored. Set GITHUB_TOKEN or re-run with --github-token.")
 
     print(f"\nWrote workflow: {workflow_path}")
+    if repo_mode == "new":
+        org = github_org or "YOUR_ORG"
+        repo = github_repo or "YOUR_REPO"
+        print(_dim(
+            "\nNew-project setup — run this from your project root before starting dispatch:"
+        ))
+        print(f"  gh repo create {org}/{repo} --private --source=. --remote=origin")
     print(f"Next: {_cyan(_cli_name() + ' doctor ' + str(workflow_path))}")
     print(_dim(
         "Tip: each WORKFLOW.md targets one Linear project. "
