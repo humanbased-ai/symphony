@@ -427,3 +427,109 @@ class TestTokenStoreResolveLinearToken:
                 store.resolve_linear_token()
 
         assert str(exc_info.value) == "missing_tracker_api_key"
+
+
+# ---------------------------------------------------------------------------
+# TokenStore auto-refresh (IN-165) — expired OAuth refreshes before API calls
+# ---------------------------------------------------------------------------
+
+
+class TestTokenStoreAutoRefresh:
+    """Expired access tokens refresh automatically when a refresh_token and
+    LINEAR_CLIENT_ID are available, before any tracker/API call would fail."""
+
+    def test_refreshes_expired_oauth_token(self, tmp_path: Path) -> None:
+        creds_file = tmp_path / "credentials.json"
+        expired = OAuthToken(access_token="old_tok", refresh_token="refresh_tok", expires_at=_past())
+        creds_file.parent.mkdir(parents=True, exist_ok=True)
+        creds_file.write_text(json.dumps({"linear": expired.to_dict()}, indent=2) + "\n")
+
+        tracker = _make_tracker()
+        store = TokenStore(
+            tracker=tracker,
+            environ={"LINEAR_CLIENT_ID": "cid"},
+            credentials_path=creds_file,
+        )
+
+        refreshed_payload = {
+            "access_token": "fresh_tok",
+            "refresh_token": "new_refresh",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        }
+        with patch("symphony.tracker.linear_oauth.refresh_token", return_value=refreshed_payload) as mock_refresh:
+            result = store.resolve_linear_token()
+
+        assert result == "Bearer fresh_tok"
+        mock_refresh.assert_called_once_with("cid", None, "refresh_tok")
+        # The refreshed token is persisted back so the next call need not refresh again.
+        reloaded = FileCredentialStore(path=creds_file).load_oauth_token()
+        assert reloaded is not None
+        assert reloaded.access_token == "fresh_tok"
+        assert reloaded.refresh_token == "new_refresh"
+
+    def test_refresh_failure_falls_through_to_api_key(self, tmp_path: Path) -> None:
+        from symphony.tracker.linear_oauth import OAuthError
+
+        creds_file = tmp_path / "credentials.json"
+        expired = OAuthToken(access_token="old_tok", refresh_token="refresh_tok", expires_at=_past())
+        data = expired.to_dict()
+        data["api_key"] = "fallback_key"
+        creds_file.parent.mkdir(parents=True, exist_ok=True)
+        creds_file.write_text(json.dumps({"linear": data}, indent=2) + "\n")
+
+        tracker = _make_tracker()
+        store = TokenStore(
+            tracker=tracker,
+            environ={"LINEAR_CLIENT_ID": "cid"},
+            credentials_path=creds_file,
+        )
+
+        with patch(
+            "symphony.tracker.linear_oauth.refresh_token",
+            side_effect=OAuthError("token_refresh_failed: 401"),
+        ):
+            result = store.resolve_linear_token()
+
+        assert result == "fallback_key"
+
+    def test_no_refresh_without_client_id(self, tmp_path: Path) -> None:
+        """Without LINEAR_CLIENT_ID, an expired token is not refreshed."""
+        creds_file = tmp_path / "credentials.json"
+        expired = OAuthToken(access_token="old_tok", refresh_token="refresh_tok", expires_at=_past())
+        data = expired.to_dict()
+        data["api_key"] = "fallback_key"
+        creds_file.parent.mkdir(parents=True, exist_ok=True)
+        creds_file.write_text(json.dumps({"linear": data}, indent=2) + "\n")
+
+        tracker = _make_tracker()
+        store = TokenStore(tracker=tracker, environ={}, credentials_path=creds_file)
+
+        with patch("symphony.tracker.linear_oauth.refresh_token") as mock_refresh:
+            result = store.resolve_linear_token()
+
+        mock_refresh.assert_not_called()
+        assert result == "fallback_key"
+
+    def test_refresh_preserves_refresh_token_when_omitted(self, tmp_path: Path) -> None:
+        """When the refresh response omits refresh_token, the old one is preserved."""
+        creds_file = tmp_path / "credentials.json"
+        expired = OAuthToken(access_token="old_tok", refresh_token="keep_me", expires_at=_past())
+        creds_file.parent.mkdir(parents=True, exist_ok=True)
+        creds_file.write_text(json.dumps({"linear": expired.to_dict()}, indent=2) + "\n")
+
+        tracker = _make_tracker()
+        store = TokenStore(
+            tracker=tracker,
+            environ={"LINEAR_CLIENT_ID": "cid"},
+            credentials_path=creds_file,
+        )
+
+        payload = {"access_token": "fresh_tok", "expires_in": 3600, "token_type": "Bearer"}
+        with patch("symphony.tracker.linear_oauth.refresh_token", return_value=payload):
+            result = store.resolve_linear_token()
+
+        assert result == "Bearer fresh_tok"
+        reloaded = FileCredentialStore(path=creds_file).load_oauth_token()
+        assert reloaded is not None
+        assert reloaded.refresh_token == "keep_me"

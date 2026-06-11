@@ -22,8 +22,10 @@ from symphony import __version__
 from symphony.agents.claude_code import ClaudeCodeRunner
 from symphony.agents.codex import CodexRunner
 from symphony.auth import (
+    CredentialStoreError,
     MissingLinearTokenError,
     TokenStore,
+    default_credential_store,
     default_credentials_path,
     load_local_linear_token,
     load_local_github_token,
@@ -32,7 +34,7 @@ from symphony.auth import (
 )
 from symphony.config import ConfigError, WorkflowConfig
 from symphony.github.client import GitHubClient
-from symphony.http_server import StatusAPI, WebhookAPI
+from symphony.http_server import OAuthAPI, StatusAPI, WebhookAPI
 from symphony.onboarding import (
     DEFAULT_ACTIVE_STATES,
     DEFAULT_PRESET,
@@ -705,9 +707,16 @@ async def serve_status_api(
     webhook_api: WebhookAPI | None = None,
 ) -> None:
     loop = asyncio.get_running_loop()
+    # Build an OAuthAPI bound to the platform credential store and the port the
+    # daemon listens on, so /api/v1/linear/auth/* is reachable by desktop/setup.
+    try:
+        oauth_api: OAuthAPI | None = OAuthAPI(credential_store=default_credential_store(), server_port=port)
+    except Exception:  # noqa: BLE001 - never let auth wiring block the status API.
+        oauth_api = None
     server = create_status_http_server(
         status_api, port, loop=loop,
         webhook_api=webhook_api,
+        oauth_api=oauth_api,
     )
     LOGGER.info("Status API listening on http://127.0.0.1:%s", port)
     serve_task = asyncio.create_task(asyncio.to_thread(server.serve_forever, 0.25))
@@ -726,6 +735,7 @@ def create_status_http_server(
     loop: asyncio.AbstractEventLoop,
     host: str = "127.0.0.1",
     webhook_api: WebhookAPI | None = None,
+    oauth_api: "OAuthAPI | None" = None,
 ) -> ThreadingHTTPServer:
     _webhook_route = "/api/v1/webhooks/linear"
 
@@ -748,6 +758,18 @@ def create_status_http_server(
         def _send_status_response(self, method: str) -> None:
             body = self.rfile.read(_content_length(self.headers.get("content-length")))
             route = self.path.split("?", 1)[0]
+
+            if oauth_api is not None:
+                oauth_response = oauth_api.handle_request(method, self.path, body)
+                if oauth_response is not None:
+                    payload = oauth_response.response_bytes()
+                    self.send_response(oauth_response.status_code)
+                    for header, value in oauth_response.headers.items():
+                        self.send_header(header, value)
+                    self.send_header("content-length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
 
             if method == "POST" and route == _webhook_route and webhook_api is not None:
                 header_map = {k.lower(): v for k, v in self.headers.items()}
@@ -1189,6 +1211,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return info_main(raw_args[1:])
         if command == "run":
             return run_main(raw_args[1:])
+        if command == "auth":
+            return auth_main(raw_args[1:])
         if command == "webhooks":
             return webhooks_main(raw_args[1:])
         if command == "project":
@@ -2985,6 +3009,273 @@ def _run_first_run_wizard(workflow_path: Path) -> bool:
     print(f"\n{_ok('✓')} Wrote {workflow_path}")
     print(_dim(f"  Tip: run `{cli} doctor {workflow_path}` to validate before the loop starts.\n"))
     return True
+
+
+# ---------------------------------------------------------------------------
+# symphony auth login / status / revoke
+# ---------------------------------------------------------------------------
+
+def auth_main(argv: Sequence[str] | None = None) -> int:
+    """Dispatch `symphony auth <subcommand>`."""
+    raw = list(argv) if argv is not None else []
+    if not raw:
+        print("Usage: symphony auth <login|status|revoke>", file=sys.stderr)
+        return 1
+    sub = raw[0]
+    if sub == "login":
+        return _auth_login_main(raw[1:])
+    if sub == "status":
+        return _auth_status_main(raw[1:])
+    if sub == "revoke":
+        return _auth_revoke_main(raw[1:])
+    print(f"symphony auth: unknown subcommand '{sub}'.  Use: login, status, revoke", file=sys.stderr)
+    return 1
+
+
+def _auth_login_main(argv: Sequence[str] | None = None) -> int:
+    from symphony.tracker.linear_oauth import (  # noqa: PLC0415
+        CALLBACK_PATH,
+        CALLBACK_PORT,
+        CALLBACK_TIMEOUT_SECONDS,
+        OAuthError,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog=f"{_cli_name()} auth login",
+        description="Authenticate with Linear via OAuth 2.0 PKCE.",
+    )
+    _add_version_argument(parser)
+    parser.add_argument(
+        "--client-id",
+        default=os.environ.get("LINEAR_CLIENT_ID"),
+        help="Linear OAuth application client ID.  Defaults to $LINEAR_CLIENT_ID.",
+    )
+    parser.add_argument(
+        "--client-secret",
+        default=os.environ.get("LINEAR_CLIENT_SECRET"),
+        help="Linear OAuth client secret.  Defaults to $LINEAR_CLIENT_SECRET.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=CALLBACK_PORT,
+        help=f"Local callback port.  Defaults to {CALLBACK_PORT}.",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print the authorization URL instead of opening it in a browser.",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.client_id:
+        print(
+            f"{_fail('Error:')} LINEAR_CLIENT_ID is not set.\n"
+            "  Set it via --client-id or the LINEAR_CLIENT_ID environment variable.\n"
+            "  Create a Linear OAuth app at: https://linear.app/settings/api",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("Starting Linear OAuth authentication…")
+    try:
+        token = _run_pkce_flow(
+            client_id=args.client_id,
+            client_secret=args.client_secret,
+            port=args.port,
+            open_browser=not args.no_browser,
+            callback_path=CALLBACK_PATH,
+            timeout=CALLBACK_TIMEOUT_SECONDS,
+        )
+        store = default_credential_store()
+        store.save_oauth_token(token)
+        print(_ok("✓") + f" Authenticated.  Credentials stored via {type(store).__name__}.")
+        return 0
+    except OAuthError as exc:
+        print(f"{_fail('Error:')} {exc}", file=sys.stderr)
+        return 1
+    except CredentialStoreError as exc:
+        print(f"{_fail('Error:')} could not store credentials: {exc}", file=sys.stderr)
+        return 1
+
+
+def _auth_status_main(argv: Sequence[str] | None = None) -> int:
+    try:
+        store = default_credential_store()
+        status = store.status()
+    except CredentialStoreError as exc:
+        print(f"credential store unavailable: {exc}", file=sys.stderr)
+        return 1
+
+    authenticated = bool(status.get("authenticated"))
+    source = str(status.get("source") or "unknown")
+    expires_at = status.get("expires_at")
+
+    if authenticated:
+        print(_ok("✓") + f" Authenticated via {source}")
+        if expires_at:
+            print(f"  Token expires: {expires_at}")
+    else:
+        print(_warn("–") + f" No OAuth token stored ({source})")
+        # Surface API-key fallback if available.
+        try:
+            from symphony.auth import TokenStore  # noqa: PLC0415
+            from symphony.config import TrackerConfig  # noqa: PLC0415
+            TokenStore(TrackerConfig(kind="linear", project_slug="", api_key=None)).resolve_linear_token()
+            print(_ok("✓") + " Personal API key available as fallback (LINEAR_API_KEY or credentials file).")
+        except Exception:
+            print(_dim("  No personal API key fallback found either."))
+    return 0
+
+
+def _auth_revoke_main(argv: Sequence[str] | None = None) -> int:
+    from symphony.tracker.linear_oauth import OAuthError, revoke_access_token  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(
+        prog=f"{_cli_name()} auth revoke",
+        description="Revoke stored Linear OAuth credentials.",
+    )
+    _add_version_argument(parser)
+    parser.add_argument(
+        "--client-id",
+        default=os.environ.get("LINEAR_CLIENT_ID"),
+        help="Linear OAuth application client ID.",
+    )
+    parser.add_argument(
+        "--client-secret",
+        default=os.environ.get("LINEAR_CLIENT_SECRET"),
+        help="Linear OAuth client secret.",
+    )
+    parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="Only remove local credentials; skip calling the Linear revoke API.",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        store = default_credential_store()
+        token = store.load_oauth_token()
+    except CredentialStoreError as exc:
+        print(f"{_fail('Error:')} credential store unavailable: {exc}", file=sys.stderr)
+        return 1
+
+    if token is None:
+        print("No OAuth credentials stored.")
+        return 0
+
+    if not args.local_only and args.client_id:
+        try:
+            revoke_access_token(token.access_token, args.client_id, args.client_secret)
+            print("Revoked access token at the Linear API.")
+        except OAuthError as exc:
+            print(f"{_warn('Warning:')} could not revoke at Linear API: {exc}")
+
+    try:
+        store.delete_oauth_token()
+        print(_ok("✓") + " Local OAuth credentials removed.")
+        return 0
+    except CredentialStoreError as exc:
+        print(f"{_fail('Error:')} could not remove credentials: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_pkce_flow(
+    client_id: str,
+    client_secret: str | None,
+    *,
+    port: int,
+    open_browser: bool,
+    callback_path: str,
+    timeout: float,
+) -> Any:
+    """Start a local callback server, open the authorization URL, wait for the redirect."""
+    import threading  # noqa: PLC0415
+    import webbrowser  # noqa: PLC0415
+
+    from symphony.tracker.linear_oauth import (  # noqa: PLC0415
+        OAuthError,
+        PKCEChallenge,
+        build_authorization_url,
+        exchange_code,
+        parse_token_response,
+    )
+
+    pkce = PKCEChallenge.generate()
+    redirect_uri = f"http://localhost:{port}{callback_path}"
+    auth_url = build_authorization_url(client_id, redirect_uri, pkce)
+
+    _result: dict[str, object] = {}
+    _done = threading.Event()
+
+    class _CallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
+            from urllib.parse import parse_qs, urlsplit  # noqa: PLC0415
+
+            parsed = urlsplit(self.path)
+            if parsed.path != callback_path:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            params = parse_qs(parsed.query)
+            code = (params.get("code") or [None])[0]
+            state = (params.get("state") or [None])[0]
+            error = (params.get("error") or [None])[0]
+
+            if error:
+                _result["error"] = error
+                _send_html(self, f"<h1>Auth failed: {error}</h1><p>You may close this window.</p>")
+            elif not code or state != pkce.state:
+                _result["error"] = "invalid_callback"
+                _send_html(self, "<h1>Invalid callback</h1><p>State mismatch or missing code.</p>")
+            else:
+                _result["code"] = code
+                _send_html(self, "<h1>Authenticated!</h1><p>You may close this window and return to the terminal.</p>")
+            _done.set()
+
+        def log_message(self, *args: object) -> None:  # noqa: N802 - stdlib handler API.
+            pass  # suppress stdlib access log
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), _CallbackHandler)
+    srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    srv_thread.start()
+
+    try:
+        if open_browser:
+            webbrowser.open(auth_url)
+            print(f"Browser opened.  Waiting for callback on http://localhost:{port}{callback_path} …")
+        else:
+            print(f"Open this URL in your browser:\n  {auth_url}")
+            print(f"Waiting for callback on http://localhost:{port}{callback_path} …")
+
+        timed_out = not _done.wait(timeout=timeout)
+    finally:
+        server.shutdown()
+
+    if timed_out:
+        raise OAuthError(f"auth_timeout: no callback received within {int(timeout)}s")
+
+    if "error" in _result:
+        raise OAuthError(f"auth_error: {_result['error']}")
+
+    token_data = exchange_code(
+        client_id,
+        client_secret,
+        str(_result["code"]),
+        redirect_uri,
+        pkce.code_verifier,
+    )
+    return parse_token_response(token_data)
+
+
+def _send_html(handler: BaseHTTPRequestHandler, body: str) -> None:
+    html = f"<!doctype html><html><body>{body}</body></html>".encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(html)))
+    handler.end_headers()
+    handler.wfile.write(html)
 
 
 if __name__ == "__main__":

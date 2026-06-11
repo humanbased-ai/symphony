@@ -297,22 +297,24 @@ class TokenStore:
             try:
                 keychain = KeychainCredentialStore()
                 oauth = keychain.load_oauth_token()
-                if oauth is not None and not oauth.is_expired():
+                oauth = _usable_oauth_token(oauth, keychain, env)
+                if oauth is not None:
                     return f"{oauth.token_type} {oauth.access_token}"
-                # Expired Keychain OAuth: fall through to file/api_key lookup.
-                # This patch does not refresh tokens, so an expired record must
-                # not permanently block other valid credentials.
+                # Expired Keychain OAuth that could not be refreshed: fall through
+                # to file/api_key lookup so a stale record does not permanently
+                # block other valid credentials.
             except CredentialStoreError:
                 pass
 
         try:
             file_store = FileCredentialStore(path=self.credentials_path, environ=env)
             oauth = file_store.load_oauth_token()
-            if oauth is not None and not oauth.is_expired():
+            oauth = _usable_oauth_token(oauth, file_store, env)
+            if oauth is not None:
                 return f"{oauth.token_type} {oauth.access_token}"
-            # Expired or absent file OAuth: fall through to legacy api_key lookup.
-            # Unlike Keychain, the credentials file may also carry a valid api_key
-            # that should not be blocked by a stale OAuth record.
+            # Expired (unrefreshable) or absent file OAuth: fall through to legacy
+            # api_key lookup. Unlike Keychain, the credentials file may also carry
+            # a valid api_key that should not be blocked by a stale OAuth record.
         except CredentialStoreError:
             pass
 
@@ -321,6 +323,76 @@ class TokenStore:
             return stored
 
         raise MissingLinearTokenError("missing_tracker_api_key")
+
+
+def _usable_oauth_token(
+    token: OAuthToken | None,
+    store: CredentialStore,
+    environ: Mapping[str, str],
+) -> OAuthToken | None:
+    """Return a non-expired token, refreshing it in place when possible.
+
+    A still-valid token is returned unchanged. An expired token is refreshed via
+    the Linear OAuth refresh grant when it carries a refresh_token and
+    LINEAR_CLIENT_ID is available; the refreshed token is persisted back to
+    *store* and returned. If the token is absent, has no refresh path, or the
+    refresh fails, None is returned so the caller falls through to the next
+    credential source.
+    """
+    if token is None:
+        return None
+    if not token.is_expired():
+        return token
+    refreshed = _refresh_oauth_token(token, environ)
+    if refreshed is None or refreshed.is_expired():
+        return None
+    try:
+        store.save_oauth_token(refreshed)
+    except CredentialStoreError:
+        # Refresh succeeded but persistence failed — still hand back the fresh
+        # token so the current call can proceed; it will refresh again next time.
+        pass
+    return refreshed
+
+
+def _refresh_oauth_token(token: OAuthToken, environ: Mapping[str, str]) -> OAuthToken | None:
+    """Attempt to refresh *token* using the Linear OAuth refresh grant.
+
+    Requires a stored refresh_token and LINEAR_CLIENT_ID in the environment.
+    LINEAR_CLIENT_SECRET is included when present (confidential clients). Any
+    failure returns None so resolution falls through to other credentials.
+    """
+    if not token.refresh_token:
+        return None
+    client_id = _non_empty(environ.get("LINEAR_CLIENT_ID"))
+    if client_id is None:
+        return None
+    client_secret = _non_empty(environ.get("LINEAR_CLIENT_SECRET"))
+    try:
+        # Imported lazily to avoid a circular import: linear_oauth resolves
+        # OAuthToken from this module at call time.
+        from symphony.tracker.linear_oauth import (  # noqa: PLC0415
+            OAuthError,
+            parse_token_response,
+            refresh_token,
+        )
+    except ImportError:
+        return None
+    try:
+        data = refresh_token(client_id, client_secret, token.refresh_token)
+        refreshed = parse_token_response(data)
+    except OAuthError:
+        return None
+    # Linear may omit refresh_token on refresh; preserve the existing one so the
+    # next expiry can still be refreshed.
+    if refreshed.refresh_token is None:
+        refreshed = OAuthToken(
+            access_token=refreshed.access_token,
+            refresh_token=token.refresh_token,
+            expires_at=refreshed.expires_at,
+            token_type=refreshed.token_type,
+        )
+    return refreshed
 
 
 def default_credentials_path(environ: Mapping[str, str] | None = None) -> Path:
