@@ -134,7 +134,7 @@ def generate_workflow(config: InitConfig) -> str:
         }
         prompt = _CODEX_PROMPT
 
-    preamble = _repo_mode_preamble(config.repo_mode, config.github_org, config.github_repo)
+    preamble = _repo_mode_preamble(config.repo_mode, runner, config.github_org, config.github_repo)
     if preamble:
         prompt = f"{preamble}\n\n{prompt}"
 
@@ -153,20 +153,26 @@ the same commit. Reference the relevant subpackage paths in the PR body.
 _NEW_PROJECT_PREAMBLE = """\
 ## New project scope (IN-284)
 
-No git remote is configured for this workspace. Before the dispatch flow
-below can run, an operator must create the GitHub repository:
+No git remote is configured for this workspace, so the `gh repo clone`
+step in the instructions below cannot run. Do NOT clone. Instead, your
+first action is to create the GitHub repository and publish the current
+working directory:
 
-  gh repo create __GITHUB_ORG__/__GITHUB_REPO__ --private --source=. --remote=origin
+  gh repo create __GITHUB_ORG__/__GITHUB_REPO__ --private --source=. --remote=origin --push
 
-Or replace the clone step in the prompt with the equivalent push-to-new-repo
-sequence. Until a remote exists, the dispatch will fail at the clone step.
+This creates the repository, wires up the `origin` remote, and pushes the
+existing contents. Once it succeeds, skip the clone step and continue with
+the branch / PR steps below as written — the repository already exists
+locally with `origin` configured.
 """
 
 
-def _repo_mode_preamble(mode: RepoMode, github_org: str, github_repo: str) -> str:
+def _repo_mode_preamble(mode: RepoMode, runner: str, github_org: str, github_repo: str) -> str:
     if mode == "monorepo":
         return _MONOREPO_PREAMBLE
-    if mode == "new":
+    # The new-project preamble is GitHub/clone-specific guidance; only the
+    # claude_code prompt has a clone step, so keep it out of Codex prompts.
+    if mode == "new" and runner == "claude_code":
         return (
             _NEW_PROJECT_PREAMBLE
             .replace("__GITHUB_ORG__", github_org or "YOUR_ORG")
