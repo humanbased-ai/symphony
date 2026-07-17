@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from symphony.http_server import StatusAPI, build_issue_detail, build_state_snapshot, create_fastapi_app
-from symphony.tracker.models import Issue
+from jazzband.http_server import StatusAPI, build_issue_detail, build_state_snapshot, create_fastapi_app
+from jazzband.tracker.models import Issue
 
 
 @dataclass
@@ -71,9 +71,9 @@ def sample_state() -> OrchestratorState:
         input_tokens=1200,
         output_tokens=800,
         turn_count=7,
-        workspace_path=Path("/tmp/symphony_workspaces/IN-172"),
+        workspace_path=Path("/tmp/jazzband_workspaces/IN-172"),
         recent_events=[{"event": "turn_completed", "message": "Tests passed"}],
-        log_paths=(Path("/tmp/symphony/logs/IN-172/latest.log"),),
+        log_paths=(Path("/tmp/jazzband/logs/IN-172/latest.log"),),
     )
     state.retry_attempts["issue-2"] = RetryEntry(
         issue_id="issue-2",
@@ -115,11 +115,11 @@ class StatusSnapshotTests(unittest.TestCase):
         assert detail is not None
         self.assertEqual("running", detail["status"])
         self.assertEqual("issue-1", detail["issue_id"])
-        self.assertEqual({"path": "/tmp/symphony_workspaces/IN-172"}, detail["workspace"])
+        self.assertEqual({"path": "/tmp/jazzband_workspaces/IN-172"}, detail["workspace"])
         self.assertEqual(7, detail["running"]["turn_count"])
         self.assertEqual("Build minimal status API", detail["tracked"]["title"])
         self.assertEqual(
-            [{"label": "latest", "path": "/tmp/symphony/logs/IN-172/latest.log", "url": None}],
+            [{"label": "latest", "path": "/tmp/jazzband/logs/IN-172/latest.log", "url": None}],
             detail["logs"]["codex_session_logs"],
         )
 

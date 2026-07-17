@@ -1,8 +1,8 @@
 import unittest
 from datetime import datetime, timezone
 
-from symphony.config import WorkflowConfig
-from symphony.orchestrator import (
+from jazzband.config import WorkflowConfig
+from jazzband.orchestrator import (
     CONTINUATION_RETRY_DELAY_MS,
     OrchestratorError,
     OrchestratorState,
@@ -16,7 +16,7 @@ from symphony.orchestrator import (
     should_dispatch,
     stalled_issue_ids,
 )
-from symphony.tracker.models import Blocker, Issue
+from jazzband.tracker.models import Blocker, Issue
 
 
 def issue(

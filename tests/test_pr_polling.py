@@ -1,4 +1,4 @@
-"""Tests for GitHub PR comment polling in SymphonyRuntime."""
+"""Tests for GitHub PR comment polling in JazzbandRuntime."""
 from __future__ import annotations
 
 import asyncio
@@ -8,10 +8,10 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
-from symphony.config import WorkflowConfig
-from symphony.github.webhooks import PRClosedEvent
-from symphony.runtime import SYMPHONY_BOT_MARKER, SymphonyRuntime
-from symphony.tracker.models import Issue
+from jazzband.config import WorkflowConfig
+from jazzband.github.webhooks import PRClosedEvent
+from jazzband.runtime import JAZZBAND_BOT_MARKER, JazzbandRuntime
+from jazzband.tracker.models import Issue
 
 
 def make_config(workspace_root: Path, max_pr_turns: int = 5) -> WorkflowConfig:
@@ -214,12 +214,12 @@ class FakeGitHubClient:
 
 def make_runtime(
     tmp: Path, max_pr_turns: int = 5, runner_success: bool = True
-) -> tuple[SymphonyRuntime, FakeTracker, FakeRunner, FakeGitHubClient]:
+) -> tuple[JazzbandRuntime, FakeTracker, FakeRunner, FakeGitHubClient]:
     config = make_config(tmp, max_pr_turns=max_pr_turns)
     tracker = FakeTracker()
     runner = FakeRunner(success=runner_success)
     github = FakeGitHubClient()
-    runtime = SymphonyRuntime(
+    runtime = JazzbandRuntime(
         config=config,
         tracker=tracker,
         workspace_manager=FakeWorkspaceManager(tmp),
@@ -239,7 +239,7 @@ class TestPollGitHubPRFeedbackNoop(unittest.IsolatedAsyncioTestCase):
             config = make_config(Path(tmp))
             tracker = FakeTracker()
             runner = FakeRunner()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=config,
                 tracker=tracker,
                 workspace_manager=FakeWorkspaceManager(Path(tmp)),
@@ -382,8 +382,8 @@ class TestBotCommentFiltering(unittest.IsolatedAsyncioTestCase):
             branch = "feat/sym-42-run1"
             runtime._branch_to_issue[branch] = issue
             github.add_open_pr(branch, 7)
-            # Bot posts its own comment (identified by the Symphony marker, not by login)
-            github.add_issue_comment(7, 999, "any-login", f"{SYMPHONY_BOT_MARKER}\nI addressed your feedback")
+            # Bot posts its own comment (identified by the Jazzband marker, not by login)
+            github.add_issue_comment(7, 999, "any-login", f"{JAZZBAND_BOT_MARKER}\nI addressed your feedback")
 
             await runtime.poll_github_pr_feedback()
 
@@ -483,7 +483,7 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         from datetime import datetime, timezone
 
-        from symphony.acceptance import AcceptanceCheck, AcceptanceVerdict, ConvergenceResult
+        from jazzband.acceptance import AcceptanceCheck, AcceptanceVerdict, ConvergenceResult
 
         runtime, _, runner, _ = make_runtime(tmp)
         # Enable the acceptance block on this config (default is disabled).
@@ -514,7 +514,7 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
         )
         convergence = ConvergenceResult(True, "silent", "converged")
         snapshot = runtime._convergence_snapshots.get(branch)
-        from symphony.acceptance_runtime import ConvergenceSnapshot
+        from jazzband.acceptance_runtime import ConvergenceSnapshot
         fake_snapshot = ConvergenceSnapshot(
             last_feedback_at=datetime(2026, 5, 30, tzinfo=timezone.utc),
             pr_turns_observed=0,
@@ -531,7 +531,7 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
             runtime, runner, branch, fake = self._run_with_verdict(Path(tmp), "fail")
-            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+            with patch("jazzband.runtime.maybe_run_acceptance", side_effect=fake):
                 await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
 
             self.assertEqual(len(runner.prompts), 1, "fail verdict must dispatch the implementer once")
@@ -545,7 +545,7 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
             runtime, runner, branch, fake = self._run_with_verdict(Path(tmp), "uncertain")
-            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+            with patch("jazzband.runtime.maybe_run_acceptance", side_effect=fake):
                 await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
 
             self.assertEqual(runner.prompts, [])
@@ -555,7 +555,7 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
             runtime, runner, branch, fake = self._run_with_verdict(Path(tmp), "pass")
-            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+            with patch("jazzband.runtime.maybe_run_acceptance", side_effect=fake):
                 await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
 
             self.assertEqual(runner.prompts, [])
@@ -570,7 +570,7 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
             runtime, runner, branch, fake = self._run_with_verdict(Path(tmp), "fail")
             # Exhaust the budget so the next bounce attempt must be vetoed.
             runtime._pr_turns[branch] = runtime.config.github.max_pr_turns
-            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+            with patch("jazzband.runtime.maybe_run_acceptance", side_effect=fake):
                 await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
 
             self.assertEqual(runner.prompts, [], "max_pr_turns must cap bounce-back")
@@ -585,7 +585,7 @@ class TestAcceptanceBounceBack(unittest.IsolatedAsyncioTestCase):
             runtime, runner, branch, fake = self._run_with_verdict(
                 Path(tmp), "fail", bounce_back_on_fail=False,
             )
-            with patch("symphony.runtime.maybe_run_acceptance", side_effect=fake):
+            with patch("jazzband.runtime.maybe_run_acceptance", side_effect=fake):
                 await runtime._maybe_run_acceptance(branch, 7, runtime._branch_to_issue[branch], False)
 
             self.assertEqual(runner.prompts, [], "default-off must skip the bounce")
@@ -660,7 +660,7 @@ class TestRecordStartupOpenPRs(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(Path(tmp))
             tracker = FakeTracker()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=config,
                 tracker=tracker,
                 workspace_manager=FakeWorkspaceManager(Path(tmp)),

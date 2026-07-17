@@ -1,10 +1,10 @@
-"""Tests for the acceptance gate pure core (symphony/acceptance.py)."""
+"""Tests for the acceptance gate pure core (jazzband/acceptance.py)."""
 from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from symphony.acceptance import (
+from jazzband.acceptance import (
     ACCEPTANCE_JUDGE_SYSTEM_PROMPT,
     AcceptanceVerdict,
     ConvergenceInputs,
@@ -17,7 +17,7 @@ from symphony.acceptance import (
     parse_verdict_word,
     verdict_oscillating,
 )
-from symphony.config import DEFAULT_ACCEPTANCE_GUARD_PATHS
+from jazzband.config import DEFAULT_ACCEPTANCE_GUARD_PATHS
 
 
 _AP = CrosscheckVerdict.APPROVE
@@ -353,7 +353,7 @@ class ConvergenceCrosscheckWaitTests(unittest.TestCase):
         self.assertEqual(result.source, "auto")
         self.assertIn("holding for crosscheck", result.reason)
         # The reason names the remaining seconds so an operator can tell at
-        # a glance how long Symphony will wait.
+        # a glance how long Jazzband will wait.
         self.assertIn("1680s", result.reason)
 
     def test_falls_through_to_silent_after_grace_window(self):

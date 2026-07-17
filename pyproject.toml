@@ -1,7 +1,7 @@
 [project]
-name = "symphony"
+name = "jazzband"
 version = "0.1.0.25"
-description = "Python implementation of the Symphony agent orchestration service"
+description = "Python implementation of the Jazzband agent orchestration service"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
@@ -14,23 +14,23 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/codatta/symphony"
-Issues = "https://github.com/codatta/symphony/issues"
+Repository = "https://github.com/humanbased-ai/jazzband"
+Issues = "https://github.com/humanbased-ai/jazzband/issues"
 
 [project.scripts]
-symphony = "symphony.cli:main"
-sy = "symphony.cli:main"
+jazzband = "jazzband.cli:main"
+jz = "jazzband.cli:main"
 
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["symphony*"]
+include = ["jazzband*"]
 exclude = ["elixir*"]
 
 [tool.setuptools.package-data]
-symphony = ["CHANGELOG.md"]
+jazzband = ["CHANGELOG.md"]
 
 [tool.unittest]
 start-dir = "tests"

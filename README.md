@@ -1,16 +1,16 @@
-# Symphony
+# Jazzband
 
 > Turn Linear issues into isolated agent implementation runs.
 <!-- test comment -->
 
-Symphony is an agent orchestration system for teams that want to manage project
+Jazzband is an agent orchestration system for teams that want to manage project
 work in Linear instead of supervising one-off coding-agent chats. You write a
-clear issue, move it into an active state, and Symphony prepares an isolated
+clear issue, move it into an active state, and Jazzband prepares an isolated
 workspace, runs the configured agent, and hands the result back through a pull
 request and Linear updates.
 
 This repository contains the Python CLI implementation of the language-agnostic
-[Symphony specification](SPEC.md). The current working slice is built for local
+[Jazzband specification](SPEC.md). The current working slice is built for local
 operator use with Linear, GitHub, and Claude Code; Codex app-server is also
 supported.
 
@@ -29,11 +29,11 @@ supported.
 - **Multi-instance safety** — best-effort state-transition claim before
   dispatch, blocker eligibility gate, structured `claim_*` events tagged with
   `host:pid` so duplicate dispatch is visible in logs.
-- **Fail-closed approval gate** — `symphony doctor` hard-fails when the runner
+- **Fail-closed approval gate** — `jazzband doctor` hard-fails when the runner
   can request approval but no resolution path is configured. Approval requests
   are routed to a configured `approval_state` instead of looping.
 - **Acceptance gate** — opt-in via `acceptance.enabled` in `WORKFLOW.md`. Once
-  a PR converges (CI green, no new feedback for the quiet period), Symphony
+  a PR converges (CI green, no new feedback for the quiet period), Jazzband
   dispatches a one-shot judge that compares the diff against the original
   Linear issue and posts a `pass` / `fail` / `uncertain` verdict comment on
   the PR. Phase 1 only judges and escalates to a human; Phase 2 can
@@ -50,7 +50,7 @@ supported.
 - **Linear OAuth + webhooks** — PKCE flow, secure credential storage, webhook
   receiver with HMAC-SHA256 verification, polling fallback.
 - **`linear_graphql` agent tool** — agents can read issues, post comments, and
-  move state through Symphony-managed auth.
+  move state through Jazzband-managed auth.
 - **Terminal dashboard** — alt-screen UI showing live issue state, current PR
   URL, and CI check status per issue. REST API at `/api/v1/state`,
   `/api/v1/<issue>`, `/api/v1/refresh`, `/api/v1/health`.
@@ -74,24 +74,24 @@ Pick one channel.
 **Homebrew (macOS, recommended):**
 
 ```bash
-brew install codatta/symphony/symphony
+brew install codatta/jazzband/jazzband
 ```
 
 **pipx / uv / pip:**
 
 ```bash
-pipx install symphony
-# or: uv tool install symphony
+pipx install jazzband
+# or: uv tool install jazzband
 ```
 
-Both channels register two entry points: `symphony` and the shorthand `sy`.
+Both channels register two entry points: `jazzband` and the shorthand `sy`.
 
 **From source:**
 
 ```bash
-git clone https://github.com/codatta/symphony.git
-cd symphony && uv sync
-uv run symphony --help
+git clone https://github.com/humanbased-ai/jazzband.git
+cd jazzband && uv sync
+uv run jazzband --help
 ```
 
 Authenticate the supporting tools once:
@@ -114,36 +114,36 @@ brew install gh && gh auth login
 | `GITHUB_TOKEN` | Fallback | GitHub token if `gh auth` is unavailable |
 | `ANTHROPIC_API_KEY` | claude_code runner | API key for Claude Code |
 | `OPENAI_API_KEY` | codex runner | API key for Codex |
-| `SYMPHONY_NTFY_TOPIC` | Optional | ntfy topic for push notifications |
-| `SYMPHONY_WEBHOOK_URL` | Optional | Generic webhook for event notifications |
+| `JAZZBAND_NTFY_TOPIC` | Optional | ntfy topic for push notifications |
+| `JAZZBAND_WEBHOOK_URL` | Optional | Generic webhook for event notifications |
 
 Variables can also be stored in the local credentials file written by
-`symphony onboard` — you do not need to export them in every shell session.
+`jazzband onboard` — you do not need to export them in every shell session.
 
 ## Quick Start
 
 Run onboarding from the repository where you want `WORKFLOW.md` to live:
 
 ```bash
-symphony onboard --project-slug your-linear-project-slug
-# sy is a short alias for symphony
+jazzband onboard --project-slug your-linear-project-slug
+# sy is a short alias for jazzband
 sy onboard --project-slug your-linear-project-slug
 ```
 
-`symphony onboard` scans the local environment first, reports detected Linear /
+`jazzband onboard` scans the local environment first, reports detected Linear /
 GitHub auth and runner availability, asks only for the gaps, and writes
-`WORKFLOW.md` + stores credentials under the local Symphony config path.
+`WORKFLOW.md` + stores credentials under the local Jazzband config path.
 
 Validate the setup:
 
 ```bash
-symphony doctor WORKFLOW.md
+jazzband doctor WORKFLOW.md
 ```
 
 Run one controlled poll tick against a real Linear ticket:
 
 ```bash
-symphony run WORKFLOW.md --once --log-level INFO
+jazzband run WORKFLOW.md --once --log-level INFO
 ```
 
 A successful run prints `Tick OK: fetched=1 dispatched=1 completed=1 failed=0 …`
@@ -153,7 +153,7 @@ operation, drop `--once` and add `--port 7337 --logs-root ./log`.
 For scripted setup (no prompts):
 
 ```bash
-symphony onboard --mode automated \
+jazzband onboard --mode automated \
   --project-slug your-linear-project-slug \
   --linear-api-key lin_api_... \
   --github-token ghp_... \
@@ -180,11 +180,11 @@ Available presets: `codex-safe`, `codex-autonomous`, `review-only`.
 See [prd.md](prd.md) §7 for the full build queue with ticket links, and
 [CHANGELOG.md](CHANGELOG.md) for user-facing changes.
 
-## Operating Symphony
+## Operating Jazzband
 
 ### Doctor checks
 
-`symphony doctor WORKFLOW.md` validates: workflow parse, Linear auth source,
+`jazzband doctor WORKFLOW.md` validates: workflow parse, Linear auth source,
 runner command, `gh auth`, GitHub token, workspace root writability, logs root,
 status API port, claim guard (warn), approval gate (hard fail when
 misconfigured), failure state (warn).
@@ -192,14 +192,14 @@ misconfigured), failure state (warn).
 ### Day-to-day
 
 ```bash
-symphony run WORKFLOW.md --port 7337 --logs-root ./log --log-level INFO
+jazzband run WORKFLOW.md --port 7337 --logs-root ./log --log-level INFO
 ```
 
 Stop with `Ctrl-C`. Status API: `http://127.0.0.1:7337/api/v1/state`.
 
 ### Terminal dashboard
 
-When `--port` is set, Symphony exposes a live alt-screen dashboard and a REST
+When `--port` is set, Jazzband exposes a live alt-screen dashboard and a REST
 API alongside the daemon:
 
 ```
@@ -214,21 +214,21 @@ CI check status. Omit `--port` to run headless with log output only.
 
 ### PR feedback loop
 
-Once the agent opens a PR, Symphony keeps polling both the GitHub PR review
+Once the agent opens a PR, Jazzband keeps polling both the GitHub PR review
 comments and the Linear issue comments on every tick. You do not need to
 restart the daemon after leaving review feedback.
 
 - **Change-request** — post a review comment on the GitHub PR (or a comment
-  on the Linear issue) describing what to fix. Symphony classifies the signal
+  on the Linear issue) describing what to fix. Jazzband classifies the signal
   via the Claude CLI and re-dispatches the agent to the same branch.
-- **Approved** — Symphony moves the issue to the configured handoff state.
-- **Closed** — Symphony treats the PR close as a terminal signal and
+- **Approved** — Jazzband moves the issue to the configured handoff state.
+- **Closed** — Jazzband treats the PR close as a terminal signal and
   transitions the issue accordingly.
 
 ### CI auto-fix
 
-Symphony monitors check-runs on each tracked PR branch. When new CI failures
-appear and no human comment was posted in the same tick, Symphony dispatches
+Jazzband monitors check-runs on each tracked PR branch. When new CI failures
+appear and no human comment was posted in the same tick, Jazzband dispatches
 the agent with the failure details so it can push a fix automatically. Once
 checks recover, the CI status resets and polling resumes normally.
 
@@ -238,7 +238,7 @@ refactors, high-risk production changes, repos where agent PRs are unsafe.
 
 ### Webhooks (optional)
 
-Webhooks let Linear push state changes to Symphony instantly instead of
+Webhooks let Linear push state changes to Jazzband instantly instead of
 waiting for the next poll tick. Add these fields to `WORKFLOW.md` and expose
 a public URL (or a local tunnel):
 
@@ -246,7 +246,7 @@ a public URL (or a local tunnel):
 tracker:
   webhook_secret: $LINEAR_WEBHOOK_SECRET   # set in Linear webhook settings
 server:
-  public_url: $SYMPHONY_PUBLIC_URL         # e.g. https://symphony.yourteam.com
+  public_url: $JAZZBAND_PUBLIC_URL         # e.g. https://jazzband.yourteam.com
   tunnel: none                             # none | cloudflared | ngrok
 ```
 
@@ -260,11 +260,11 @@ Each `WORKFLOW.md` targets one Linear project. Run one process per project on
 different ports:
 
 ```bash
-symphony run project-a/WORKFLOW.md --port 7337 --logs-root ./log/a
-symphony run project-b/WORKFLOW.md --port 7338 --logs-root ./log/b
+jazzband run project-a/WORKFLOW.md --port 7337 --logs-root ./log/a
+jazzband run project-b/WORKFLOW.md --port 7338 --logs-root ./log/b
 ```
 
-Stop with `pkill -f "symphony run"` or `kill <PID>`. Update
+Stop with `pkill -f "jazzband run"` or `kill <PID>`. Update
 `tracker.project_slug` in a watched `WORKFLOW.md` to hot-switch the running
 daemon.
 
@@ -284,18 +284,18 @@ Acceptance criteria:
   - The PR URL is commented on this Linear issue.
 ```
 
-Move it to `Todo`, run `symphony run WORKFLOW.md --once --log-level INFO`,
+Move it to `Todo`, run `jazzband run WORKFLOW.md --once --log-level INFO`,
 inspect the workspace and PR. For the review loop, post a revision request as
-a GitHub PR review comment or Linear issue comment — Symphony polls both each
+a GitHub PR review comment or Linear issue comment — Jazzband polls both each
 tick and automatically dispatches the agent to address the feedback.
 
 ## Troubleshooting
 
-**Symphony starts but never dispatches an issue**
-- Check `symphony doctor WORKFLOW.md` — the most common cause is a missing or
+**Jazzband starts but never dispatches an issue**
+- Check `jazzband doctor WORKFLOW.md` — the most common cause is a missing or
   invalid `LINEAR_API_KEY`.
 - Confirm the issue is in one of the states listed in `active_states`.
-- If an open PR already exists for the issue, Symphony skips it by design.
+- If an open PR already exists for the issue, Jazzband skips it by design.
   Close or merge the PR first.
 
 **Agent runs but does not open a PR**
@@ -309,7 +309,7 @@ tick and automatically dispatches the agent to address the feedback.
 - Stale worktrees from crashed runs are swept automatically on the next daemon
   start.
 
-**`symphony doctor` reports a fatal approval-gate error**
+**`jazzband doctor` reports a fatal approval-gate error**
 - This means `approval_policy: on-request` is set but no `approval_state` is
   configured. Either add `approval_state` or change the policy to `never`.
 
@@ -333,8 +333,8 @@ tracker:
   terminal_states: [Done, Canceled, Duplicate]
 
 workspace:
-  root: ~/.symphony/workspaces/your-project
-  # Optional git mode — Symphony manages bare clone + worktree per run:
+  root: ~/.jazzband/workspaces/your-project
+  # Optional git mode — Jazzband manages bare clone + worktree per run:
   # repo_url: https://github.com/your-org/your-repo
   # default_branch: main
 
@@ -366,10 +366,10 @@ Switch runners by changing `agent.runner` to `codex`. Add `hooks.before_run`,
 ## Local Development
 
 ```bash
-git clone https://github.com/codatta/symphony.git
-cd symphony && uv sync
+git clone https://github.com/humanbased-ai/jazzband.git
+cd jazzband && uv sync
 
-uv run symphony --help
+uv run jazzband --help
 uv run python -m unittest discover -s tests -p 'test_*.py'
 ```
 
@@ -377,20 +377,20 @@ Build a wheel and smoke-test the installed CLI:
 
 ```bash
 uv build
-uv tool install --force ./dist/symphony-*.whl
-symphony --help
+uv tool install --force ./dist/jazzband-*.whl
+jazzband --help
 ```
 
 Release automation lives in `.github/workflows/release.yml`; the
 `workflow_dispatch` path supports `channel=dry-run` / `staging` / `main`. The
-Homebrew tap (`codatta/symphony`) auto-updates on tagged releases via
+Homebrew tap (`codatta/jazzband`) auto-updates on tagged releases via
 `.github/workflows/homebrew-tap.yml`.
 
 Native single-file binaries are out of scope for the current packaging slice.
 
 ## Learn More
 
-- [SPEC.md](SPEC.md) — language-agnostic Symphony service specification.
+- [SPEC.md](SPEC.md) — language-agnostic Jazzband service specification.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Python architecture, runtime model, and
   planned desktop / IM surfaces.
 - [prd.md](prd.md) — product requirements and full build queue.
@@ -399,7 +399,7 @@ Native single-file binaries are out of scope for the current packaging slice.
 
 ## Attribution
 
-Symphony and its specification were created by OpenAI and are licensed under the
+Jazzband and its specification were created by OpenAI and are licensed under the
 [Apache License 2.0](LICENSE). This repository is an independent implementation
 of that specification. The original project is at
-[github.com/openai/symphony](https://github.com/openai/symphony).
+[github.com/openai/jazzband](https://github.com/openai/jazzband).

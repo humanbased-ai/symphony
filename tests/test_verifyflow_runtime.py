@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from symphony.config import VerifyflowConfig
-from symphony.verifyflow_runtime import maybe_run_verifyflow
+from jazzband.config import VerifyflowConfig
+from jazzband.verifyflow_runtime import maybe_run_verifyflow
 
 
 # --- config -----------------------------------------------------------------
@@ -238,7 +238,7 @@ def test_ci_green_trigger_still_records_crosscheck_verdict_when_present() -> Non
 
 
 def test_unknown_trigger_rejected_by_config() -> None:
-    from symphony.config import ConfigError
+    from jazzband.config import ConfigError
 
     with pytest.raises(ConfigError, match="unsupported_verifyflow_trigger"):
         VerifyflowConfig.from_mapping({"verifyflow": {"trigger": "always"}})
@@ -362,7 +362,7 @@ def test_config_parses_auto_merge_and_merge_method() -> None:
 
 
 def test_config_rejects_bad_merge_method() -> None:
-    from symphony.config import ConfigError
+    from jazzband.config import ConfigError
 
     with pytest.raises(ConfigError, match="unsupported_verifyflow_merge_method"):
         VerifyflowConfig.from_mapping({"verifyflow": {"merge_method": "fast-forward"}})

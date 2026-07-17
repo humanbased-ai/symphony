@@ -1,8 +1,8 @@
-# Symphony
+# Jazzband
 
 ## Project Intent
 
-Symphony is an agent orchestration system that turns Linear issues into isolated
+Jazzband is an agent orchestration system that turns Linear issues into isolated
 agent implementation runs. Keep implementation aligned with `prd.md`, `SPEC.md`,
 and `ARCHITECTURE.md`.
 
