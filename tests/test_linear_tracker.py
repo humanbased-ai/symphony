@@ -1,9 +1,9 @@
 import unittest
 from collections import OrderedDict
 
-from symphony.auth import TokenStore
-from symphony.config import TrackerConfig
-from symphony.tracker.linear import (
+from jazzband.auth import TokenStore
+from jazzband.config import TrackerConfig
+from jazzband.tracker.linear import (
     CANDIDATE_ISSUES_QUERY,
     ISSUES_BY_ID_QUERY,
     GraphQLResponse,
@@ -13,7 +13,7 @@ from symphony.tracker.linear import (
     LinearMissingEndCursorError,
     normalize_issue,
 )
-from symphony.tools.linear_graphql import LinearGraphQLTool, linear_graphql_tool
+from jazzband.tools.linear_graphql import LinearGraphQLTool, linear_graphql_tool
 
 
 def issue_payload(issue_id="issue-1", identifier="IN-1", state="Todo", priority=1):
@@ -70,7 +70,7 @@ class LinearTrackerTests(unittest.TestCase):
             {
                 "tracker": {
                     "kind": "linear",
-                    "project_slug": "symphony-ai-agent-orchestration",
+                    "project_slug": "jazzband-ai-agent-orchestration",
                     "active_states": ["Todo", "In Progress"],
                     "api_key": "$LINEAR_KEY",
                 }
@@ -123,7 +123,7 @@ class LinearTrackerTests(unittest.TestCase):
         self.assertEqual(["IN-1", "IN-2"], [issue.identifier for issue in issues])
         self.assertIn("slugId", transport.calls[0]["payload"]["query"])
         self.assertEqual(CANDIDATE_ISSUES_QUERY, transport.calls[0]["payload"]["query"])
-        self.assertEqual("symphony-ai-agent-orchestration", transport.calls[0]["payload"]["variables"]["projectSlug"])
+        self.assertEqual("jazzband-ai-agent-orchestration", transport.calls[0]["payload"]["variables"]["projectSlug"])
         self.assertEqual(["Todo", "In Progress"], transport.calls[0]["payload"]["variables"]["stateNames"])
         self.assertIsNone(transport.calls[0]["payload"]["variables"]["after"])
         self.assertEqual("cursor-1", transport.calls[1]["payload"]["variables"]["after"])
@@ -311,7 +311,7 @@ class FeedbackMethodTests(unittest.TestCase):
             {
                 "tracker": {
                     "kind": "linear",
-                    "project_slug": "symphony-abc123",
+                    "project_slug": "jazzband-abc123",
                     "api_key": "$K",
                 }
             }
@@ -414,7 +414,7 @@ class FeedbackSignalTests(unittest.TestCase):
         return json.dumps({"content": [{"text": label}]}).encode()
 
     def test_empty_list_returns_none_without_http_call(self):
-        from symphony.feedback import classify_feedback
+        from jazzband.feedback import classify_feedback
         from unittest.mock import patch
 
         with patch("urllib.request.urlopen") as mock_open:
@@ -423,7 +423,7 @@ class FeedbackSignalTests(unittest.TestCase):
         mock_open.assert_not_called()
 
     def test_approve_label_parsed(self):
-        from symphony.feedback import FeedbackSignal, classify_feedback
+        from jazzband.feedback import FeedbackSignal, classify_feedback
         from unittest.mock import MagicMock, patch
 
         mock_resp = MagicMock()
@@ -435,7 +435,7 @@ class FeedbackSignalTests(unittest.TestCase):
         self.assertEqual(FeedbackSignal.APPROVE, result)
 
     def test_change_request_label_parsed(self):
-        from symphony.feedback import FeedbackSignal, classify_feedback
+        from jazzband.feedback import FeedbackSignal, classify_feedback
         from unittest.mock import MagicMock, patch
 
         mock_resp = MagicMock()
@@ -447,7 +447,7 @@ class FeedbackSignalTests(unittest.TestCase):
         self.assertEqual(FeedbackSignal.CHANGE_REQUEST, result)
 
     def test_close_label_parsed(self):
-        from symphony.feedback import FeedbackSignal, classify_feedback
+        from jazzband.feedback import FeedbackSignal, classify_feedback
         from unittest.mock import MagicMock, patch
 
         mock_resp = MagicMock()
@@ -459,7 +459,7 @@ class FeedbackSignalTests(unittest.TestCase):
         self.assertEqual(FeedbackSignal.CLOSE, result)
 
     def test_none_label_returns_none(self):
-        from symphony.feedback import classify_feedback
+        from jazzband.feedback import classify_feedback
         from unittest.mock import MagicMock, patch
 
         mock_resp = MagicMock()
@@ -472,7 +472,7 @@ class FeedbackSignalTests(unittest.TestCase):
 
     def test_http_error_raises_classify_error(self):
         import urllib.error
-        from symphony.feedback import ClassifyError, classify_feedback
+        from jazzband.feedback import ClassifyError, classify_feedback
         from unittest.mock import patch
 
         with self.assertRaises(ClassifyError):
@@ -480,7 +480,7 @@ class FeedbackSignalTests(unittest.TestCase):
                 classify_feedback(["Alice: LGTM"], api_key="test-key")
 
     def test_label_is_case_insensitive(self):
-        from symphony.feedback import FeedbackSignal, classify_feedback
+        from jazzband.feedback import FeedbackSignal, classify_feedback
         from unittest.mock import MagicMock, patch
 
         mock_resp = MagicMock()

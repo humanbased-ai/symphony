@@ -3,13 +3,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from symphony.cache.base import CacheAdapter, CacheSession
-from symphony.cache.manager import CacheManager
-from symphony.cache.policy import CACHE_TTL_SECONDS, CachePolicy
-from symphony.cache.store import CacheStateStore
-from symphony.cache.adapters.claude_code import ClaudeCodeAdapter
-from symphony.cache.adapters.codex import CodexAdapter
-from symphony.cache.adapters.opencode import OpenCodeAdapter
+from jazzband.cache.base import CacheAdapter, CacheSession
+from jazzband.cache.manager import CacheManager
+from jazzband.cache.policy import CACHE_TTL_SECONDS, CachePolicy
+from jazzband.cache.store import CacheStateStore
+from jazzband.cache.adapters.claude_code import ClaudeCodeAdapter
+from jazzband.cache.adapters.codex import CodexAdapter
+from jazzband.cache.adapters.opencode import OpenCodeAdapter
 
 
 def _session(session_id: str, age_seconds: float = 10.0) -> CacheSession:

@@ -1,4 +1,4 @@
-# Symphony — System Architecture
+# Jazzband — System Architecture
 
 > Reference design for the Python implementation with Mac desktop app and IM-based remote control.
 
@@ -23,11 +23,11 @@
           └───────────────────┼───────────────────────────┘
                               │
 ╔═════════════════════════════▼════════════════════════════════════════════╗
-║                     SYMPHONY CORE  (Python 3.12 / asyncio)               ║
+║                     JAZZBAND CORE  (Python 3.12 / asyncio)               ║
 ║                                                                          ║
 ║  ┌────────────────────────────────────────────────────────────────────┐  ║
 ║  │                         Event Bus                                  │  ║
-║  │        typed SymphonyEvent pub/sub  (asyncio.Queue fan-out)        │  ║
+║  │        typed JazzbandEvent pub/sub  (asyncio.Queue fan-out)        │  ║
 ║  └───────┬──────────────────────────────────────────────┬────────────┘  ║
 ║          │                                              │               ║
 ║  ┌───────▼───────────────┐              ┌───────────────▼─────────────┐  ║
@@ -70,7 +70,7 @@
 
 ## 2. Core Process Model
 
-Symphony runs as a **single Python asyncio event loop**. All concurrency is cooperative:
+Jazzband runs as a **single Python asyncio event loop**. All concurrency is cooperative:
 
 ```
 asyncio event loop
@@ -125,8 +125,8 @@ Fan-out pub/sub backed by `asyncio.Queue`. The orchestrator `publish(event)` —
 
 ```python
 class EventBus:
-    async def publish(self, event: SymphonyEvent) -> None
-    def subscribe(self) -> AsyncIterator[SymphonyEvent]   # returns a queue reader
+    async def publish(self, event: JazzbandEvent) -> None
+    def subscribe(self) -> AsyncIterator[JazzbandEvent]   # returns a queue reader
 ```
 
 ### Notification Service (`notifications/service.py`)
@@ -183,7 +183,7 @@ class EventType(str, Enum):
 ```
 
 ```python
-class SymphonyEvent(BaseModel):
+class JazzbandEvent(BaseModel):
     type: EventType
     issue_id: str | None = None
     issue_identifier: str | None = None
@@ -270,7 +270,7 @@ class AgentRunner(ABC):
         session: AgentSession,
         prompt: str,
         issue: Issue,
-        on_event: Callable[[SymphonyEvent], Awaitable[None]],
+        on_event: Callable[[JazzbandEvent], Awaitable[None]],
     ) -> TurnResult: ...
 
     @abstractmethod
@@ -289,7 +289,7 @@ class GenerativeRunner(ABC):
         workspace: Path,
         prompt: str,
         issue: Issue,
-        on_event: Callable[[SymphonyEvent], Awaitable[None]],
+        on_event: Callable[[JazzbandEvent], Awaitable[None]],
     ) -> TaskResult: ...
 ```
 
@@ -316,7 +316,7 @@ Tauri App (Rust shell)
 │   ├── tray_menu:    [Open Dashboard] [Running: N] [Stop] [Quit]
 │   └── sse_thread:   subscribe /api/v1/events → native notifications
 │
-├── sidecar/symphony  (PyInstaller bundle, registered in tauri.conf.json externalBin)
+├── sidecar/jazzband  (PyInstaller bundle, registered in tauri.conf.json externalBin)
 │
 └── src/              (React frontend, same code as web dashboard)
 ```
@@ -324,8 +324,8 @@ Tauri App (Rust shell)
 **Sidecar startup sequence:**
 
 ```
-User opens Symphony.app
-  → Tauri main.rs: Command::new_sidecar("symphony")
+User opens Jazzband.app
+  → Tauri main.rs: Command::new_sidecar("jazzband")
       .args(["--headless", "--port", "7337", workflow_path])
       .spawn()
   → poll GET /api/v1/health every 500ms, timeout 10s
@@ -374,7 +374,7 @@ notifications:
     token: $TELEGRAM_BOT_TOKEN
     chat_id: $TELEGRAM_CHAT_ID    # group chat or operator user ID
     mode: polling                  # polling | webhook
-    webhook_url: $SYMPHONY_URL    # required when mode: webhook
+    webhook_url: $JAZZBAND_URL    # required when mode: webhook
 ```
 
 **Notification message format (Markdown):**
@@ -413,7 +413,7 @@ Command: `git push --force origin feat/MT-60`
 /reject <id>     → POST /api/v1/approvals/<id>/reject
 ```
 
-Inline keyboard callbacks encode: `"approve:abc123"`, `"reject:abc123"`, `"cancel:MT-42"`. The bot resolves them by calling the Symphony HTTP API.
+Inline keyboard callbacks encode: `"approve:abc123"`, `"reject:abc123"`, `"cancel:MT-42"`. The bot resolves them by calling the Jazzband HTTP API.
 
 **aiogram integration in `notifications/telegram.py`:**
 
@@ -428,13 +428,13 @@ class TelegramBackend(NotificationBackend):
         # starts polling or registers webhook
         await dp.start_polling(bot)   # dev mode
 
-    async def send_notification(self, event: SymphonyEvent) -> None:
+    async def send_notification(self, event: JazzbandEvent) -> None:
         text, keyboard = self._format(event)
         await bot.send_message(chat_id, text, reply_markup=keyboard)
 
     async def _on_callback(self, query: CallbackQuery) -> None:
         action, approval_id = query.data.split(":")
-        await self.symphony_api.post(f"/api/v1/approvals/{approval_id}/{action}")
+        await self.jazzband_api.post(f"/api/v1/approvals/{approval_id}/{action}")
         await query.answer("Done")
 ```
 
@@ -451,10 +451,10 @@ notifications:
   slack:
     bot_token: $SLACK_BOT_TOKEN
     app_token: $SLACK_APP_TOKEN     # required for socket mode
-    channel: $SLACK_CHANNEL_ID      # #symphony-alerts or channel ID
+    channel: $SLACK_CHANNEL_ID      # #jazzband-alerts or channel ID
 ```
 
-**Socket Mode** means Slack opens an outbound WebSocket from Symphony to Slack's servers — no inbound port needed. This is the same user experience as Telegram long polling.
+**Socket Mode** means Slack opens an outbound WebSocket from Jazzband to Slack's servers — no inbound port needed. This is the same user experience as Telegram long polling.
 
 **Message format (Block Kit):**
 
@@ -473,7 +473,7 @@ notifications:
 }
 ```
 
-**Slash commands:** `/symphony status`, `/symphony cancel MT-42`, `/symphony approve <id>`
+**Slash commands:** `/jazzband status`, `/jazzband cancel MT-42`, `/jazzband approve <id>`
 
 **`slack_bolt` integration in `notifications/slack.py`:**
 
@@ -485,7 +485,7 @@ class SlackBackend(NotificationBackend):
         handler = AsyncSocketModeHandler(app, app_token)
         await handler.start_async()
 
-    async def send_notification(self, event: SymphonyEvent) -> None:
+    async def send_notification(self, event: JazzbandEvent) -> None:
         blocks = self._build_blocks(event)
         await app.client.chat_postMessage(channel=channel, blocks=blocks)
 
@@ -493,7 +493,7 @@ class SlackBackend(NotificationBackend):
     async def _on_approve(self, ack, body):
         await ack()
         approval_id = body["actions"][0]["value"]
-        await self.symphony_api.post(f"/api/v1/approvals/{approval_id}/approve")
+        await self.jazzband_api.post(f"/api/v1/approvals/{approval_id}/approve")
 ```
 
 ---
@@ -584,7 +584,7 @@ Retry fires:
   → orchestrator: release claim for MT-42
   → EventBus.publish(HUMAN_REVIEW, issue_identifier="MT-42")
       → TelegramBackend: "🔍 MT-42 — Human Review  [Open PR] [Open Issue]"
-      → SlackBackend: Block Kit message to #symphony-alerts
+      → SlackBackend: Block Kit message to #jazzband-alerts
       → SSEBroadcaster: update web dashboard
       → Desktop: Tauri shows native macOS notification
 ```
@@ -592,9 +592,9 @@ Retry fires:
 ### Flow B: Desktop app cold start
 
 ```
-User double-clicks Symphony.app
+User double-clicks Jazzband.app
   → Tauri: reads stored workflow path from tauri-plugin-store
-  → Tauri: Command::new_sidecar("symphony")
+  → Tauri: Command::new_sidecar("jazzband")
             .args(["--headless", "--port", "7337", workflow_path])
             .spawn()
   → Tauri: GET /api/v1/health every 500ms (max 10s)
@@ -633,8 +633,8 @@ Operator taps [Cancel]:
 ## 10. Module Layout
 
 ```
-symphony/
-├── symphony/
+jazzband/
+├── jazzband/
 │   ├── cli.py                        # typer: --port, --logs-root, --headless, workflow path
 │   ├── orchestrator.py               # OrchestratorState, poll loop, dispatch, retry
 │   ├── config.py                     # pydantic schema + $VAR + ~ expansion
@@ -652,7 +652,7 @@ symphony/
 │   │
 │   ├── auth/
 │   │   ├── token_store.py            # TokenStore: env → WORKFLOW.md → keychain → file
-│   │   └── credentials.py            # ~/.symphony/credentials.json (0o600)
+│   │   └── credentials.py            # ~/.jazzband/credentials.json (0o600)
 │   │
 │   ├── agents/
 │   │   ├── base.py                   # AgentRunner / GenerativeRunner ABCs + models
@@ -676,7 +676,7 @@ symphony/
 │   │
 │   └── http_server.py                # FastAPI: REST + SSE + bot webhooks
 │
-├── symphony-desktop/
+├── jazzband-desktop/
 │   ├── src-tauri/
 │   │   ├── Cargo.toml                # tauri + plugins
 │   │   ├── tauri.conf.json           # sidecar, windows, tray, permissions
@@ -705,7 +705,7 @@ notifications:
     token: $TELEGRAM_BOT_TOKEN
     chat_id: $TELEGRAM_CHAT_ID
     mode: polling                     # polling | webhook
-    webhook_url: $SYMPHONY_PUBLIC_URL # only for mode: webhook
+    webhook_url: $JAZZBAND_PUBLIC_URL # only for mode: webhook
   slack:
     bot_token: $SLACK_BOT_TOKEN
     app_token: $SLACK_APP_TOKEN       # socket mode app-level token
@@ -733,13 +733,13 @@ The `notifications` key is ignored if no backends are configured. Adding `telegr
 
 ## 13. Linear Integration & Authentication
 
-Linear is Symphony's primary coordination surface — every goal, objective, and task enters the system as a Linear issue. This section covers authentication, token lifecycle, webhook-driven real-time coordination, and the onboarding setup wizard.
+Linear is Jazzband's primary coordination surface — every goal, objective, and task enters the system as a Linear issue. This section covers authentication, token lifecycle, webhook-driven real-time coordination, and the onboarding setup wizard.
 
 ---
 
 ### 13.1 Auth Options
 
-Symphony supports two authentication modes, which can coexist:
+Jazzband supports two authentication modes, which can coexist:
 
 | Mode | How it works | Best for |
 |---|---|---|
@@ -758,10 +758,10 @@ TokenStore.resolve() — checked in order, first non-empty wins:
   1. LINEAR_API_KEY env var
   2. tracker.api_key in WORKFLOW.md (literal or $VAR)
   3. macOS Keychain  (desktop app; via `keyring` library / security CLI)
-  4. ~/.symphony/credentials.json  (chmod 600; CLI fallback)
+  4. ~/.jazzband/credentials.json  (chmod 600; CLI fallback)
 ```
 
-`~/.symphony/credentials.json` schema:
+`~/.jazzband/credentials.json` schema:
 
 ```json
 {
@@ -781,7 +781,7 @@ The file is created with mode `0o600` and never logged or included in error mess
 
 ### 13.3 OAuth 2.0 Flow
 
-Linear supports standard OAuth 2.0 Authorization Code flow. Symphony registers as a **Linear Application** (developer.linear.app → Applications).
+Linear supports standard OAuth 2.0 Authorization Code flow. Jazzband registers as a **Linear Application** (developer.linear.app → Applications).
 
 **Required OAuth scopes:**
 
@@ -789,12 +789,12 @@ Linear supports standard OAuth 2.0 Authorization Code flow. Symphony registers a
 |---|---|
 | `read` | Fetch issues, projects, teams, states, labels, comments |
 | `write` | Update issue state, create comments, attach PR links |
-| `app:assignIssues` | Assign dispatched issues to a Symphony service account (optional) |
+| `app:assignIssues` | Assign dispatched issues to a Jazzband service account (optional) |
 
 **Required Linear App settings:**
 
 ```
-Callback URL:  symphony://oauth/callback   (desktop app deep link)
+Callback URL:  jazzband://oauth/callback   (desktop app deep link)
                http://localhost:0/callback   (CLI ephemeral server)
 Webhook URL:   https://<public_url>/linear/webhook
 ```
@@ -804,19 +804,19 @@ Webhook URL:   https://<public_url>/linear/webhook
 #### Flow A — Desktop App (Tauri)
 
 ```
-User opens Symphony.app → no token found
+User opens Jazzband.app → no token found
   → Setup Wizard screen: "Connect to Linear"
   → User clicks Connect
   → Python: GET /api/v1/linear/auth/url
       returns: https://linear.app/oauth/authorize
-                 ?client_id=<SYMPHONY_CLIENT_ID>
-                 &redirect_uri=symphony://oauth/callback
+                 ?client_id=<JAZZBAND_CLIENT_ID>
+                 &redirect_uri=jazzband://oauth/callback
                  &response_type=code
                  &scope=read,write
                  &state=<csrf_nonce>
   → Tauri: open URL in system browser
   → User authorizes in Linear
-  → Linear redirects: symphony://oauth/callback?code=<code>&state=<nonce>
+  → Linear redirects: jazzband://oauth/callback?code=<code>&state=<nonce>
   → Tauri: deep-link handler captures URL
       → POST /api/v1/linear/auth/callback  {code, state}
   → Python:
@@ -828,23 +828,23 @@ User opens Symphony.app → no token found
   → Setup Wizard: step 2 — select project
 ```
 
-#### Flow B — CLI (`symphony auth linear`)
+#### Flow B — CLI (`jazzband auth linear`)
 
 ```
-$ symphony auth linear
+$ jazzband auth linear
   → Python: binds ephemeral HTTP server on localhost:0
   → prints: "Open this URL in your browser:"
             "https://linear.app/oauth/authorize?..."
   → User opens URL → authorizes
   → Linear redirects: http://localhost:<port>/callback?code=...
-  → Python: exchange code → store in ~/.symphony/credentials.json
+  → Python: exchange code → store in ~/.jazzband/credentials.json
   → prints: "Authenticated as Yi Zhang (acme-corp)"
   → exits
 
-$ symphony auth linear --status
+$ jazzband auth linear --status
   → prints: "Authenticated  workspace=acme-corp  token_age=3d"
 
-$ symphony auth linear --revoke
+$ jazzband auth linear --revoke
   → clears token from all stores; prints confirmation
 ```
 
@@ -875,13 +875,13 @@ Step 4 — Choose AI Agent
   → depending on selection: prompt for relevant API key
 
 Step 5 — Generate WORKFLOW.md
-  → Symphony renders a WORKFLOW.md from a template using all collected values
+  → Jazzband renders a WORKFLOW.md from a template using all collected values
   → user sees a preview with syntax highlighting
   → [Save to repo] button — file picker for target repo root
   → [Download] as fallback
 
 Step 6 — Start
-  → Symphony daemon starts with the new WORKFLOW.md
+  → Jazzband daemon starts with the new WORKFLOW.md
   → Dashboard opens
 ```
 
@@ -893,18 +893,18 @@ Polling alone is sufficient but slow (default 30s lag). Linear webhooks give sub
 
 #### Webhook registration
 
-Symphony auto-registers a webhook when `server.public_url` is configured:
+Jazzband auto-registers a webhook when `server.public_url` is configured:
 
 ```python
 # tracker/linear_webhook.py
 async def ensure_webhook_registered(client: LinearClient, config: Config) -> str:
     # 1. list existing webhooks for the team
-    # 2. if Symphony webhook already exists → return its id
+    # 2. if Jazzband webhook already exists → return its id
     # 3. else: create via GraphQL mutation WebhookCreate
     #    url = f"{config.server.public_url}/linear/webhook"
     #    resourceTypes = ["Issue"]
     #    teamId = config.tracker.team_id
-    # 4. store webhook_id in ~/.symphony/state.json
+    # 4. store webhook_id in ~/.jazzband/state.json
 ```
 
 #### Incoming webhook event flow
@@ -916,7 +916,7 @@ Linear: issue state changed
       body: {action, type, data: {id, identifier, state, ...}}
 
 FastAPI /linear/webhook:
-  → verify HMAC-SHA256(body, SYMPHONY_WEBHOOK_SECRET)
+  → verify HMAC-SHA256(body, JAZZBAND_WEBHOOK_SECRET)
   → reject 401 if invalid
   → route by (action, type):
 
@@ -952,11 +952,11 @@ Three options, configured in WORKFLOW.md:
 
 ```yaml
 server:
-  public_url: $SYMPHONY_PUBLIC_URL   # set by user (ngrok, cloudflare, etc.)
+  public_url: $JAZZBAND_PUBLIC_URL   # set by user (ngrok, cloudflare, etc.)
   tunnel: cloudflared                # auto | cloudflared | ngrok | none
 ```
 
-- `tunnel: cloudflared` — Symphony spawns `cloudflared tunnel --url http://localhost:7337` and captures the printed URL, then registers the webhook using it. Requires `cloudflared` on PATH.
+- `tunnel: cloudflared` — Jazzband spawns `cloudflared tunnel --url http://localhost:7337` and captures the printed URL, then registers the webhook using it. Requires `cloudflared` on PATH.
 - `tunnel: ngrok` — same pattern with `pyngrok`.
 - `tunnel: none` (default) — webhooks disabled; polling only. A warning is shown in the dashboard.
 
@@ -1005,7 +1005,7 @@ POST /linear/webhook
 ### 13.7 Module Layout Additions
 
 ```
-symphony/
+jazzband/
   ├── tracker/
   │   ├── base.py                   # IssueTrackerAdapter ABC
   │   ├── linear.py                 # GraphQL queries, pagination, normalization
@@ -1015,7 +1015,7 @@ symphony/
   │
   └── auth/
       ├── token_store.py            # TokenStore: env → WORKFLOW.md → keychain → file
-      └── credentials.py            # ~/.symphony/credentials.json read/write (0o600)
+      └── credentials.py            # ~/.jazzband/credentials.json read/write (0o600)
 ```
 
 The `TokenStore` is injected into `LinearClient` at construction. `LinearClient` never reads env vars or files directly.
@@ -1039,7 +1039,7 @@ tracker:
 server:
   port: 7337
   bind: 127.0.0.1
-  public_url: $SYMPHONY_PUBLIC_URL     # enables webhook registration when set
+  public_url: $JAZZBAND_PUBLIC_URL     # enables webhook registration when set
   tunnel: none                          # none | cloudflared | ngrok
 ```
 
@@ -1089,5 +1089,5 @@ Tauri v2 (Rust)
   tauri-plugin-single-instance
   tauri-plugin-store          # persists workflow path + oauth state
   tauri-plugin-updater
-  tauri-plugin-deep-link      # handles symphony://oauth/callback deep links
+  tauri-plugin-deep-link      # handles jazzband://oauth/callback deep links
 ```

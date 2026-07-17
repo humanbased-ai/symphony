@@ -1,4 +1,4 @@
-"""Tests for GitHub PR feedback handling in SymphonyRuntime."""
+"""Tests for GitHub PR feedback handling in JazzbandRuntime."""
 from __future__ import annotations
 
 import asyncio
@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from symphony.agents.base import AgentEvent, AgentEventType, AgentSession, TaskResult, TokenUsage, TurnResult
-from symphony.config import WorkflowConfig
-from symphony.github.webhooks import PRClosedEvent, PRCommentEvent, PRReviewEvent
-from symphony.runtime import SymphonyRuntime
-from symphony.tracker.models import Issue
+from jazzband.agents.base import AgentEvent, AgentEventType, AgentSession, TaskResult, TokenUsage, TurnResult
+from jazzband.config import WorkflowConfig
+from jazzband.github.webhooks import PRClosedEvent, PRCommentEvent, PRReviewEvent
+from jazzband.runtime import JazzbandRuntime
+from jazzband.tracker.models import Issue
 
 
 def make_config(workspace_root: Path, max_pr_turns: int = 3) -> WorkflowConfig:
@@ -133,12 +133,12 @@ class FakeGitHubClient:
         return True
 
 
-def make_runtime(tmp: Path, max_pr_turns: int = 3, runner_success: bool = True) -> tuple[SymphonyRuntime, FakeTracker, FakeRunner, FakeGitHubClient]:
+def make_runtime(tmp: Path, max_pr_turns: int = 3, runner_success: bool = True) -> tuple[JazzbandRuntime, FakeTracker, FakeRunner, FakeGitHubClient]:
     config = make_config(tmp, max_pr_turns=max_pr_turns)
     tracker = FakeTracker()
     runner = FakeRunner(success=runner_success)
     github = FakeGitHubClient()
-    runtime = SymphonyRuntime(
+    runtime = JazzbandRuntime(
         config=config,
         tracker=tracker,
         workspace_manager=FakeWorkspaceManager(tmp),

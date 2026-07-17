@@ -4,26 +4,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from symphony.auth import load_local_linear_token, save_local_linear_token
-from symphony.config import AcceptanceConfig
-from symphony.onboarding import InitConfig, default_workspace_root, generate_workflow, write_workflow
-from symphony.workflow import parse_workflow
+from jazzband.auth import load_local_linear_token, save_local_linear_token
+from jazzband.config import AcceptanceConfig
+from jazzband.onboarding import InitConfig, default_workspace_root, generate_workflow, write_workflow
+from jazzband.workflow import parse_workflow
 
 
 class OnboardingTests(unittest.TestCase):
     def test_generate_workflow_uses_preset_and_parseable_front_matter(self):
         content = generate_workflow(
             InitConfig(
-                project_slug="symphony-ai-agent-orchestration",
+                project_slug="jazzband-ai-agent-orchestration",
                 preset="codex-safe",
-                workspace_root="~/.symphony/workspaces/symphony",
+                workspace_root="~/.jazzband/workspaces/jazzband",
                 runner="codex",
             )
         )
 
         workflow = parse_workflow(content)
 
-        self.assertEqual("symphony-ai-agent-orchestration", workflow.config["tracker"]["project_slug"])
+        self.assertEqual("jazzband-ai-agent-orchestration", workflow.config["tracker"]["project_slug"])
         self.assertEqual(3, workflow.config["agent"]["max_concurrent_agents"])
         self.assertEqual("never", workflow.config["codex"]["approval_policy"])
         self.assertIn("{{ issue.identifier }}", workflow.prompt_template)
@@ -33,7 +33,7 @@ class OnboardingTests(unittest.TestCase):
             InitConfig(
                 project_slug="my-project",
                 preset="codex-safe",
-                workspace_root="~/.symphony/workspaces/my-project",
+                workspace_root="~/.jazzband/workspaces/my-project",
                 runner="claude_code",
                 github_org="acme-corp",
             )
@@ -49,10 +49,10 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("In Review", workflow.prompt_template)
 
     def test_default_workspace_root_sanitizes_project_slug(self):
-        self.assertEqual("~/.symphony/workspaces/A-B-C.1", default_workspace_root(" A/B C.1 "))
+        self.assertEqual("~/.jazzband/workspaces/A-B-C.1", default_workspace_root(" A/B C.1 "))
 
     def test_generate_workflow_omits_acceptance_by_default_with_github(self):
-        """``symphony init`` ships the acceptance gate disabled by default —
+        """``jazzband init`` ships the acceptance gate disabled by default —
         the gate dispatches an extra judge agent on every PR convergence, so
         new projects must opt in explicitly (--acceptance or an interactive
         ``y``) rather than discover the cost after the fact."""
@@ -60,7 +60,7 @@ class OnboardingTests(unittest.TestCase):
             InitConfig(
                 project_slug="my-project",
                 preset="codex-safe",
-                workspace_root="~/.symphony/workspaces/my-project",
+                workspace_root="~/.jazzband/workspaces/my-project",
                 runner="claude_code",
                 github_org="acme-corp",
                 github_repo="widget",
@@ -78,7 +78,7 @@ class OnboardingTests(unittest.TestCase):
             InitConfig(
                 project_slug="my-project",
                 preset="codex-safe",
-                workspace_root="~/.symphony/workspaces/my-project",
+                workspace_root="~/.jazzband/workspaces/my-project",
                 runner="claude_code",
                 github_org="acme-corp",
                 github_repo="widget",
@@ -118,7 +118,7 @@ class OnboardingTests(unittest.TestCase):
             InitConfig(
                 project_slug="my-project",
                 preset="codex-safe",
-                workspace_root="~/.symphony/workspaces/my-project",
+                workspace_root="~/.jazzband/workspaces/my-project",
                 runner="claude_code",
                 github_org="acme-corp",
                 github_repo="widget",
@@ -137,7 +137,7 @@ class OnboardingTests(unittest.TestCase):
             InitConfig(
                 project_slug="my-project",
                 preset="codex-safe",
-                workspace_root="~/.symphony/workspaces/my-project",
+                workspace_root="~/.jazzband/workspaces/my-project",
                 runner="codex",
                 acceptance_enabled=True,
             )

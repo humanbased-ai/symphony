@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from symphony.agents.base import AgentEvent, AgentEventType, AgentRunnerError
-from symphony.agents.claude_code import ClaudeCodeRunner
-from symphony.tracker.models import Issue
+from jazzband.agents.base import AgentEvent, AgentEventType, AgentRunnerError
+from jazzband.agents.claude_code import ClaudeCodeRunner
+from jazzband.tracker.models import Issue
 
 
 def issue() -> Issue:
@@ -165,7 +165,7 @@ class ClaudeCodeRunnerTurnTests(unittest.IsolatedAsyncioTestCase):
             return process
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("symphony.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
+            with patch("jazzband.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
                 session = await runner.start_session(Path(tmp))
                 result = await runner.run_turn(session, "Do the work.", issue(), on_event)
 
@@ -254,7 +254,7 @@ class ClaudeCodeRunnerTurnTests(unittest.IsolatedAsyncioTestCase):
             return process
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("symphony.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
+            with patch("jazzband.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
                 session = await runner.start_session(Path(tmp))
                 await runner.run_turn(session, "prompt", issue(), lambda e: asyncio.sleep(0))
                 state = session.metadata["claude_state"]
@@ -300,7 +300,7 @@ class ClaudeCodeRunnerTurnTests(unittest.IsolatedAsyncioTestCase):
 
         runner = _make_runner(linear_api_key="lin_test_key")
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("symphony.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
+            with patch("jazzband.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
                 session = await runner.start_session(Path(tmp))
                 await runner.run_turn(session, "prompt", issue(), lambda e: asyncio.sleep(0))
 
@@ -327,7 +327,7 @@ class ClaudeCodeRunnerTimeoutTests(unittest.IsolatedAsyncioTestCase):
             pass
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("symphony.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
+            with patch("jazzband.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
                 session = await runner.start_session(Path(tmp))
                 result = await runner.run_turn(session, "prompt", issue(), on_event)
 
@@ -354,7 +354,7 @@ class ClaudeCodeRunnerToolRoutingTests(unittest.IsolatedAsyncioTestCase):
             return process
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("symphony.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
+            with patch("jazzband.agents.claude_code.asyncio.create_subprocess_exec", fake_subprocess):
                 session = await runner.start_session(Path(tmp))
                 result = await runner.run_turn(session, "prompt", issue(), on_event)
         return captured, result

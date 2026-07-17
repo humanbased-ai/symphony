@@ -1,18 +1,18 @@
-"""Unit tests for ``symphony.github.client.GitHubClient`` methods.
+"""Unit tests for ``jazzband.github.client.GitHubClient`` methods.
 
 The acceptance-gate end-to-end on PR #149 surfaced a real bug: when a check
 (e.g. ``validate-pr-description``) was re-run in a new check_suite — caused
 by the PR description being edited — GitHub's ``?filter=latest`` returned
 the latest run **per suite**, not per check name. The old failure and the
 new success both appeared, the failed-run filter caught the stale failure,
-and Symphony saw ``ci_green=False`` forever. Tests here lock in the fix.
+and Jazzband saw ``ci_green=False`` forever. Tests here lock in the fix.
 """
 from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
 
-from symphony.github.client import GitHubClient, GitHubClientError
+from jazzband.github.client import GitHubClient, GitHubClientError
 
 
 def _client() -> GitHubClient:
@@ -114,7 +114,7 @@ class GetPRFailedCheckRunsTests(unittest.TestCase):
     def test_failure_rerun_replacing_earlier_success_is_returned(self):
         """Symmetric case: a later re-run that failed must supersede the
         earlier success. Otherwise a freshly broken check would be hidden
-        behind the old green run and Symphony would not dispatch a fix."""
+        behind the old green run and Jazzband would not dispatch a fix."""
         runs = [
             _check_run(
                 name="lint",

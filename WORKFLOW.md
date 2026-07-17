@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: https://linear.app/inductive-network/project/symphony-16eac9a024a5/overview
+  project_slug: https://linear.app/inductive-network/project/jazzband-16eac9a024a5/overview
   active_states:
   - Todo
   - In Progress
@@ -12,8 +12,8 @@ tracker:
 polling:
   interval_ms: 30000
 workspace:
-  root: ~/.symphony/workspaces/https-linear.app-inductive-network-project-symphony-16eac9a024a5-overview
-  repo_url: https://github.com/codatta/symphony.git
+  root: ~/.jazzband/workspaces/https-linear.app-inductive-network-project-jazzband-16eac9a024a5-overview
+  repo_url: https://github.com/humanbased-ai/jazzband.git
 agent:
   runner: claude_code
   max_concurrent_agents: 1
@@ -21,7 +21,7 @@ agent:
 github:
   token: $GITHUB_TOKEN
   owner: codatta
-  repo: symphony
+  repo: jazzband
 ---
 
 You are working on Linear issue {{ issue.identifier }}.
@@ -43,7 +43,7 @@ Review feedback — address each point before submitting:
 ## Instructions
 
 1. Clone the repository (gh handles authentication — no token in the URL):
-   gh repo clone codatta/symphony .
+   gh repo clone codatta/jazzband .
 
 2. Create a working branch:
    git checkout -b fix/{{ issue.identifier | lower }}

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from unittest.mock import patch
 
-from symphony.cli import (
+from jazzband.cli import (
     RuntimeWorkflowReloader,
     StartupError,
     _check_claude_login,
@@ -31,8 +31,8 @@ from symphony.cli import (
     run_once,
     setup_environment_checks,
 )
-from symphony import __version__
-from symphony.orchestrator import OrchestratorState
+from jazzband import __version__
+from jazzband.orchestrator import OrchestratorState
 
 
 class CLITests(unittest.TestCase):
@@ -61,7 +61,7 @@ class CLITests(unittest.TestCase):
 tracker:
   kind: linear
   api_key: $LINEAR_KEY
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 codex:
   command: codex app-server
 ---
@@ -81,7 +81,7 @@ Work on {{ issue.identifier }}.
             self.assertEqual((root / "runtime-logs").resolve(), context.logs_root)
             self.assertEqual(7337, context.port)
             self.assertEqual("Work on {{ issue.identifier }}.", context.workflow.prompt_template)
-            self.assertEqual("symphony-ai-agent-orchestration", context.config.tracker.project_slug)
+            self.assertEqual("jazzband-ai-agent-orchestration", context.config.tracker.project_slug)
 
     def test_load_startup_context_rejects_missing_linear_token(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -91,7 +91,7 @@ Work on {{ issue.identifier }}.
 tracker:
   kind: linear
   api_key: $LINEAR_KEY
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 ---
 Body
 """,
@@ -114,7 +114,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 ---
 Body
 """,
@@ -134,7 +134,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 ---
 Body
 """,
@@ -154,7 +154,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 workspace:
   root: workspaces
 agent:
@@ -169,7 +169,7 @@ Body
 
             stdout = StringIO()
             with redirect_stdout(stdout):
-                with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
+                with patch("jazzband.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
                     result = main(
                         [
                             "onboard",
@@ -209,10 +209,10 @@ Body
 
             stdout = StringIO()
             with redirect_stdout(stdout):
-                with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid")):
-                    with patch("symphony.cli._check_command", return_value=(True, "found")):
-                        with patch("symphony.cli._check_claude_login", return_value=(True, "ok")):
-                            with patch("symphony.cli._check_github_token_scopes", return_value=(True, "ok")):
+                with patch("jazzband.cli._check_linear_key_valid", return_value=(True, "valid")):
+                    with patch("jazzband.cli._check_command", return_value=(True, "found")):
+                        with patch("jazzband.cli._check_claude_login", return_value=(True, "ok")):
+                            with patch("jazzband.cli._check_github_token_scopes", return_value=(True, "ok")):
                                 result = main([
                                     "onboard",
                                     "--mode", "automated",
@@ -241,7 +241,7 @@ Body
                         "init",
                         "--yes",
                         "--project-slug",
-                        "symphony-ai-agent-orchestration",
+                        "jazzband-ai-agent-orchestration",
                         "--workflow-path",
                         str(workflow_path),
                         "--credentials-path",
@@ -256,7 +256,7 @@ Body
                 )
 
             self.assertEqual(0, result)
-            self.assertIn("project_slug: symphony-ai-agent-orchestration", workflow_path.read_text(encoding="utf-8"))
+            self.assertIn("project_slug: jazzband-ai-agent-orchestration", workflow_path.read_text(encoding="utf-8"))
             self.assertIn("lin_secret", credentials_path.read_text(encoding="utf-8"))
 
     def test_init_yes_requires_project_slug_without_prompting(self):
@@ -321,7 +321,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 workspace:
   root: workspaces
 codex:
@@ -336,7 +336,7 @@ Body
             with _socket.socket() as _s:
                 _s.bind(("127.0.0.1", 0))
                 free_port = _s.getsockname()[1]
-            with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
+            with patch("jazzband.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
                 checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
 
             self.assertTrue(all(ok for ok, _, _ in checks))
@@ -409,7 +409,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 polling:
   interval_ms: 5000
 workspace:
@@ -428,7 +428,7 @@ First prompt {{ issue.identifier }}.
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
   active_states: [Reviewing]
 polling:
   interval_ms: 1234
@@ -458,7 +458,7 @@ Changed prompt {{ issue.identifier }}.
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 polling:
   interval_ms: 5000
 ---
@@ -479,7 +479,7 @@ First prompt.
 tracker:
   kind: linear
   api_key: $MISSING_LINEAR_KEY
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 polling:
   interval_ms: 1234
 ---
@@ -520,14 +520,14 @@ class DetectGithubFromRemoteTests(unittest.TestCase):
             return _detect_github_from_remote()
 
     def test_parses_ssh_url(self):
-        org, repo = self._run("git@github.com:codatta/symphony.git\n")
+        org, repo = self._run("git@github.com:codatta/jazzband.git\n")
         self.assertEqual("codatta", org)
-        self.assertEqual("symphony", repo)
+        self.assertEqual("jazzband", repo)
 
     def test_parses_https_url(self):
-        org, repo = self._run("https://github.com/codatta/symphony.git\n")
+        org, repo = self._run("https://github.com/codatta/jazzband.git\n")
         self.assertEqual("codatta", org)
-        self.assertEqual("symphony", repo)
+        self.assertEqual("jazzband", repo)
 
     def test_parses_https_url_without_git_suffix(self):
         org, repo = self._run("https://github.com/acme/my-repo\n")
@@ -628,7 +628,7 @@ class CheckClaudeLoginTests(unittest.TestCase):
             config_dir = Path(tmp) / ".config" / "claude"
             config_dir.mkdir(parents=True)
             (config_dir / "settings.json").write_text("{}", encoding="utf-8")
-            with patch("symphony.cli.Path.home", return_value=Path(tmp)):
+            with patch("jazzband.cli.Path.home", return_value=Path(tmp)):
                 ok, detail = _check_claude_login()
         self.assertTrue(ok)
         self.assertIn("config dir found", detail)
@@ -636,14 +636,14 @@ class CheckClaudeLoginTests(unittest.TestCase):
     def test_returns_true_when_dot_claude_json_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / ".claude.json").write_text("{}", encoding="utf-8")
-            with patch("symphony.cli.Path.home", return_value=Path(tmp)):
+            with patch("jazzband.cli.Path.home", return_value=Path(tmp)):
                 ok, detail = _check_claude_login()
         self.assertTrue(ok)
         self.assertIn("~/.claude.json", detail)
 
     def test_returns_false_when_no_config_found(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("symphony.cli.Path.home", return_value=Path(tmp)):
+            with patch("jazzband.cli.Path.home", return_value=Path(tmp)):
                 ok, detail = _check_claude_login()
         self.assertFalse(ok)
         self.assertIn("claude login", detail)
@@ -756,7 +756,7 @@ class SetupEnvironmentChecksAuthTests(unittest.TestCase):
     def test_includes_linear_key_validity_when_token_present(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._make_args(tmp, linear_api_key="lin_key")
-            with patch("symphony.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")) as mock_valid:
+            with patch("jazzband.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")) as mock_valid:
                 checks = setup_environment_checks(args, environ={})
         mock_valid.assert_called_once_with("lin_key")
         self.assertTrue(any(label == "linear key validity" for _, label, _ in checks))
@@ -765,11 +765,11 @@ class SetupEnvironmentChecksAuthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._make_args(tmp, runner="claude_code", github_token="ghp_tok")
             with (
-                patch("symphony.cli._check_command", return_value=(True, "/usr/bin/claude")),
-                patch("symphony.cli._check_gh_auth", return_value=(True, "authenticated")),
-                patch("symphony.cli._check_claude_login", return_value=(True, "config found")) as mock_login,
-                patch("symphony.cli._check_github_token_scopes", return_value=(True, "ok")),
-                patch("symphony.cli._check_linear_key_valid", return_value=(True, "ok")),
+                patch("jazzband.cli._check_command", return_value=(True, "/usr/bin/claude")),
+                patch("jazzband.cli._check_gh_auth", return_value=(True, "authenticated")),
+                patch("jazzband.cli._check_claude_login", return_value=(True, "config found")) as mock_login,
+                patch("jazzband.cli._check_github_token_scopes", return_value=(True, "ok")),
+                patch("jazzband.cli._check_linear_key_valid", return_value=(True, "ok")),
             ):
                 setup_environment_checks(args, environ={})
         mock_login.assert_called_once()
@@ -778,11 +778,11 @@ class SetupEnvironmentChecksAuthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._make_args(tmp, runner="claude_code", github_token="ghp_tok")
             with (
-                patch("symphony.cli._check_command", return_value=(True, "/usr/bin/claude")),
-                patch("symphony.cli._check_gh_auth", return_value=(True, "authenticated")),
-                patch("symphony.cli._check_claude_login", return_value=(True, "ok")),
-                patch("symphony.cli._check_github_token_scopes", return_value=(True, "scopes ok")) as mock_scope,
-                patch("symphony.cli._check_linear_key_valid", return_value=(True, "ok")),
+                patch("jazzband.cli._check_command", return_value=(True, "/usr/bin/claude")),
+                patch("jazzband.cli._check_gh_auth", return_value=(True, "authenticated")),
+                patch("jazzband.cli._check_claude_login", return_value=(True, "ok")),
+                patch("jazzband.cli._check_github_token_scopes", return_value=(True, "scopes ok")) as mock_scope,
+                patch("jazzband.cli._check_linear_key_valid", return_value=(True, "ok")),
             ):
                 checks = setup_environment_checks(args, environ={"GITHUB_TOKEN": "ghp_tok"})
         mock_scope.assert_called_once_with("ghp_tok")
@@ -854,7 +854,7 @@ class StarterMissionTests(unittest.TestCase):
             # find project (not found)
             {"data": {"projects": {"nodes": []}}},
             # projectCreate
-            {"data": {"projectCreate": {"success": True, "project": {"id": "proj-1", "name": "symphony-hello-world", "slugId": "symphony-hello-world-abc"}}}},
+            {"data": {"projectCreate": {"success": True, "project": {"id": "proj-1", "name": "jazzband-hello-world", "slugId": "jazzband-hello-world-abc"}}}},
             # find issue (not found)
             {"data": {"issues": {"nodes": []}}},
             # issueCreate
@@ -885,22 +885,22 @@ class StarterMissionTests(unittest.TestCase):
             try:
                 with (
                     patch("urllib.request.urlopen", side_effect=self._make_gql_responses()),
-                    patch("symphony.cli.main", return_value=0),
+                    patch("jazzband.cli.main", return_value=0),
                 ):
                     result = _run_starter_mission(args, environ={"LINEAR_API_KEY": "lin_test"})
             finally:
                 _os.chdir(orig)
 
             self.assertTrue(result)
-            demo_workflow = Path(tmp) / "symphony-hello-world" / "WORKFLOW.md"
+            demo_workflow = Path(tmp) / "jazzband-hello-world" / "WORKFLOW.md"
             self.assertTrue(demo_workflow.exists())
             content = demo_workflow.read_text()
-            self.assertIn("symphony-hello-world-abc", content)
+            self.assertIn("jazzband-hello-world-abc", content)
 
     def test_returns_false_when_no_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._make_args(tmp, linear_api_key="")
-            with patch("symphony.cli.load_local_linear_token", return_value=None):
+            with patch("jazzband.cli.load_local_linear_token", return_value=None):
                 result = _run_starter_mission(args, environ={})
         self.assertFalse(result)
 
@@ -940,7 +940,7 @@ class StarterMissionTests(unittest.TestCase):
             try:
                 with (
                     patch("urllib.request.urlopen", side_effect=self._make_gql_responses()),
-                    patch("symphony.cli.main", return_value=0),
+                    patch("jazzband.cli.main", return_value=0),
                 ):
                     _run_starter_mission(
                         args,
@@ -958,7 +958,7 @@ class ProjectCommandTests(unittest.TestCase):
     """Tests for `sy project` dashboard command."""
 
     _FAKE_PROJECTS = [
-        {"id": "proj-1", "name": "Symphony", "slugId": "abc123"},
+        {"id": "proj-1", "name": "Jazzband", "slugId": "abc123"},
         {"id": "proj-2", "name": "Other Project", "slugId": "def456"},
     ]
 
@@ -981,7 +981,7 @@ class ProjectCommandTests(unittest.TestCase):
 
     def test_no_token_returns_error(self):
         with patch.dict("os.environ", {}, clear=True), \
-             patch("symphony.auth.TokenStore") as mock_store:
+             patch("jazzband.auth.TokenStore") as mock_store:
             mock_store.return_value.resolve_linear_token.side_effect = Exception("no token")
             out = StringIO()
             with redirect_stdout(out):
@@ -990,7 +990,7 @@ class ProjectCommandTests(unittest.TestCase):
 
     def test_shows_configured_and_unconfigured_projects(self):
         workflow_content = (
-            "---\ntracker:\n  kind: linear\n  project_slug: symphony-abc123\n---\n"
+            "---\ntracker:\n  kind: linear\n  project_slug: jazzband-abc123\n---\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             wf = Path(tmp) / "WORKFLOW.md"
@@ -1005,7 +1005,7 @@ class ProjectCommandTests(unittest.TestCase):
                 return io.BytesIO(resp_bytes)
 
             with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-                 patch("symphony.cli._detect_running_workflow_paths", return_value=set()), \
+                 patch("jazzband.cli._detect_running_workflow_paths", return_value=set()), \
                  patch("os.getcwd", return_value=tmp), \
                  patch("pathlib.Path.cwd", return_value=Path(tmp)):
                 out = StringIO()
@@ -1015,7 +1015,7 @@ class ProjectCommandTests(unittest.TestCase):
         self.assertEqual(0, result)
         # Strip ANSI codes for plain-text assertions
         plain = re.sub(r'\033\[[0-9;]*m', '', out.getvalue())
-        self.assertIn("Symphony", plain)
+        self.assertIn("Jazzband", plain)
         self.assertIn("WORKFLOW.md", plain)
         self.assertIn("2 done", plain)
         self.assertIn("1 active", plain)
@@ -1026,7 +1026,7 @@ class ProjectCommandTests(unittest.TestCase):
 
     def test_running_project_shows_running_status(self):
         workflow_content = (
-            "---\ntracker:\n  kind: linear\n  project_slug: symphony-abc123\n---\n"
+            "---\ntracker:\n  kind: linear\n  project_slug: jazzband-abc123\n---\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             wf = Path(tmp) / "WORKFLOW.md"
@@ -1042,7 +1042,7 @@ class ProjectCommandTests(unittest.TestCase):
 
             abs_wf = str((Path(tmp) / "WORKFLOW.md").resolve())
             with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-                 patch("symphony.cli._detect_running_workflow_paths", return_value={abs_wf}), \
+                 patch("jazzband.cli._detect_running_workflow_paths", return_value={abs_wf}), \
                  patch("os.getcwd", return_value=tmp), \
                  patch("pathlib.Path.cwd", return_value=Path(tmp)):
                 out = StringIO()
@@ -1058,7 +1058,7 @@ class ProjectCommandTests(unittest.TestCase):
         fake_ps = type("R", (), {
             "stdout": (
                 "user  123  0.0  sy run /abs/project-a/WORKFLOW.md\n"
-                "user  456  0.0  symphony run /abs/root/WORKFLOW.md\n"
+                "user  456  0.0  jazzband run /abs/root/WORKFLOW.md\n"
                 "user  789  0.0  python something else\n"
             ),
             "returncode": 0,
@@ -1078,7 +1078,7 @@ class FirstRunWizardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wf = Path(tmp) / "WORKFLOW.md"
             with patch("builtins.input", side_effect=inputs), \
-                 patch("symphony.cli._detect_github_from_remote", return_value=(None, None)):
+                 patch("jazzband.cli._detect_github_from_remote", return_value=(None, None)):
                 out = StringIO()
                 with redirect_stdout(out):
                     result = _run_first_run_wizard(wf)
@@ -1100,7 +1100,7 @@ class FirstRunWizardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wf = Path(tmp) / "WORKFLOW.md"
             with patch("builtins.input", side_effect=inputs), \
-                 patch("symphony.cli._detect_github_from_remote", return_value=(None, None)):
+                 patch("jazzband.cli._detect_github_from_remote", return_value=(None, None)):
                 out = StringIO()
                 with redirect_stdout(out):
                     result = _run_first_run_wizard(wf)
@@ -1112,7 +1112,7 @@ class FirstRunWizardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wf = Path(tmp) / "WORKFLOW.md"
             with patch("builtins.input", side_effect=inputs), \
-                 patch("symphony.cli._detect_github_from_remote", return_value=("myorg", "myrepo")):
+                 patch("jazzband.cli._detect_github_from_remote", return_value=("myorg", "myrepo")):
                 out = StringIO()
                 with redirect_stdout(out):
                     result = _run_first_run_wizard(wf)
@@ -1127,7 +1127,7 @@ class FirstRunWizardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wf = Path(tmp) / "WORKFLOW.md"
             with patch("builtins.input", side_effect=inputs), \
-                 patch("symphony.cli._detect_github_from_remote", return_value=(None, None)), \
+                 patch("jazzband.cli._detect_github_from_remote", return_value=(None, None)), \
                  patch("sys.stdin.isatty", return_value=True):
                 out = StringIO()
                 with redirect_stdout(out):
@@ -1151,7 +1151,7 @@ class InfoCommandTests(unittest.TestCase):
     _WORKFLOW = """---
 tracker:
   kind: linear
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 agent:
   runner: claude_code
 ---
@@ -1169,7 +1169,7 @@ Body
 
             output = out.getvalue()
             self.assertEqual(0, exit_code)
-            self.assertIn(f"Symphony {__version__}", output)
+            self.assertIn(f"Jazzband {__version__}", output)
             self.assertIn(str(workflow_path.resolve()), output)
             self.assertIn("claude_code", output)
             self.assertIn("linear", output)

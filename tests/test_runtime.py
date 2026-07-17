@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
-from symphony.agents.base import AgentEvent, AgentEventType, AgentSession, TaskResult, TokenUsage, TurnResult
-from symphony.config import WorkflowConfig
-from symphony.feedback import ClassifyError, FeedbackSignal
-from symphony.http_server import build_state_snapshot
-from symphony.orchestrator import RetryEntry
-from symphony.runtime import SymphonyRuntime
-from symphony.tracker.models import Issue
+from jazzband.agents.base import AgentEvent, AgentEventType, AgentSession, TaskResult, TokenUsage, TurnResult
+from jazzband.config import WorkflowConfig
+from jazzband.feedback import ClassifyError, FeedbackSignal
+from jazzband.http_server import build_state_snapshot
+from jazzband.orchestrator import RetryEntry
+from jazzband.runtime import JazzbandRuntime
+from jazzband.tracker.models import Issue
 
 
 def make_config(workspace_root: Path) -> WorkflowConfig:
@@ -111,7 +111,7 @@ class FakeSessionRunner:
         self.prompts: list[str] = []
         self.sessions_stopped: list[str] = []
         self.snapshots_during_turn: list[dict] = []
-        self.runtime: SymphonyRuntime | None = None
+        self.runtime: JazzbandRuntime | None = None
 
     async def start_session(self, workspace: Path) -> AgentSession:
         return AgentSession(id="session-1", workspace=workspace)
@@ -176,7 +176,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = issue()
             runner = FakeSessionRunner()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }} attempt={{ attempt }}",
                 tracker=FakeTracker([target]),
@@ -207,7 +207,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = issue()
             runner = FakeSessionRunner(success=False, exit_reason="turn_failed")
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=FakeTracker([target]),
@@ -231,7 +231,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             target = issue()
             workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
             runner = RaisingSessionRunner()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=FakeTracker([target]),
@@ -252,7 +252,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = issue()
             clock = ManualClock(50_000)
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Retry attempt {{ attempt }} for {{ issue.identifier }}",
                 tracker=FakeTracker([target]),
@@ -277,7 +277,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retry_missing_from_candidate_poll_is_released(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work",
                 tracker=FakeTracker([]),
@@ -304,7 +304,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             terminal_issue = issue(state="Done")
             workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work",
                 tracker=FakeTracker([], states=[terminal_issue]),
@@ -332,7 +332,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = issue(identifier="IN-201")
             runner = FakeAPIRunner()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Generate {{ issue.identifier }}",
                 tracker=FakeTracker([target]),
@@ -352,7 +352,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_record_startup_issues_skips_preexisting_issues_on_first_tick(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             pre_existing = issue("pre-1", "IN-300")
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=FakeTracker([pre_existing]),
@@ -375,7 +375,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
             # Startup: issue is active.
             tracker = FakeTracker([pre_existing])
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=tracker,
@@ -420,7 +420,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "polling": {"interval_ms": 5_000},
                 }
             )
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=config,
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=tracker,
@@ -444,7 +444,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             iss = issue("id-x", "IN-403", state="Todo")
             tracker = FakeTracker([iss])
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=tracker,
@@ -493,8 +493,8 @@ class FeedbackTracker(FakeTracker):
 
 
 class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
-    def _make_runtime(self, tracker, temp_dir: str) -> SymphonyRuntime:
-        return SymphonyRuntime(
+    def _make_runtime(self, tracker, temp_dir: str) -> JazzbandRuntime:
+        return JazzbandRuntime(
             config=make_config(Path(temp_dir) / "workspaces"),
             prompt_template="Work on {{ issue.identifier }}",
             tracker=tracker,
@@ -512,7 +512,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.poll_feedback()
 
         self.assertEqual([("r-1", "Done")], tracker.state_transitions)
@@ -527,7 +527,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
                 await runtime.poll_feedback()
 
         self.assertEqual([("r-2", "Todo")], tracker.state_transitions)
@@ -542,7 +542,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CLOSE):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.CLOSE):
                 await runtime.poll_feedback()
 
         self.assertEqual([("r-3", "Canceled")], tracker.state_transitions)
@@ -557,7 +557,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 # First poll: marks c-1 as seen.
                 await runtime.poll_feedback()
                 tracker.state_transitions.clear()
@@ -576,7 +576,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=None):
+            with patch("jazzband.runtime.classify_feedback", return_value=None):
                 await runtime.poll_feedback()
 
         self.assertEqual([], tracker.state_transitions)
@@ -592,14 +592,14 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 # First poll: c-1 (LGTM) fires → Done transition.
                 await runtime.poll_feedback()
             tracker.state_transitions.clear()
             # Simulate re-open: a new non-signal comment arrives (c-2).
             tracker._comment_ids["r-x"] = ["c-1", "c-2"]
             tracker._comments["r-x"] = ["Alice: LGTM", "Bob: re-opened for discussion"]
-            with patch("symphony.runtime.classify_feedback", return_value=None):
+            with patch("jazzband.runtime.classify_feedback", return_value=None):
                 # Second poll: only c-2 is new; it carries no signal → no transition.
                 await runtime.poll_feedback()
 
@@ -629,7 +629,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.poll_feedback()  # first poll: update fails, not marked seen
                 await runtime.poll_feedback()  # second poll: retries and succeeds
 
@@ -646,12 +646,12 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
-            with patch("symphony.runtime.classify_feedback", side_effect=ClassifyError("timeout")):
+            with patch("jazzband.runtime.classify_feedback", side_effect=ClassifyError("timeout")):
                 await runtime.poll_feedback()  # fails: _feedback_seen NOT updated
             self.assertEqual([], tracker.state_transitions)
             self.assertNotIn("r-e", runtime._feedback_seen)
 
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.poll_feedback()  # retries and succeeds
 
         self.assertEqual([("r-e", "Done")], tracker.state_transitions)
@@ -674,14 +674,14 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
             comments={"r-6": ["Eve: LGTM"]},
         )
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(tmp) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=tracker,
                 workspace_manager=FakeWorkspaceManager(Path(tmp) / "workspaces"),
                 runner=FakeSessionRunner(),
             )
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.run_tick()
 
         self.assertEqual([("r-6", "Done")], tracker.state_transitions)
@@ -702,7 +702,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             runner = FakeSessionRunner()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(tmp) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=tracker,
@@ -711,7 +711,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
             )
             runtime._branch_pr_numbers["haol/in-510-branch"] = 42
             runtime._feedback_seen["r-cr1"] = frozenset()  # pre-seed: issue known, no prior comments
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
                 await runtime.poll_feedback()
 
         # Issue state must NOT change — it stays "In Review" on the existing PR
@@ -736,7 +736,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runtime = self._make_runtime(tracker, tmp)
             runtime._feedback_seen["r-cr2"] = frozenset()  # pre-seed: issue known, no prior comments
-            with patch("symphony.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
                 await runtime.poll_feedback()
 
         self.assertEqual([("r-cr2", "Todo")], tracker.state_transitions)

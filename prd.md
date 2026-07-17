@@ -1,4 +1,4 @@
-# Symphony — Product Requirements Document
+# Jazzband — Product Requirements Document
 
 ## Status: Draft v0.5 — CLI-first MVP: Linear + Codex first
 
@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-Symphony is an orchestration service that polls a work tracker (Linear), creates isolated workspaces per issue, and runs AI agent sessions against those workspaces. The existing Elixir reference implementation is tightly coupled to the Codex app-server JSON-RPC protocol. This PRD covers the design and build queue for a new implementation that supports multiple agent backends.
+Jazzband is an orchestration service that polls a work tracker (Linear), creates isolated workspaces per issue, and runs AI agent sessions against those workspaces. The existing Elixir reference implementation is tightly coupled to the Codex app-server JSON-RPC protocol. This PRD covers the design and build queue for a new implementation that supports multiple agent backends.
 
 ---
 
@@ -55,8 +55,8 @@ anyio           task groups     structured concurrency for agent sessions
 ### Project layout
 
 ```
-symphony/
-  symphony/
+jazzband/
+  jazzband/
     cli.py                  # typer CLI entrypoint
     orchestrator.py         # poll loop, claims, retries, reconciliation
     config.py               # pydantic schema + $VAR resolution
@@ -227,9 +227,9 @@ agent:
 
 GPT-Image-1 (OpenAI's image generation model, formerly DALL-E 3) is a **generative API**, not a coding agent. There is no multi-turn loop, no tool use, no workspace file manipulation — it takes a text prompt and returns an image.
 
-**Where it fits in the Symphony model:**
+**Where it fits in the Jazzband model:**
 
-Symphony's core is: _issue → workspace → agent turns → output_. Image generation maps to this as:
+Jazzband's core is: _issue → workspace → agent turns → output_. Image generation maps to this as:
 
 - **Issue:** A Linear task like "Generate hero image for landing page v2"
 - **Workspace:** Directory where the generated images are saved
@@ -266,7 +266,7 @@ class ImageGenerationRunner(APIAgentRunner):
 
 **Verdict:** Valid fit with clear boundaries. Recommend implementing after the CLI agent runners are stable. Requires adding `task_type: generative | agentic` to the runner config (default: `agentic`). The architectural surface area is small — it's essentially an `APIAgentRunner` with file output and no turn loop.
 
-**Caveat:** If the intent is for GPT-Image-1 to be _called by a coding agent_ (e.g., Claude Code calls the image API as a tool), that is already handled through the agent's built-in tool use or MCP — Symphony doesn't need a dedicated runner for that case.
+**Caveat:** If the intent is for GPT-Image-1 to be _called by a coding agent_ (e.g., Claude Code calls the image API as a tool), that is already handled through the agent's built-in tool use or MCP — Jazzband doesn't need a dedicated runner for that case.
 
 ---
 
@@ -274,7 +274,7 @@ class ImageGenerationRunner(APIAgentRunner):
 
 **Fit assessment: ✅ Strong fit — distribution layer, not a core change**
 
-Distributing Symphony as a native macOS application removes the requirement for users to install Python, manage a terminal daemon, or understand CLI conventions. The orchestrator logic is unchanged — the desktop app is a shell that manages the process lifecycle and surfaces the existing web dashboard in a native window.
+Distributing Jazzband as a native macOS application removes the requirement for users to install Python, manage a terminal daemon, or understand CLI conventions. The orchestrator logic is unchanged — the desktop app is a shell that manages the process lifecycle and surfaces the existing web dashboard in a native window.
 
 **What "desktop app" means here:**
 
@@ -291,9 +291,9 @@ Distributing Symphony as a native macOS application removes the requirement for 
 Tauri v2 is a Rust-based desktop app framework that wraps a web frontend in a lightweight native shell (no Chromium bundle — uses the OS WebView, which is WKWebView on macOS). The Python orchestrator is bundled as a standalone binary via PyInstaller and registered as a Tauri sidecar. The web frontend (React or Svelte) is shared with the browser dashboard.
 
 ```
-symphony-desktop/
+jazzband-desktop/
   src-tauri/         # Rust Tauri shell
-    sidecar/         # PyInstaller-built symphony binary
+    sidecar/         # PyInstaller-built jazzband binary
     tauri.conf.json  # window config, sidecar, permissions
   src/               # React/Svelte frontend (reused from web dashboard)
 ```
@@ -312,7 +312,7 @@ symphony-desktop/
 - `tauri-plugin-shell` — manage Python sidecar lifecycle (start on launch, kill on quit)
 - `tauri-plugin-notification` — native macOS notifications for agent events
 - `tauri-plugin-updater` — auto-update from GitHub Releases
-- `tauri-plugin-single-instance` — prevent multiple Symphony processes
+- `tauri-plugin-single-instance` — prevent multiple Jazzband processes
 
 **Distribution path:**
 
@@ -332,7 +332,7 @@ Minimal. The daemon gains one new startup flag `--headless` (suppresses terminal
 
 **Fit assessment: ✅ Strong fit — extends the operator loop to mobile**
 
-Symphony's core value is autonomous agent execution. But agents regularly reach points where human judgment is needed: an issue moves to `Human Review`, an agent is blocked by a missing credential, or an approval gate fires. Today, operators must be at a desk watching the dashboard. Remote phone coordination closes this gap — operators get notified on their phone and can respond without opening a laptop.
+Jazzband's core value is autonomous agent execution. But agents regularly reach points where human judgment is needed: an issue moves to `Human Review`, an agent is blocked by a missing credential, or an approval gate fires. Today, operators must be at a desk watching the dashboard. Remote phone coordination closes this gap — operators get notified on their phone and can respond without opening a laptop.
 
 **Two sub-features:**
 
@@ -344,7 +344,7 @@ PWA Web Push now works on iOS 16.4+ (Safari finally shipped it in 2023), which c
 
 #### B. Push notifications + action gates (the valuable part)
 
-Symphony sends a push notification to the operator's phone when an agent needs attention. The notification includes the issue identifier, state, and reason, plus one-tap action buttons.
+Jazzband sends a push notification to the operator's phone when an agent needs attention. The notification includes the issue identifier, state, and reason, plus one-tap action buttons.
 
 **Notification triggers:**
 
@@ -383,8 +383,8 @@ When an agent hits an approval gate that is not auto-resolved:
 ```yaml
 notifications:
   backend: ntfy                        # ntfy | pushover | webhook | telegram
-  ntfy_topic: $SYMPHONY_NTFY_TOPIC    # ntfy topic URL or topic name
-  webhook_url: $SYMPHONY_WEBHOOK_URL  # generic webhook fallback
+  ntfy_topic: $JAZZBAND_NTFY_TOPIC    # ntfy topic URL or topic name
+  webhook_url: $JAZZBAND_WEBHOOK_URL  # generic webhook fallback
   approval_timeout_ms: 300000          # 5 minutes; treat as reject after this
   events:                              # which events trigger notifications
     - human_review
@@ -412,7 +412,7 @@ GET  /api/v1/health                           # liveness check for desktop sidec
 
 **Fit assessment: ✅ Core requirement — Linear is the primary UX surface**
 
-Symphony's orchestration loop is entirely driven by Linear state. Every goal, objective, and work item enters the system as a Linear issue. This is not just an integration — it is the interface. The system needs:
+Jazzband's orchestration loop is entirely driven by Linear state. Every goal, objective, and work item enters the system as a Linear issue. This is not just an integration — it is the interface. The system needs:
 
 1. **Reliable authentication** that works for CLI, desktop app, and CI without different code paths
 2. **Real-time coordination via webhooks**, not just polling — when an operator moves an issue to a different state in Linear, agents must react within seconds
@@ -426,7 +426,7 @@ Two modes are supported and coexist:
 | Mode | How | Storage |
 |---|---|---|
 | **Personal API key** | `LINEAR_API_KEY` env var or `tracker.api_key` in WORKFLOW.md | Env / WORKFLOW.md |
-| **OAuth 2.0** | Full consent flow via Linear Application; bearer token stored securely | macOS Keychain (desktop) or `~/.symphony/credentials.json` (CLI) |
+| **OAuth 2.0** | Full consent flow via Linear Application; bearer token stored securely | macOS Keychain (desktop) or `~/.jazzband/credentials.json` (CLI) |
 
 Token resolution order (first non-empty wins): env var → WORKFLOW.md → Keychain → credentials file. The `LinearClient` never reads credentials directly — it receives a resolved token from `TokenStore`.
 
@@ -454,11 +454,11 @@ tracker:
   oauth_client_secret: $LINEAR_CLIENT_SECRET
   webhook_secret: $LINEAR_WEBHOOK_SECRET
 server:
-  public_url: $SYMPHONY_PUBLIC_URL
+  public_url: $JAZZBAND_PUBLIC_URL
   tunnel: none                          # none | cloudflared | ngrok
 ```
 
-**Verdict:** Implement Linear auth + webhook support before shipping any agent runner to production. Without webhooks, Symphony is too slow for real team use. Without OAuth, the desktop app has no clean first-run flow.
+**Verdict:** Implement Linear auth + webhook support before shipping any agent runner to production. Without webhooks, Jazzband is too slow for real team use. Without OAuth, the desktop app has no clean first-run flow.
 
 ---
 
@@ -481,7 +481,7 @@ server:
 ## 6. Implementation Plan
 
 The build is divided into product phases. Phase 1 is the MVP: a CLI-first
-Symphony daemon that can read Linear work, create isolated workspaces, run Codex,
+Jazzband daemon that can read Linear work, create isolated workspaces, run Codex,
 and hand results back through Linear. This is the fastest path to real use and
 feedback. The standalone app follows once the core loop is proven.
 
@@ -544,7 +544,7 @@ change, Linear ticket updates, a PR, and review evidence.
 
 ### 6.3 Phase 1: MVP — CLI Linear + Codex
 
-**Goal:** Deliver the smallest useful Symphony implementation: configure a repo,
+**Goal:** Deliver the smallest useful Jazzband implementation: configure a repo,
 start the daemon from the terminal, dispatch Linear issues to Codex, and observe
 the result.
 
@@ -561,7 +561,7 @@ the result.
 - Linear tracker read path: candidate issue fetch, state refresh, pagination,
   and normalized issue model.
 - `linear_graphql` client-side tool so Codex can comment, update issue state,
-  and attach PR links using Symphony-managed Linear auth.
+  and attach PR links using Jazzband-managed Linear auth.
 - Orchestrator poll loop, dispatch, claims, bounded concurrency, retry/backoff,
   reconciliation, and cleanup.
 - Per-issue workspace lifecycle manager with sanitized paths, lifecycle hooks,
@@ -579,7 +579,7 @@ the result.
 **Alternatives considered:**
 
 - Start with a standalone app first. This improves onboarding, but delays the
-  core proof that Symphony can execute Linear work through Codex.
+  core proof that Jazzband can execute Linear work through Codex.
 - Require OAuth in the MVP. This improves onboarding, but API-key setup is enough
   for the first operational loop and keeps the first authentication surface
   smaller.
@@ -590,8 +590,8 @@ the result.
 
 **Exit criteria:**
 
-- `symphony --help` works.
-- A user can start Symphony from the terminal with a repository-owned
+- `jazzband --help` works.
+- A user can start Jazzband from the terminal with a repository-owned
   `WORKFLOW.md`.
 - Config, tracker, workspace, orchestrator, and Codex runner tests pass.
 - A Linear issue in an active state can dispatch one Codex session in a
@@ -606,7 +606,7 @@ the result.
 one explicit caveat. The local implementation covers the CLI, workflow/config,
 Linear read path, `linear_graphql`, orchestration state, workspace lifecycle,
 runner contracts, Codex app-server runner, status API handler, and runtime
-single-tick glue. Validation passed with 100 Python tests, `symphony --help`,
+single-tick glue. Validation passed with 100 Python tests, `jazzband --help`,
 `git diff --check`, config preflight against `elixir/WORKFLOW.md`, and a live
 Linear polling tick that returned zero candidates. A live dispatch of one Linear
 issue to Codex remains unproven because there were no active candidate issues
@@ -627,9 +627,9 @@ workspace reuse during active runs.
 1. Install the Python package in a local environment.
 2. Create or edit `WORKFLOW.md` in the target repository.
 3. Set `LINEAR_API_KEY` and any required Codex environment/auth state.
-4. Run `symphony /path/to/repo/WORKFLOW.md --port 7337 --logs-root ./log`.
+4. Run `jazzband /path/to/repo/WORKFLOW.md --port 7337 --logs-root ./log`.
 5. Move a Linear issue into an active state.
-6. Symphony polls Linear, creates an isolated workspace, renders the prompt, and
+6. Jazzband polls Linear, creates an isolated workspace, renders the prompt, and
    starts Codex in that workspace.
 7. Codex uses `linear_graphql` to post progress, attach PR links, and move the
    issue to the configured handoff state.
@@ -637,7 +637,7 @@ workspace reuse during active runs.
 
 ### 6.4 Phase 2A: Standalone CLI Onboarding And Packaging
 
-**Linear issue:** IN-205 — Package Symphony as an easy-install standalone CLI
+**Linear issue:** IN-205 — Package Jazzband as an easy-install standalone CLI
 with guided onboarding.
 
 **Goal:** Make the proven CLI MVP useful without requiring users to understand
@@ -647,23 +647,23 @@ inside repository files.
 **Selected solution:**
 
 - Keep the runtime daemon architecture intact and add a productized CLI surface:
-  `symphony init`, `symphony doctor`, and `symphony run`.
-- `symphony init` generates a repository-owned `WORKFLOW.md` from presets. The
+  `jazzband init`, `jazzband doctor`, and `jazzband run`.
+- `jazzband init` generates a repository-owned `WORKFLOW.md` from presets. The
   initial presets are `codex-safe`, `codex-autonomous`, and `review-only`.
-- Interactive `symphony init` starts with a language picker for English or
+- Interactive `jazzband init` starts with a language picker for English or
   Simplified Chinese, then shows a brief versioned terminal orientation as
   paginated Q&A cards instead of one long text block. Each page should answer
-  one setup question: what Symphony is, what init will deliver, why the
+  one setup question: what Jazzband is, what init will deliver, why the
   issue-driven workflow matters, what productivity shift OpenAI reported, and
   what the user should expect next. Tutorial read history is stored in the local
-  Symphony config directory so the same tutorial version is shown only once per
+  Jazzband config directory so the same tutorial version is shown only once per
   installation; bumping the tutorial version shows it again.
 - Setup supports two execution modes. Interactive mode guides the user through
   missing auth, project/repo selection, and workflow generation. Automated mode
   validates existing CLI/env/MCP auth and explicit config inputs without
   prompting, returning deterministic pass/fail output with exact remediation
   commands for headless or scripted installs.
-- `symphony init` should guide all required auth before writing the final
+- `jazzband init` should guide all required auth before writing the final
   workflow: Linear, GitHub, Codex, and Claude Code. It should prefer existing
   authenticated CLIs or MCP sessions when available, validate them immediately,
   and only ask for raw tokens when no usable local auth is present.
@@ -673,7 +673,7 @@ inside repository files.
   paste a token. Personal API keys stored outside the repo remain the fallback.
   Resolution order remains env var → WORKFLOW.md indirection/literal → Linear
   CLI/MCP auth context → local credentials file.
-- GitHub auth should be delegated to `gh`. `symphony init` should run or guide
+- GitHub auth should be delegated to `gh`. `jazzband init` should run or guide
   `gh auth login`, validate `gh auth status`, and check the authenticated
   account can access the configured owner/repository with enough scope for
   branch push and pull-request creation. Manual GitHub token entry remains a
@@ -683,13 +683,13 @@ inside repository files.
   mode or report the exact login/setup command needed. For Claude Code,
   init/doctor should verify the `claude` command is installed and authenticated
   before generating a Claude-default workflow.
-- `symphony doctor` validates the generated workflow, resolved Linear auth,
+- `jazzband doctor` validates the generated workflow, resolved Linear auth,
   GitHub repository access, Codex or Claude Code runner auth, workspace
   writability, logs root, and status API address before users run a live poll.
-- `symphony run` is the clear long-term command for the daemon while the legacy
-  `symphony WORKFLOW.md --once/--check` invocation remains compatible.
-- `symphony info` (alias `sy info`) prints read-only environment diagnostics:
-  the Symphony version with the running Python and OS platform, plus the
+- `jazzband run` is the clear long-term command for the daemon while the legacy
+  `jazzband WORKFLOW.md --once/--check` invocation remains compatible.
+- `jazzband info` (alias `sy info`) prints read-only environment diagnostics:
+  the Jazzband version with the running Python and OS platform, plus the
   resolved `WORKFLOW.md` path, configured `agent.runner`, and `tracker.kind`.
   It accepts an optional `workflow_path` positional (default `./WORKFLOW.md`)
   and a `--json` flag that emits the same six fields (`version`, `python`,
@@ -708,15 +708,15 @@ inside repository files.
   while keeping the delivery slice small and testable.
 - Linear OAuth is still the preferred end-state, but the CLI should first reuse
   existing developer auth surfaces. Linear CLI/MCP and `gh` already solve the
-  browser-login and scope-discovery problem for many operators; Symphony should
+  browser-login and scope-discovery problem for many operators; Jazzband should
   validate and reuse those sessions instead of making users paste credentials
   into another tool.
 - Crosscheck provides a useful setup pattern to adapt: environment checks happen
   before configuration, guided onboarding owns interactive choices, tool-native
   GitHub auth is derived from `gh`, status output summarizes auth/config/CLI
-  state, and failures include exact fix commands. Symphony should use the same
+  state, and failures include exact fix commands. Jazzband should use the same
   product pattern while keeping repository-owned `WORKFLOW.md` and
-  `symphony doctor` as first-class contracts.
+  `jazzband doctor` as first-class contracts.
 - Personal API key onboarding remains necessary as a fallback for Linear
   environments without CLI/MCP auth, headless CI, and early bootstrapping.
 - Presets are intentionally conservative. They encode safe concurrency,
@@ -736,7 +736,7 @@ inside repository files.
 - Make every setup run interactive. This is friendlier for first-time users, but
   blocks scripted installs, CI validation, and repeatable team bootstrap flows.
 - Hide `WORKFLOW.md` entirely behind CLI preferences. This reduces visible
-  configuration, but conflicts with Symphony's repository-owned workflow
+  configuration, but conflicts with Jazzband's repository-owned workflow
   contract and makes review harder.
 
 **Scope:**
@@ -750,7 +750,7 @@ inside repository files.
 - Explicit setup mode contract for `interactive` and `automated` runs, including
   non-TTY behavior, skip/continue controls for tutorial pages, and stable exit
   codes for missing auth or invalid configuration.
-- Guided auth preflight inside `symphony init` for Linear CLI/MCP, GitHub via
+- Guided auth preflight inside `jazzband init` for Linear CLI/MCP, GitHub via
   `gh`, Codex CLI, and Claude Code CLI.
 - Local credentials-file fallback for Linear API keys and GitHub tokens with
   private file mode when the preferred CLI/MCP auth path is unavailable.
@@ -764,10 +764,10 @@ inside repository files.
 
 **Exit criteria:**
 
-- A new user can install Symphony as a CLI, run `symphony init`, store or provide
+- A new user can install Jazzband as a CLI, run `jazzband init`, store or provide
   Linear auth without editing secrets into `WORKFLOW.md`, validate GitHub repo
   access through `gh`, confirm Codex or Claude Code runner auth, run
-  `symphony doctor`, and then run one poll tick with `symphony run --once`.
+  `jazzband doctor`, and then run one poll tick with `jazzband run --once`.
 - A first-time interactive user reads the orientation one page at a time, can
   continue or skip without losing setup progress, and does not see the same
   tutorial version again after completion.
@@ -794,7 +794,7 @@ follow-on distribution channels instead of Phase 2A blockers.
 
 ### 6.4.1 Phase 2A Follow-Up: Production CLI Release And Onboarding UX
 
-**Linear issue:** IN-280 — Productionize Symphony CLI release and onboarding UX.
+**Linear issue:** IN-280 — Productionize Jazzband CLI release and onboarding UX.
 
 **Goal:** Turn the packaged CLI slice into an operator-ready product surface:
 versioned commands, release automation, staging/main release channels, and an
@@ -803,12 +803,12 @@ for secrets or configuration.
 
 **Selected solution:**
 
-- Keep `symphony init` as the low-level workflow generator and add
-  `symphony onboard` as the recommended first-run entrypoint. `onboard` runs the
+- Keep `jazzband init` as the low-level workflow generator and add
+  `jazzband onboard` as the recommended first-run entrypoint. `onboard` runs the
   same init/tutorial flow when setup is missing, but first checks whether a
   valid `WORKFLOW.md` and local prerequisites already exist. If setup is already
   valid, it reports the completed checks and skips regeneration by default.
-- Add `symphony --version` using the Python package version as the single source
+- Add `jazzband --version` using the Python package version as the single source
   of truth. The value must match the installable artifact version and should not
   be copied into multiple runtime constants.
 - Show an environment readiness summary before interactive setup writes any
@@ -816,7 +816,7 @@ for secrets or configuration.
   runner command availability, configured repository inputs, existing workflow
   state, and exact next commands for missing prerequisites.
 - Prefer existing authenticated developer tooling over token prompts: `gh` for
-  GitHub, environment variables or the local Symphony credentials file for
+  GitHub, environment variables or the local Jazzband credentials file for
   Linear/GitHub tokens, and installed `claude` / `codex` commands for runners.
   Linear CLI/MCP auth remains part of the longer-term target, but the CLI must
   keep personal API keys as a headless fallback.
@@ -834,7 +834,7 @@ for secrets or configuration.
   replacement for that work; it closes the productization gap between an
   installable command and a releaseable operator tool.
 - `init` should remain scriptable and deterministic. A separate `onboard`
-  command lets first-time users ask Symphony to decide whether setup can be
+  command lets first-time users ask Jazzband to decide whether setup can be
   skipped, resumed, or rerun without weakening `init` as a config-generation
   primitive.
 - A release workflow without an immediate public PyPI publish is still useful:
@@ -846,8 +846,8 @@ for secrets or configuration.
 
 **Scope:**
 
-- `symphony --version` and stable help for production command discovery.
-- `symphony onboard` as the first-run wrapper around tutorial, environment
+- `jazzband --version` and stable help for production command discovery.
+- `jazzband onboard` as the first-run wrapper around tutorial, environment
   scan, init generation, and skip/resume behavior.
 - Shared setup preflight checks for init/onboard/doctor covering workflow
   presence, Linear token source, GitHub auth source, runner command presence,
@@ -860,26 +860,26 @@ for secrets or configuration.
 
 **Exit criteria:**
 
-- `symphony --version` works from both `uv run symphony` and an installed wheel.
-- `symphony onboard --mode automated` never prompts; if setup is already valid
+- `jazzband --version` works from both `uv run jazzband` and an installed wheel.
+- `jazzband onboard --mode automated` never prompts; if setup is already valid
   it skips init and reports the checks, otherwise it fails before writing files
   with exact missing inputs.
-- `symphony onboard` in an interactive terminal shows local readiness before
+- `jazzband onboard` in an interactive terminal shows local readiness before
   prompting and can reuse the existing init flow when setup must be generated.
 - Existing valid setup is not overwritten unless the user explicitly passes
   `--overwrite`.
-- `symphony doctor` and onboarding reports use consistent labels for auth/tool
+- `jazzband doctor` and onboarding reports use consistent labels for auth/tool
   sources.
 - Release automation can build artifacts, install the wheel, and verify
-  `symphony --help`, `symphony --version`, `symphony init --help`,
-  `symphony onboard --help`, `symphony doctor --help`, and
-  `symphony run --help`.
+  `jazzband --help`, `jazzband --version`, `jazzband init --help`,
+  `jazzband onboard --help`, `jazzband doctor --help`, and
+  `jazzband run --help`.
 - PR validation includes focused CLI tests and any release workflow syntax checks
   that can run locally.
 
 ### 6.5 Phase 2B: Standalone App And Linear Productionization
 
-**Goal:** Make Symphony approachable and secure after the CLI MVP loop works.
+**Goal:** Make Jazzband approachable and secure after the CLI MVP loop works.
 
 **Scope:**
 
@@ -946,7 +946,7 @@ contracts are stable.
 **Exit criteria:**
 
 - Each runner maps provider-specific streaming, tool calls, token usage, and
-  failures into the common Symphony event schema.
+  failures into the common Jazzband event schema.
 - `linear_graphql` tool behavior is tested for every agentic runner.
 - Provider-specific rate limits and safety blocks surface in observability.
 
@@ -1036,7 +1036,7 @@ PRD in the same branch so the routine remains discoverable for future agents.
   token redaction, candidate issue fetch, state refresh, pagination, and
   normalized issue model.
 - [x] **[Linear: `linear_graphql` tool]** — scoped GraphQL tool for agent comments,
-  state transitions, and PR links using Symphony-managed auth.
+  state transitions, and PR links using Jazzband-managed auth.
 - [x] **[Core: Orchestration state machine] (Linear: IN-169)** — dispatch
   ordering, eligibility, claims, bounded global/per-state concurrency,
   retry/backoff entries, continuation retries, stall detection, and
@@ -1064,16 +1064,16 @@ be the first Phase 2 gate before desktop or productionization work expands.
 ### 7.2.1 Phase 1 SPEC Compliance Follow-Up
 
 > These items correct gaps found when comparing the implementation against the
-> original OpenAI Symphony SPEC (decided 2026-05-18, isolation-first). They are
+> original OpenAI Jazzband SPEC (decided 2026-05-18, isolation-first). They are
 > **post-MVP follow-up work**, not Phase 1 blockers — Phase 1 closure stands.
 > Full design rationale in §8.1–§8.5.
 
-- [x] **[Core: Per-run workspace isolation] (Linear: IN-286)** — Symphony owns
+- [x] **[Core: Per-run workspace isolation] (Linear: IN-286)** — Jazzband owns
   workspace setup per the isolation matrix in §8.1. Bare clone + `git worktree`
   per dispatch (working tree and branch isolated; object store shared for monorepo
   efficiency). Per-session env var credential injection. Per-issue log file.
   Application-level crash sweep at startup. See §8.1 for the full isolation matrix.
-  - Shipped on `feat/in-286-workspace-isolation`. `symphony/workspace.py` —
+  - Shipped on `feat/in-286-workspace-isolation`. `jazzband/workspace.py` —
     per-run paths `<root>/<workspace_key>/<run_id>`, optional bare-clone +
     `git worktree` mode via `workspace.repo_url`, force-cleanup via
     `git worktree remove --force` + `git branch -D`, `sweep_stale_worktrees()`
@@ -1085,13 +1085,13 @@ be the first Phase 2 gate before desktop or productionization work expands.
   `blocker_skip`) without modifying tracker state. Reconsider on the next tick.
 - [ ] **[Core: Fail-closed approval gate] (Linear: IN-288)** — When
   `approval_policy: on-request` is set but no approval resolution path exists,
-  treat it as a fatal misconfiguration at startup (`symphony doctor` reports it).
+  treat it as a fatal misconfiguration at startup (`jazzband doctor` reports it).
   At runtime, an unresolvable approval request aborts the run and moves the issue
   to the failure state.
 - [ ] **[Core: Failure-state transition, no auto-retry] (Linear: IN-289)** —
   On non-recoverable failure, move the issue to the configured `failure_state`,
   log the structured failure event, and clean up the workspace (unless
-  `keep_on_failure: true`). No Symphony-initiated auto-retry; operator re-queues
+  `keep_on_failure: true`). No Jazzband-initiated auto-retry; operator re-queues
   via Linear. Any future retry (SPEC §18.2 persistent queue, Phase 6 backlog)
   must use a fresh worktree. **Prerequisite:** SPEC.md §8.4/§10.7 and
   ARCHITECTURE.md retry flows must be updated before this is implemented — see §8.4.
@@ -1101,13 +1101,13 @@ be the first Phase 2 gate before desktop or productionization work expands.
   concurrent instances can both succeed — so this is fully protective only for
   single-instance deployments. Multi-instance strict safety requires the
   Phase 2B claim-comment tie-breaker (see §8.5). Log `claim_succeeded` with
-  instance identity. `symphony doctor` warns if `states.in_progress` is not
+  instance identity. `jazzband doctor` warns if `states.in_progress` is not
   configured. See §8.5 for the full design.
 
 ### 7.3 Phase 2A: Standalone CLI Onboarding And Packaging
 
-- [x] **[CLI: Onboarding commands] (Linear: IN-205)** — add `symphony init`,
-  `symphony doctor`, and `symphony run` while preserving legacy CLI startup.
+- [x] **[CLI: Onboarding commands] (Linear: IN-205)** — add `jazzband init`,
+  `jazzband doctor`, and `jazzband run` while preserving legacy CLI startup.
 - [x] **[Auth: Local CLI credentials] (Linear: IN-205)** — resolve Linear API
   keys from env vars, WORKFLOW references/literals, and a private local
   credentials file.
@@ -1148,13 +1148,13 @@ be the first Phase 2 gate before desktop or productionization work expands.
   block to WORKFLOW.md and wires up the crosscheck project. Automated mode
   defaults to claude_code + no review.
 - [x] **[Auth: Interactive/automated setup modes] (Linear: IN-268)** — make
-  `symphony init` support guided interactive setup and non-prompting automated
+  `jazzband init` support guided interactive setup and non-prompting automated
   setup while detecting and validating Linear CLI/MCP auth, GitHub access
   through `gh`, Codex CLI auth, and Claude Code CLI auth before writing the
   final workflow.
   - Shipped in PR #18. `cli.py` — `--mode interactive/automated`, TTY auto-detection, `_automated_setup_failures`.
 - [x] **[CLI: Setup status preflight] (Linear: IN-268)** — expand
-  `symphony doctor` or add a status-style view that reports auth source,
+  `jazzband doctor` or add a status-style view that reports auth source,
   account identity, repo access, CLI versions, config paths, and exact fix
   commands for each missing dependency.
   - Shipped in PR #23. `doctor_checks` in `cli.py` — Linear auth source, command availability, GitHub auth, exact fix commands.
@@ -1173,14 +1173,14 @@ be the first Phase 2 gate before desktop or productionization work expands.
   Keychain adapter via `keyring`; OAuth token fields (access, refresh, expiry);
   redaction utilities; status metadata without exposing token material.
 - [ ] **[Linear: OAuth 2.0 / PKCE] (Linear: IN-165)** — PKCE authorization code
-  flow, token exchange and refresh, `symphony auth login/status/revoke` commands,
+  flow, token exchange and refresh, `jazzband auth login/status/revoke` commands,
   HTTP endpoints (`/api/v1/linear/auth/start|callback|status|revoke`), and
   personal API-key fallback for headless/CI use.
 - [ ] **[Linear: Webhooks] (Linear: IN-166)** — webhook registration, HMAC-SHA256
   verification, async event routing as immediate orchestrator trigger, idempotent
   re-registration on startup, and polling fallback when webhooks are disabled.
-- [ ] **[Distribution: Homebrew tap]** — `brew install codatta/symphony/symphony`
-  via a `codatta/homebrew-symphony` tap; release workflow job computes SHA256 of
+- [ ] **[Distribution: Homebrew tap]** — `brew install codatta/jazzband/jazzband`
+  via a `codatta/homebrew-jazzband` tap; release workflow job computes SHA256 of
   the published wheel/sdist and bumps the formula on each tagged release.
 
 ### 7.5 Phase 3: Operator Visibility And Approval
@@ -1196,7 +1196,7 @@ be the first Phase 2 gate before desktop or productionization work expands.
 
 ### 7.5.1 Acceptance Gate (Final Verification)
 
-**Goal:** Close the last open step in the PR lifecycle. Symphony already
+**Goal:** Close the last open step in the PR lifecycle. Jazzband already
 implements, opens PRs, reacts to review feedback, and self-heals CI; the one
 thing it never does is the final **acceptance** — deciding a converged PR
 actually satisfies the original issue and then either merging it or escalating
@@ -1229,7 +1229,7 @@ implement/review loop has actually settled. The signal source is pluggable via
   comment. Converge only when the latest verdict is `APPROVE`, it covers the
   current head sha (crosscheck re-reviews per push, giving precise sha binding),
   no `cr-autofix` PR is still open, and a quiet period has elapsed.
-- **silent branch** — no external reviewer; converge when Symphony itself goes
+- **silent branch** — no external reviewer; converge when Jazzband itself goes
   quiet: no new feedback this tick, CI green, the PR-turn counter not still
   advancing, and a quiet period elapsed.
 - `auto` uses crosscheck when a `[crosscheck]` comment is present, else silent.
@@ -1268,11 +1268,11 @@ buttons.
 
 - [x] **[Acceptance: config + convergence core]** — pluggable `acceptance`
   config block (disabled by default, `auto_merge` false), and the pure I/O-free
-  core in `symphony/acceptance.py`: crosscheck `VERDICT:` comment parsing,
+  core in `jazzband/acceptance.py`: crosscheck `VERDICT:` comment parsing,
   ndjson log fallback with sha binding, guard-path detection, and convergence
   evaluation for both the crosscheck and silent branches. Unit-tested in
   `tests/test_acceptance.py`.
-- [x] **[Acceptance: runtime wiring + judge]** — `SymphonyRuntime` now calls
+- [x] **[Acceptance: runtime wiring + judge]** — `JazzbandRuntime` now calls
   `acceptance_runtime.maybe_run_acceptance` at the tail of every PR-poll tick
   (post-feedback, post-CI). The runtime owns per-branch
   `ConvergenceSnapshot` (clocks `quiet_for_seconds`, `pr_turn_advancing`) and
@@ -1283,7 +1283,7 @@ buttons.
   parses the JSON verdict, applies a guard-path override (force `uncertain`
   on `pass` verdicts that touch sensitive paths), and posts a Markdown
   comment carrying the bot marker so the next tick does not re-classify it
-  as feedback. Phase 1 always escalates: the comment trails a "Symphony does
+  as feedback. Phase 1 always escalates: the comment trails a "Jazzband does
   not auto-merge" notice and no merge call is wired. Re-judging the same
   head sha is suppressed by tracking the last judged sha per branch.
   Bounce-back: when the judge returns `fail`, the runtime can re-dispatch
@@ -1299,7 +1299,7 @@ buttons.
   resolve the judge's doubt. The existing `max_pr_turns` budget caps the
   loop — once exhausted, the standard "Maximum feedback iterations
   reached" comment escalates to a human. Startup recovery:
-  `SymphonyRuntime.record_startup_open_prs()` scans tracker review-state
+  `JazzbandRuntime.record_startup_open_prs()` scans tracker review-state
   issues at boot and re-seeds `_branch_to_issue` / `_branch_pr_numbers`
   from the ones with an open PR, so a daemon restart does not orphan
   in-flight PRs from acceptance / PR-poll tracking. Tested in
@@ -1336,15 +1336,15 @@ buttons.
   log a warning and are otherwise swallowed — a tracker hiccup must
   not undo a successful GitHub merge. `auto_merge` stays `False` by
   default in `AcceptanceConfig` and in the onboarding scaffold
-  (`symphony init` writes `auto_merge: false` even when the user opts the
-  gate in), because auto-merge is the only Symphony feature that
+  (`jazzband init` writes `auto_merge: false` even when the user opts the
+  gate in), because auto-merge is the only Jazzband feature that
   irreversibly touches `main` — flipping it on must be an explicit edit.
   Tested in `tests/test_acceptance_runtime.py`: the new `AutoMergeTests`
   suite walks each of the four preconditions plus the GitHub-rejects-merge
   fallback, and `RenderVerdictCommentTests` covers the merged / skip-reason
   comment shapes.
-- [x] **[Acceptance: onboarding default off]** — `symphony init` /
-  `symphony onboard` now ship the acceptance gate **disabled by default**:
+- [x] **[Acceptance: onboarding default off]** — `jazzband init` /
+  `jazzband onboard` now ship the acceptance gate **disabled by default**:
   `InitConfig.acceptance_enabled` defaults to `False`, automated mode no
   longer auto-enables the gate, and the interactive prompt defaults to
   `[y/N]`. The gate dispatches an extra judge agent on every PR
@@ -1366,11 +1366,11 @@ buttons.
 criteria of the linked Linear issue, keeps the report + artifacts on disk, and
 posts/updates its own idempotent delivery-report comment on the PR.
 
-**Phase-1 semantics (shipped):** advisory only. Symphony spawns
+**Phase-1 semantics (shipped):** advisory only. Jazzband spawns
 `vf step --pr <url> --level <l> --crosscheck-verdict <v>` at most once per PR
 head SHA, after the latest `[crosscheck]` comment verdict is `APPROVE` (stale
 log-bound verdicts for another sha are skipped). The JSON line vf prints on
-stdout is logged; Symphony never merges, blocks, or transitions Linear state
+stdout is logged; Jazzband never merges, blocks, or transitions Linear state
 on the verdict, and a failed/timed-out step is recorded for that head (no
 hot-loop retry — the next push re-arms verification). Deliberately
 **independent of the acceptance gate** (7.5.1, disabled by default):
@@ -1383,21 +1383,21 @@ with execution evidence", acceptance judge = off.
 check runs carry no failures — same green convention as acceptance — for
 repos without Crosscheck; a crosscheck verdict is still recorded when one
 exists), `timeout_seconds` (default 900). Wiring: `VerifyflowConfig` in
-`symphony/config.py`, decision core in `symphony/verifyflow_runtime.py`
+`jazzband/config.py`, decision core in `jazzband/verifyflow_runtime.py`
 (`maybe_run_verifyflow`, injectable spawn for tests), runtime hook
 `_maybe_run_verifyflow` at the tail of every PR-poll tick with per-branch
 `_verifyflow_run_sha` dedup (cleaned up on PR close alongside the acceptance
 maps). Tested in `tests/test_verifyflow_runtime.py`. Contract details live in
-verifyflow's `docs/symphony-integration-surface.md`.
+verifyflow's `docs/jazzband-integration-surface.md`.
 
-**Phase 2 (not built):** Symphony consumes vf's `improvement-signal.json` to
+**Phase 2 (not built):** Jazzband consumes vf's `improvement-signal.json` to
 dispatch a fix agent and re-verify (IN-564), and gating policies beyond
 advisory.
 
 ### 7.6 Phase 4: Multi-Agent Runners
 
 - [ ] **[Agent: Claude Code]** — Anthropic/Claude Code runner with streaming,
-  tool routing, token accounting, and normalized Symphony events.
+  tool routing, token accounting, and normalized Jazzband events.
 - [ ] **[Agent: OpenAI-compatible / Hermes]** — OpenAI protocol runner for
   Ollama, vLLM, LM Studio, Hermes, and hosted compatible endpoints.
 - [ ] **[Agent: Gemini API]** — Gemini runner with function calling,
@@ -1435,12 +1435,12 @@ advisory.
 
 ## 8. SPEC Alignment Decisions
 
-> Resolved design decisions from comparing this PRD against the original OpenAI Symphony SPEC.
+> Resolved design decisions from comparing this PRD against the original OpenAI Jazzband SPEC.
 > Guiding principle: **isolation over efficiency** — no code contamination between concurrent agents.
 
 ### 8.1 Workspace population and multi-agent isolation (SPEC §9.2–9.3)
 
-**Decision: Symphony owns workspace setup. Each dispatch gets an isolated working tree and a unique branch before the agent is launched.**
+**Decision: Jazzband owns workspace setup. Each dispatch gets an isolated working tree and a unique branch before the agent is launched.**
 
 **Cross-doc narrowing.** SPEC §9.1 specifies a per-issue workspace path
 (`<workspace.root>/<sanitized_issue_identifier>`) and §9.2 states that
@@ -1457,12 +1457,12 @@ and log collision risks that the matrix is designed to eliminate.
 
 | Dimension | Threat | Codex | Claude Code | Owner |
 |-----------|--------|-------|-------------|-------|
-| **Working tree (local)** | Agent A overwrites Agent B's files mid-run | OS container per session — walls prevent cross-agent filesystem access | Separate `git worktree` directory per dispatch | Symphony (`workspace.py`) |
-| **Branch (remote)** | Two agents push to `main`; second push fails or force-clobbers | Branch-per-issue checkout (container walls end at network; remote collision risk is identical) | Branch-per-issue checkout | Symphony — derives name from Linear `gitBranchName` |
-| **Process** | Agent kills or starves another agent's subprocess | Container process namespace isolation | OS process group — Symphony tracks PIDs and kills only its own subprocess | Symphony (`orchestrator.py`) |
-| **Credentials** | Agent reads another agent's Linear or GitHub token | Container env isolation | Symphony passes resolved tokens as subprocess env vars; no shared credential files between sessions | Symphony (`workspace.py` + runner env injection) |
-| **Logs** | Output from concurrent agents interleaved in one file | Container stdout isolation | Per-issue log file at `<logs_root>/<issue-id>/<run-id>.log` | Symphony (`log_file.py`) |
-| **Concurrency** | Too many agents starve host resources | `max_workers` cap in WORKFLOW.md | `max_workers` cap in WORKFLOW.md | Symphony (`orchestrator.py`) |
+| **Working tree (local)** | Agent A overwrites Agent B's files mid-run | OS container per session — walls prevent cross-agent filesystem access | Separate `git worktree` directory per dispatch | Jazzband (`workspace.py`) |
+| **Branch (remote)** | Two agents push to `main`; second push fails or force-clobbers | Branch-per-issue checkout (container walls end at network; remote collision risk is identical) | Branch-per-issue checkout | Jazzband — derives name from Linear `gitBranchName` |
+| **Process** | Agent kills or starves another agent's subprocess | Container process namespace isolation | OS process group — Jazzband tracks PIDs and kills only its own subprocess | Jazzband (`orchestrator.py`) |
+| **Credentials** | Agent reads another agent's Linear or GitHub token | Container env isolation | Jazzband passes resolved tokens as subprocess env vars; no shared credential files between sessions | Jazzband (`workspace.py` + runner env injection) |
+| **Logs** | Output from concurrent agents interleaved in one file | Container stdout isolation | Per-issue log file at `<logs_root>/<issue-id>/<run-id>.log` | Jazzband (`log_file.py`) |
+| **Concurrency** | Too many agents starve host resources | `max_workers` cap in WORKFLOW.md | `max_workers` cap in WORKFLOW.md | Jazzband (`orchestrator.py`) |
 | **Network sandbox** | Agent makes unauthorized outbound calls | Codex container enforces network policy (configurable) | **Not sandboxed** — Claude Code has full host network access | Operator responsibility; Docker/cgroup sandboxing is a Phase 6 backlog item |
 
 Key observations:
@@ -1504,7 +1504,7 @@ Additional constraints:
 - The object store is shared — no per-dispatch network transfer.
 - Worktree add/remove failure aborts the dispatch. Because the §8.5 dispatch sequence claims the issue (moves it to `in_progress_state`) **before** workspace setup, a workspace failure at this point occurs after Linear state has already changed — the rollback and abandon rules in §8.5 step 4 apply. Only if workspace setup is attempted before any claim step does the failure leave issue state unchanged and the dispatch retryable on the next tick.
 - Stale worktrees from crashed dispatches must be cleaned up at startup via an application-level sweep using `git worktree remove --force`; `git worktree prune` only removes stale metadata for worktrees whose paths are already gone — directories that survive a crash remain registered and will not be pruned automatically.
-- Agents may not create their own worktrees or branches; Symphony owns the workspace lifecycle.
+- Agents may not create their own worktrees or branches; Jazzband owns the workspace lifecycle.
 
 ### 8.2 Blocker eligibility (SPEC §8.2)
 
@@ -1512,16 +1512,16 @@ Additional constraints:
 
 Before dispatching any issue, the orchestrator checks whether that issue has unresolved blocking relationships in Linear. If blockers exist, the issue is skipped and a structured warning is logged (`blocker_skip` event). The issue remains in its current state and will be reconsidered on the next poll tick.
 
-- No blocker state is written to Linear (Symphony does not modify tracker state for the skip).
+- No blocker state is written to Linear (Jazzband does not modify tracker state for the skip).
 - Unresolvable blocker loops (A blocks B, B blocks A) are treated as permanent skips until operator intervention.
 
 **Rationale:** Dispatching a blocked issue wastes agent compute and can produce PRs that cannot be merged until the upstream work lands.
 
 ### 8.3 Approval gate (SPEC §10.5)
 
-**Decision: Fail-closed — Symphony will not dispatch if no approval state is configured and an approval gate fires.**
+**Decision: Fail-closed — Jazzband will not dispatch if no approval state is configured and an approval gate fires.**
 
-When the WORKFLOW.md `approval_policy` is `on-request` but no `approval_state` is defined, Symphony treats it as a configuration error at startup (`symphony doctor` reports it as a fatal misconfiguration). At runtime, if an agent requests approval and no approval resolution path exists, the run is aborted and the issue is moved to the failure state.
+When the WORKFLOW.md `approval_policy` is `on-request` but no `approval_state` is defined, Jazzband treats it as a configuration error at startup (`jazzband doctor` reports it as a fatal misconfiguration). At runtime, if an agent requests approval and no approval resolution path exists, the run is aborted and the issue is moved to the failure state.
 
 Auto-approve (`never`) remains the Phase 1 default preset behavior. Fail-closed only activates when `approval_policy: on-request` is explicitly set.
 
@@ -1531,7 +1531,7 @@ Auto-approve (`never`) remains the Phase 1 default preset behavior. Fail-closed 
 
 **Decision: On run failure, move the issue to the configured failure state and stop. No auto-retry into the same workspace.**
 
-When a run exits with a non-recoverable error (agent crash, stall timeout exhausted, approval rejected), Symphony:
+When a run exits with a non-recoverable error (agent crash, stall timeout exhausted, approval rejected), Jazzband:
 
 1. Moves the Linear issue to the workflow-defined `failure_state` (e.g., `Cancelled`).
 2. Logs the structured failure event with reason and last turn output.
@@ -1548,11 +1548,11 @@ A persistent retry queue (SPEC §18.2) remains in the Phase 6 backlog. When impl
 
 ### 8.5 Multi-instance claim race prevention (IN-290)
 
-**Decision: Linear state transition is a best-effort claim guard, not an atomic compare-and-set. Symphony moves the ticket to `in_progress_state` before launching the agent — not after, not mid-run. This eliminates the common case (sequential polls from one instance) and shrinks the race window for multi-instance deployments, but does not provide exclusive-claim guarantees. Phase 2B adds a claim-comment tie-breaker for strict multi-instance safety.**
+**Decision: Linear state transition is a best-effort claim guard, not an atomic compare-and-set. Jazzband moves the ticket to `in_progress_state` before launching the agent — not after, not mid-run. This eliminates the common case (sequential polls from one instance) and shrinks the race window for multi-instance deployments, but does not provide exclusive-claim guarantees. Phase 2B adds a claim-comment tie-breaker for strict multi-instance safety.**
 
 #### The problem
 
-Multiple Symphony instances (or multiple poll workers within one instance) can see the same ticket in a dispatchable state at nearly the same time. Without any claim step, both will dispatch the same issue, producing:
+Multiple Jazzband instances (or multiple poll workers within one instance) can see the same ticket in a dispatchable state at nearly the same time. Without any claim step, both will dispatch the same issue, producing:
 
 - Duplicate agent sessions running against the same ticket
 - Duplicate PRs opened and potentially merged
@@ -1562,7 +1562,7 @@ An in-memory lock only protects within one process. Linear must be the coordinat
 
 #### Important: Linear `updateIssue` is not a compare-and-set
 
-Linear's `updateIssue` mutation is a plain update with no conditional semantics. If two Symphony instances poll the same `Todo` issue before either update propagates, both can call `updateIssue → In Progress` and both will receive success. Linear has no built-in mechanic to make the second caller fail.
+Linear's `updateIssue` mutation is a plain update with no conditional semantics. If two Jazzband instances poll the same `Todo` issue before either update propagates, both can call `updateIssue → In Progress` and both will receive success. Linear has no built-in mechanic to make the second caller fail.
 
 The state-transition claim therefore works as follows:
 
@@ -1580,36 +1580,36 @@ e.g. "Todo"                "In Progress"            "In Review" / "Cancelled"
 **Dispatch sequence (before agent launch):**
 
 1. Orchestrator polls Linear for issues in `queued_states` (e.g., `Todo`).
-2. Before launching any agent, Symphony immediately moves the issue to `in_progress_state` (e.g., `In Progress`) via `linear_graphql`.
-3. After the state move, Symphony re-fetches the issue to verify the current state is `in_progress_state`. If verification fails (e.g., the issue was moved again by a concurrent instance), Symphony aborts the dispatch and does not launch the agent.
-4. **If workspace setup fails after the claim** (e.g., `git worktree add` errors), Symphony must determine whether it is safe to roll back before touching Linear state:
+2. Before launching any agent, Jazzband immediately moves the issue to `in_progress_state` (e.g., `In Progress`) via `linear_graphql`.
+3. After the state move, Jazzband re-fetches the issue to verify the current state is `in_progress_state`. If verification fails (e.g., the issue was moved again by a concurrent instance), Jazzband aborts the dispatch and does not launch the agent.
+4. **If workspace setup fails after the claim** (e.g., `git worktree add` errors), Jazzband must determine whether it is safe to roll back before touching Linear state:
    - **If the re-fetch in step 3 confirmed this instance is the verified owner** (i.e., single-instance deployment, or claim-comment tie-breaker confirmed first-place): move the issue back to `queued_states[0]` and log a `claim_rollback` event.
    - **If ownership cannot be confirmed** (multi-instance deployment without claim-comment tie-breaker): do NOT roll back — another instance may have already launched an agent against this ticket. Log a `claim_abandoned` event and alert the operator to inspect and manually re-queue if needed.
    Never roll back unconditionally: if a second instance claims the ticket due to the non-CAS race and then hits a setup failure, an unconditional rollback would re-queue a ticket that the first (winning) instance is actively running.
-5. Agent runs. On completion, agent (or Symphony on handoff) moves to `handoff_state`.
-6. On failure, Symphony moves to `failure_state` (per §8.4). Not back to `queued_states` — operator re-queues manually.
+5. Agent runs. On completion, agent (or Jazzband on handoff) moves to `handoff_state`.
+6. On failure, Jazzband moves to `failure_state` (per §8.4). Not back to `queued_states` — operator re-queues manually.
 
-Issues already in `In Progress` when Symphony polls are skipped — they are either claimed by another instance or being worked on by a human.
+Issues already in `In Progress` when Jazzband polls are skipped — they are either claimed by another instance or being worked on by a human.
 
 **WORKFLOW.md config:**
 
 ```yaml
 states:
-  queued:      ["Todo"]           # Symphony polls these; tickets here are eligible for dispatch
-  in_progress: "In Progress"      # Symphony moves here immediately on claim (before agent starts)
+  queued:      ["Todo"]           # Jazzband polls these; tickets here are eligible for dispatch
+  in_progress: "In Progress"      # Jazzband moves here immediately on claim (before agent starts)
   handoff:     "In Review"        # Agent moves here when work is done
   terminal:    ["Done", "Cancelled"]
-  failure:     "Cancelled"        # Symphony moves here on non-recoverable failure
+  failure:     "Cancelled"        # Jazzband moves here on non-recoverable failure
 ```
 
 `in_progress` replaces the old `active` catch-all.
 
 #### Phase 2B: claim-comment tie-breaker (strict multi-instance safety)
 
-For teams running multiple Symphony instances with short poll intervals, a claim-comment tie-breaker can eliminate the remaining race:
+For teams running multiple Jazzband instances with short poll intervals, a claim-comment tie-breaker can eliminate the remaining race:
 
 1. Before the state transition, fetch the issue's state-transition history and find the `createdAt` timestamp of the `IssueHistory` entry where the issue was last moved into a `queued_states` value (call it `queued_since`). This is a stable, per-requeue marker: it only changes when an operator explicitly moves the ticket back to a queued state, not when other fields are edited. Do **not** use `issue.updatedAt` — that timestamp changes on any field edit and will diverge between two instances that read the issue at slightly different times, causing each to filter out the other's claim comment and both believe they won.
-2. Post a claim comment: `{"claim": "symphony", "instance_id": "<host>:<pid>", "run_id": "<run-id>", "queued_since": "<iso8601>"}`.
+2. Post a claim comment: `{"claim": "jazzband", "instance_id": "<host>:<pid>", "run_id": "<run-id>", "queued_since": "<iso8601>"}`.
 3. Call `updateIssue → in_progress_state`.
 4. Re-fetch the issue's comments ordered by `createdAt`. Consider only claim comments whose `queued_since` matches the value read in step 1 — this scopes the tie-breaker to the current dispatch attempt and excludes stale comments from prior crashed or aborted instances. If the earliest matching claim comment's `instance_id` does not match this instance, abort and do not launch.
 
@@ -1619,9 +1619,9 @@ This reduces the race to the Linear write ordering of two near-simultaneous comm
 
 #### Multi-instance observability
 
-Symphony logs a `claim_succeeded` event when it successfully claims and verifies a ticket, with fields: `issue_id`, `instance_id` (daemon hostname + PID), `claimed_at`. On workspace failure, it logs a `claim_rollback` event with `reason`. This makes duplicate dispatch visible in logs without requiring a shared database.
+Jazzband logs a `claim_succeeded` event when it successfully claims and verifies a ticket, with fields: `issue_id`, `instance_id` (daemon hostname + PID), `claimed_at`. On workspace failure, it logs a `claim_rollback` event with `reason`. This makes duplicate dispatch visible in logs without requiring a shared database.
 
-#### `symphony doctor` check
+#### `jazzband doctor` check
 
 Doctor warns if `states.in_progress` is not configured in WORKFLOW.md, since omitting it disables the claim guard entirely.
 
@@ -1629,9 +1629,9 @@ Doctor warns if `states.in_progress` is not configured in WORKFLOW.md, since omi
 
 ## 9. Open Questions
 
-1. **Linear OAuth app registration:** Should Symphony ship with a shared OAuth client_id (users install the Symphony Linear app from Linear's marketplace), or does each team register their own Linear application with their own client_id/secret?
+1. **Linear OAuth app registration:** Should Jazzband ship with a shared OAuth client_id (users install the Jazzband Linear app from Linear's marketplace), or does each team register their own Linear application with their own client_id/secret?
 2. **Hermes deployment:** Is the target Ollama on localhost, a remote vLLM cluster, or a hosted inference endpoint?
-2. **GPT-Image-1 workflow:** Should Symphony auto-commit generated images and open a PR, or just save to workspace and leave the commit to a coding agent in a subsequent issue?
+2. **GPT-Image-1 workflow:** Should Jazzband auto-commit generated images and open a PR, or just save to workspace and leave the commit to a coding agent in a subsequent issue?
 3. **Runner selection:** Should WORKFLOW.md support a single `runner` per workflow, or a per-label/per-state dispatch map (e.g., `In Progress → claude_code`, `Merging → codex`)?
 4. **Tracker scope:** Linear-only for the initial Python implementation, or should GitHub Issues be co-designed from the start to avoid Linear-specific leakage in the adapter interface?
 5. **Desktop app distribution:** Direct `.dmg` download from GitHub Releases, or target the Mac App Store (requires sandboxing and notarization review)?

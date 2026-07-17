@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from symphony.config import HooksConfig, WorkspaceConfig
-from symphony.tracker.models import Issue
-from symphony.workspace import (
+from jazzband.config import HooksConfig, WorkspaceConfig
+from jazzband.tracker.models import Issue
+from jazzband.workspace import (
     BARE_REPO_DIRNAME,
     WorkspaceError,
     WorkspaceHookError,
@@ -171,7 +171,7 @@ class WorkspaceManagerTests(unittest.IsolatedAsyncioTestCase):
 
             workspace = await manager.prepare_for_run(make_issue("IN-42"), run_id="r1")
 
-            with self.assertLogs("symphony.workspace", level="WARNING") as logs:
+            with self.assertLogs("jazzband.workspace", level="WARNING") as logs:
                 self.assertIsNone(await manager.after_run(workspace))
                 self.assertTrue(await manager.cleanup_for_run(workspace))
 
@@ -308,15 +308,15 @@ class WorkspaceHookEnvironmentTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = WorkspaceManager(
                 WorkspaceConfig(Path(temp_dir) / "workspaces"),
-                HooksConfig(before_run="printf \"$SYMPHONY_MARKER\" > marker.txt"),
-                environ={"SYMPHONY_MARKER": "from-hook"},
+                HooksConfig(before_run="printf \"$JAZZBAND_MARKER\" > marker.txt"),
+                environ={"JAZZBAND_MARKER": "from-hook"},
             )
 
             workspace = await manager.prepare_for_run(make_issue("IN-42"), run_id="r1")
             await manager.before_run(workspace)
 
             self.assertEqual("from-hook", (workspace.path / "marker.txt").read_text(encoding="utf-8"))
-            self.assertNotIn("SYMPHONY_MARKER", os.environ)
+            self.assertNotIn("JAZZBAND_MARKER", os.environ)
 
 
 @unittest.skipUnless(_git_available(), "git is required for worktree mode tests")

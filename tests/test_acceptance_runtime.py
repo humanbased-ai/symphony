@@ -1,6 +1,6 @@
 """Unit tests for the acceptance gate runtime glue.
 
-The decision core in ``symphony.acceptance`` is exercised in
+The decision core in ``jazzband.acceptance`` is exercised in
 ``test_acceptance.py``; these tests cover the I/O-isolated wrapper —
 verdict parsing, prompt/comment rendering, diff path extraction, and the
 ``maybe_run_acceptance`` orchestrator that ties convergence + judge dispatch
@@ -13,14 +13,14 @@ import asyncio
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from symphony.acceptance import (
+from jazzband.acceptance import (
     AcceptanceCheck,
     AcceptanceVerdict,
     CrosscheckVerdict,
     ReviewVerdict,
 )
-from symphony.acceptance_runtime import (
-    SYMPHONY_BOT_MARKER,
+from jazzband.acceptance_runtime import (
+    JAZZBAND_BOT_MARKER,
     ClaudeCodeJudgeRunner,
     ConvergenceSnapshot,
     JUDGE_DIFF_TRUNCATE,
@@ -32,8 +32,8 @@ from symphony.acceptance_runtime import (
     render_judge_user_prompt,
     render_verdict_comment,
 )
-from symphony.config import AcceptanceConfig
-from symphony.tracker.models import Issue
+from jazzband.config import AcceptanceConfig
+from jazzband.tracker.models import Issue
 
 
 UTC = timezone.utc
@@ -319,7 +319,7 @@ class RenderVerdictCommentTests(unittest.TestCase):
 
     def test_includes_bot_marker_so_poller_skips_own_comment(self):
         body = render_verdict_comment(self._verdict())
-        self.assertTrue(body.startswith(SYMPHONY_BOT_MARKER))
+        self.assertTrue(body.startswith(JAZZBAND_BOT_MARKER))
 
     def test_shows_overall_in_uppercase(self):
         body = render_verdict_comment(self._verdict(overall="uncertain"))
@@ -760,7 +760,7 @@ class MaybeRunAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         # Comment body carries the bot marker and escalates to a human because
         # ``auto_merge`` is False by default — no merge was attempted.
         _, body = gh.posted_comments[0]
-        self.assertTrue(body.startswith(SYMPHONY_BOT_MARKER))
+        self.assertTrue(body.startswith(JAZZBAND_BOT_MARKER))
         self.assertIn("PASS", body)
         self.assertIn("not auto-merge", body)
         self.assertEqual(gh.merge_calls, [])
@@ -991,7 +991,7 @@ class AutoMergeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_github_rejects_merge_falls_back_to_escalation(self):
         """GitHub branch protection / required reviews / stale head sha can
-        all reject the merge. Symphony surfaces the rejection on the PR so
+        all reject the merge. Jazzband surfaces the rejection on the PR so
         a human knows the gate tried and where to look."""
         gh, verdict, _ = await self._run(auto_merge=True, merge_succeeds=False)
         assert verdict is not None
