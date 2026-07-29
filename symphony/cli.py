@@ -1159,7 +1159,7 @@ def setup_environment_checks(
         )
     )
 
-    runner = getattr(args, "runner", DEFAULT_RUNNER)
+    runner = getattr(args, "runner", DEFAULT_RUNNER) or DEFAULT_RUNNER
     if runner == "claude_code":
         command_ok, command_detail = _check_command("claude")
         checks.append((command_ok, "claude command", command_detail))
