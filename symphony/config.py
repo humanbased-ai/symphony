@@ -253,8 +253,10 @@ class ReviewConfig:
     def from_mapping(cls, config: Mapping[str, Any]) -> "ReviewConfig":
         review = _mapping(config.get("review"), "review_config_must_be_map")
         raw_enabled = review.get("enabled")
+        if raw_enabled is not None and not isinstance(raw_enabled, bool):
+            raise ConfigError("review_enabled_must_be_boolean")
         return cls(
-            enabled=bool(raw_enabled) if raw_enabled is not None else False,
+            enabled=raw_enabled or False,
             strategy=_string_value(review.get("strategy")) or "skip",
             reviewer=_string_value(review.get("reviewer")),
         )
