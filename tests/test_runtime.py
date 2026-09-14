@@ -4,13 +4,15 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 
-from symphony.agents.base import AgentEvent, AgentEventType, AgentSession, TaskResult, TokenUsage, TurnResult
-from symphony.config import WorkflowConfig
-from symphony.http_server import build_state_snapshot
-from symphony.orchestrator import RetryEntry
-from symphony.runtime import SymphonyRuntime
-from symphony.tracker.models import Issue
+from jazzband.agents.base import AgentEvent, AgentEventType, AgentSession, TaskResult, TokenUsage, TurnResult
+from jazzband.config import WorkflowConfig
+from jazzband.feedback import ClassifyError, FeedbackSignal
+from jazzband.http_server import build_state_snapshot
+from jazzband.orchestrator import RetryEntry
+from jazzband.runtime import JazzbandRuntime
+from jazzband.tracker.models import Issue
 
 
 def make_config(workspace_root: Path) -> WorkflowConfig:
@@ -109,7 +111,7 @@ class FakeSessionRunner:
         self.prompts: list[str] = []
         self.sessions_stopped: list[str] = []
         self.snapshots_during_turn: list[dict] = []
-        self.runtime: SymphonyRuntime | None = None
+        self.runtime: JazzbandRuntime | None = None
 
     async def start_session(self, workspace: Path) -> AgentSession:
         return AgentSession(id="session-1", workspace=workspace)
@@ -174,7 +176,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = issue()
             runner = FakeSessionRunner()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }} attempt={{ attempt }}",
                 tracker=FakeTracker([target]),
@@ -205,7 +207,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = issue()
             runner = FakeSessionRunner(success=False, exit_reason="turn_failed")
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=FakeTracker([target]),
@@ -229,7 +231,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             target = issue()
             workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
             runner = RaisingSessionRunner()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=FakeTracker([target]),
@@ -250,7 +252,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = issue()
             clock = ManualClock(50_000)
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Retry attempt {{ attempt }} for {{ issue.identifier }}",
                 tracker=FakeTracker([target]),
@@ -275,7 +277,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retry_missing_from_candidate_poll_is_released(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work",
                 tracker=FakeTracker([]),
@@ -302,7 +304,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             terminal_issue = issue(state="Done")
             workspace_manager = FakeWorkspaceManager(Path(temp_dir) / "workspaces")
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work",
                 tracker=FakeTracker([], states=[terminal_issue]),
@@ -330,7 +332,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = issue(identifier="IN-201")
             runner = FakeAPIRunner()
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Generate {{ issue.identifier }}",
                 tracker=FakeTracker([target]),
@@ -350,7 +352,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_record_startup_issues_skips_preexisting_issues_on_first_tick(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             pre_existing = issue("pre-1", "IN-300")
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=FakeTracker([pre_existing]),
@@ -373,7 +375,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
             # Startup: issue is active.
             tracker = FakeTracker([pre_existing])
-            runtime = SymphonyRuntime(
+            runtime = JazzbandRuntime(
                 config=make_config(Path(temp_dir) / "workspaces"),
                 prompt_template="Work on {{ issue.identifier }}",
                 tracker=tracker,
@@ -396,6 +398,348 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             tracker.candidates = [pre_existing]
             result3 = await runtime.run_tick()
             self.assertEqual(("IN-301",), result3.dispatched)
+
+    async def test_new_issue_not_dispatched_due_to_full_slots_retried_next_tick(self):
+        """Issues that appear new but cannot be dispatched (slots full) stay eligible."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            issue_a = issue("id-a", "IN-400", state="Todo", priority=1)
+            issue_b = issue("id-b", "IN-401", state="Todo", priority=2)
+            issue_c = issue("id-c", "IN-402", state="Todo", priority=3)
+            clock = ManualClock(1_000)
+            tracker = FakeTracker([issue_a, issue_b, issue_c])
+            # max_concurrent_agents=2, so only 2 of the 3 new issues can be dispatched
+            config = WorkflowConfig.from_mapping(
+                {
+                    "tracker": {
+                        "kind": "linear",
+                        "active_states": ["Todo"],
+                        "terminal_states": ["Done"],
+                    },
+                    "workspace": {"root": str(Path(temp_dir) / "workspaces")},
+                    "agent": {"max_concurrent_agents": 2, "max_retry_backoff_ms": 300_000},
+                    "polling": {"interval_ms": 5_000},
+                }
+            )
+            runtime = JazzbandRuntime(
+                config=config,
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=clock,
+            )
+
+            # Tick 1: all 3 appear as new; only 2 slots available.
+            result1 = await runtime.run_tick()
+            self.assertEqual(2, len(result1.dispatched))
+            self.assertIn("IN-400", result1.dispatched)
+            self.assertIn("IN-401", result1.dispatched)
+
+            # Tick 2: IN-402 was not dispatched last tick — must be eligible now.
+            result2 = await runtime.run_tick()
+            self.assertIn("IN-402", result2.dispatched)
+
+    async def test_new_issue_dispatched_on_same_tick_not_re_dispatched_next_tick(self):
+        """Successfully dispatched new issues are not re-dispatched on the following tick."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            iss = issue("id-x", "IN-403", state="Todo")
+            tracker = FakeTracker([iss])
+            runtime = JazzbandRuntime(
+                config=make_config(Path(temp_dir) / "workspaces"),
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+                runner=FakeSessionRunner(),
+                clock_ms=ManualClock(1_000),
+            )
+
+            result1 = await runtime.run_tick()
+            self.assertIn("IN-403", result1.dispatched)
+
+            # Tick 2: same issue still in candidates but already dispatched — must not repeat.
+            result2 = await runtime.run_tick()
+            self.assertNotIn("IN-403", result2.dispatched)
+
+
+class FeedbackTracker(FakeTracker):
+    """Extends FakeTracker with comment/state-transition stubs for feedback gate tests."""
+
+    def __init__(
+        self,
+        candidates: list[Issue],
+        *,
+        review_issues: list[Issue] | None = None,
+        comment_ids: dict[str, list[str]] | None = None,
+        comments: dict[str, list[str]] | None = None,
+    ) -> None:
+        super().__init__(candidates)
+        self._review_issues: list[Issue] = review_issues or []
+        # comment_ids[issue_id] and comments[issue_id] are parallel lists (same length)
+        self._comment_ids: dict[str, list[str]] = comment_ids or {}
+        self._comments: dict[str, list[str]] = comments or {}
+        self.state_transitions: list[tuple[str, str]] = []
+
+    def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
+        return list(self._review_issues)
+
+    def fetch_issue_comments_with_ids(self, issue_id: str) -> list[tuple[str, str]]:
+        ids = self._comment_ids.get(issue_id, [])
+        texts = self._comments.get(issue_id, [])
+        return list(zip(ids, texts))
+
+    def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
+        self.state_transitions.append((issue_id, state_name))
+        return True
+
+
+class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
+    def _make_runtime(self, tracker, temp_dir: str) -> JazzbandRuntime:
+        return JazzbandRuntime(
+            config=make_config(Path(temp_dir) / "workspaces"),
+            prompt_template="Work on {{ issue.identifier }}",
+            tracker=tracker,
+            workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
+            runner=FakeSessionRunner(),
+        )
+
+    async def test_approve_signal_transitions_to_done(self):
+        review_issue = issue("r-1", "IN-500", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-1": ["c-1"]},
+            comments={"r-1": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                await runtime.poll_feedback()
+
+        self.assertEqual([("r-1", "Done")], tracker.state_transitions)
+
+    async def test_change_request_signal_transitions_to_first_active_state(self):
+        review_issue = issue("r-2", "IN-501", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-2": ["c-1"]},
+            comments={"r-2": ["Bob: Please fix the naming"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
+                await runtime.poll_feedback()
+
+        self.assertEqual([("r-2", "Todo")], tracker.state_transitions)
+
+    async def test_close_signal_transitions_to_cancelled(self):
+        review_issue = issue("r-3", "IN-502", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-3": ["c-1"]},
+            comments={"r-3": ["Carol: closed, not needed"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.CLOSE):
+                await runtime.poll_feedback()
+
+        self.assertEqual([("r-3", "Canceled")], tracker.state_transitions)
+
+    async def test_no_transition_when_no_new_comments(self):
+        review_issue = issue("r-4", "IN-503", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-4": ["c-1"]},
+            comments={"r-4": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                # First poll: marks c-1 as seen.
+                await runtime.poll_feedback()
+                tracker.state_transitions.clear()
+                # Second poll: same comment IDs → no new comments → no transition.
+                await runtime.poll_feedback()
+
+        self.assertEqual([], tracker.state_transitions)
+
+    async def test_no_transition_when_no_signal_in_comments(self):
+        review_issue = issue("r-5", "IN-504", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-5": ["c-1"]},
+            comments={"r-5": ["Dave: looks interesting"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch("jazzband.runtime.classify_feedback", return_value=None):
+                await runtime.poll_feedback()
+
+        self.assertEqual([], tracker.state_transitions)
+
+    async def test_old_signal_not_refired_on_new_non_signal_comment(self):
+        """Re-open scenario: old LGTM must not re-fire when a new non-signal comment arrives."""
+        review_issue = issue("r-x", "IN-510", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-x": ["c-1"]},
+            comments={"r-x": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                # First poll: c-1 (LGTM) fires → Done transition.
+                await runtime.poll_feedback()
+            tracker.state_transitions.clear()
+            # Simulate re-open: a new non-signal comment arrives (c-2).
+            tracker._comment_ids["r-x"] = ["c-1", "c-2"]
+            tracker._comments["r-x"] = ["Alice: LGTM", "Bob: re-opened for discussion"]
+            with patch("jazzband.runtime.classify_feedback", return_value=None):
+                # Second poll: only c-2 is new; it carries no signal → no transition.
+                await runtime.poll_feedback()
+
+        self.assertEqual([], tracker.state_transitions)
+
+    async def test_signal_retried_when_state_update_fails(self):
+        """If update_issue_state_by_name returns False, the signal must be retried next poll."""
+        review_issue = issue("r-f", "IN-520", state="In Review")
+
+        class FailThenSucceedTracker(FeedbackTracker):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._call_count = 0
+
+            def update_issue_state_by_name(self, issue_id: str, state_name: str) -> bool:
+                self._call_count += 1
+                if self._call_count == 1:
+                    return False  # first attempt fails
+                self.state_transitions.append((issue_id, state_name))
+                return True
+
+        tracker = FailThenSucceedTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-f": ["c-1"]},
+            comments={"r-f": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                await runtime.poll_feedback()  # first poll: update fails, not marked seen
+                await runtime.poll_feedback()  # second poll: retries and succeeds
+
+        self.assertEqual([("r-f", "Done")], tracker.state_transitions)
+
+    async def test_classify_error_not_marked_seen_retried_next_poll(self):
+        """ClassifyError (API failure) must leave _feedback_seen unset so the signal is retried."""
+        review_issue = issue("r-e", "IN-530", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-e": ["c-1"]},
+            comments={"r-e": ["Alice: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            with patch("jazzband.runtime.classify_feedback", side_effect=ClassifyError("timeout")):
+                await runtime.poll_feedback()  # fails: _feedback_seen NOT updated
+            self.assertEqual([], tracker.state_transitions)
+            self.assertNotIn("r-e", runtime._feedback_seen)
+
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                await runtime.poll_feedback()  # retries and succeeds
+
+        self.assertEqual([("r-e", "Done")], tracker.state_transitions)
+
+    async def test_no_review_issues_does_nothing(self):
+        tracker = FeedbackTracker([], review_issues=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            await runtime.poll_feedback()
+
+        self.assertEqual([], tracker.state_transitions)
+
+    async def test_poll_feedback_called_during_run_tick(self):
+        """poll_feedback is invoked as part of run_tick."""
+        review_issue = issue("r-6", "IN-505", state="In Review")
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-6": ["c-1"]},
+            comments={"r-6": ["Eve: LGTM"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = JazzbandRuntime(
+                config=make_config(Path(tmp) / "workspaces"),
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(tmp) / "workspaces"),
+                runner=FakeSessionRunner(),
+            )
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
+                await runtime.run_tick()
+
+        self.assertEqual([("r-6", "Done")], tracker.state_transitions)
+
+    async def test_change_request_with_existing_pr_routes_to_pr_feedback_agent(self):
+        """CHANGE_REQUEST on an issue that already has a PR must push to that PR, not open a new one."""
+        review_issue = Issue(
+            id="r-cr1", identifier="IN-510", title="IN-510 title",
+            description="test", priority=1, state="In Review",
+            branch_name="haol/in-510-branch",
+            url="https://linear.app/example/issue/IN-510",
+        )
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-cr1": ["c-1"]},
+            comments={"r-cr1": ["Please add more tests"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeSessionRunner()
+            runtime = JazzbandRuntime(
+                config=make_config(Path(tmp) / "workspaces"),
+                prompt_template="Work on {{ issue.identifier }}",
+                tracker=tracker,
+                workspace_manager=FakeWorkspaceManager(Path(tmp) / "workspaces"),
+                runner=runner,
+            )
+            runtime._branch_pr_numbers["haol/in-510-branch"] = 42
+            runtime._feedback_seen["r-cr1"] = frozenset()  # pre-seed: issue known, no prior comments
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
+                await runtime.poll_feedback()
+
+        # Issue state must NOT change — it stays "In Review" on the existing PR
+        self.assertEqual([], tracker.state_transitions)
+        # PR feedback agent must have been invoked
+        self.assertTrue(len(runner.prompts) > 0)
+
+    async def test_change_request_without_branch_falls_back_to_state_transition(self):
+        """CHANGE_REQUEST on an issue with no branch yet must fall back to transitioning to Todo."""
+        review_issue = Issue(
+            id="r-cr2", identifier="IN-511", title="IN-511 title",
+            description="test", priority=1, state="In Review",
+            branch_name=None,
+            url="https://linear.app/example/issue/IN-511",
+        )
+        tracker = FeedbackTracker(
+            [],
+            review_issues=[review_issue],
+            comment_ids={"r-cr2": ["c-1"]},
+            comments={"r-cr2": ["Please add more tests"]},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            runtime._feedback_seen["r-cr2"] = frozenset()  # pre-seed: issue known, no prior comments
+            with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.CHANGE_REQUEST):
+                await runtime.poll_feedback()
+
+        self.assertEqual([("r-cr2", "Todo")], tracker.state_transitions)
 
 
 if __name__ == "__main__":

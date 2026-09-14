@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from symphony.auth import MissingLinearTokenError, TokenStore, save_local_linear_token
-from symphony.config import ConfigError, TrackerConfig, WorkflowConfig
-from symphony.workflow import WorkflowError, WorkflowReloader, parse_workflow, render_prompt, watch_workflow
+from jazzband.auth import MissingLinearTokenError, TokenStore, save_local_linear_token
+from jazzband.config import ConfigError, TrackerConfig, WorkflowConfig
+from jazzband.workflow import WorkflowError, WorkflowReloader, parse_workflow, render_prompt, watch_workflow
 
 
 class WorkflowConfigTests(unittest.TestCase):
@@ -15,14 +15,14 @@ class WorkflowConfigTests(unittest.TestCase):
 tracker:
   kind: linear
   api_key: $WORKFLOW_LINEAR_KEY
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 ---
 
 You are working on {{ issue.identifier }}.
 """
         )
 
-        self.assertEqual("symphony-ai-agent-orchestration", workflow.config["tracker"]["project_slug"])
+        self.assertEqual("jazzband-ai-agent-orchestration", workflow.config["tracker"]["project_slug"])
         self.assertEqual("You are working on {{ issue.identifier }}.", workflow.prompt_template)
 
     def test_non_map_front_matter_is_rejected(self):
@@ -76,7 +76,7 @@ You are working on {{ issue.identifier }}.
                 {
                     "tracker": {
                         "kind": "linear",
-                        "project_slug": "symphony-ai-agent-orchestration",
+                        "project_slug": "jazzband-ai-agent-orchestration",
                     },
                     "workspace": {"root": "tmp/workspaces"},
                     "agent": {
@@ -86,7 +86,7 @@ You are working on {{ issue.identifier }}.
                             "In Progress": "3",
                         },
                     },
-                    "codex": {"command": "codex app-server --profile symphony"},
+                    "codex": {"command": "codex app-server --profile jazzband"},
                 },
                 workflow_path=workflow_path,
             )
@@ -96,7 +96,7 @@ You are working on {{ issue.identifier }}.
             self.assertEqual(60_000, config.hooks.timeout_ms)
             self.assertEqual(4, config.agent.max_concurrent_agents)
             self.assertEqual({"todo": 2, "in progress": 3}, dict(config.agent.max_concurrent_agents_by_state))
-            self.assertEqual("codex app-server --profile symphony", config.codex.command)
+            self.assertEqual("codex app-server --profile jazzband", config.codex.command)
 
     def test_agent_state_limits_are_immutable(self):
         config = WorkflowConfig.from_mapping(
@@ -126,10 +126,10 @@ You are working on {{ issue.identifier }}.
                     "workspace": {"root": "$WORKSPACE_ROOT"},
                 },
                 workflow_path=Path(temp_dir) / "WORKFLOW.md",
-                environ={"WORKSPACE_ROOT": "~/symphony-integration"},
+                environ={"WORKSPACE_ROOT": "~/jazzband-integration"},
             )
 
-            self.assertEqual(Path.home() / "symphony-integration", config.workspace.root)
+            self.assertEqual(Path.home() / "jazzband-integration", config.workspace.root)
 
     def test_missing_workspace_root_env_reference_names_variable(self):
         with self.assertRaisesRegex(ConfigError, "env_var_not_set:WORKSPACE_ROOT"):
@@ -179,7 +179,7 @@ You are working on {{ issue.identifier }}.
 
             first = reloader.load_initial()
             workflow_path.write_text("---\ntracker: [broken\n---\nSecond\n", encoding="utf-8")
-            with self.assertLogs("symphony.workflow", level="ERROR"):
+            with self.assertLogs("jazzband.workflow", level="ERROR"):
                 second = reloader.reload()
 
             self.assertIs(first, second)
@@ -206,7 +206,7 @@ You are working on {{ issue.identifier }}.
                 encoding="utf-8",
             )
 
-            with self.assertLogs("symphony.workflow", level="ERROR") as logs:
+            with self.assertLogs("jazzband.workflow", level="ERROR") as logs:
                 second = reloader.reload_effective()
 
             self.assertIs(first, second)

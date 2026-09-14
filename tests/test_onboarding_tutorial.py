@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from symphony.onboarding_tutorial import (
+from jazzband.onboarding_tutorial import (
     INIT_TUTORIAL_ID,
     INIT_TUTORIAL_VERSION,
     default_tutorial_history_path,
@@ -18,9 +18,9 @@ from symphony.onboarding_tutorial import (
 
 class OnboardingTutorialTests(unittest.TestCase):
     def test_default_history_path_honors_xdg_config_home(self):
-        path = default_tutorial_history_path({"XDG_CONFIG_HOME": "/tmp/symphony-config"})
+        path = default_tutorial_history_path({"XDG_CONFIG_HOME": "/tmp/jazzband-config"})
 
-        self.assertEqual(Path("/tmp/symphony-config/symphony/tutorials.json"), path)
+        self.assertEqual(Path("/tmp/jazzband-config/jazzband/tutorials.json"), path)
 
     def test_print_init_tutorial_explains_purpose_and_next_steps(self):
         lines: list[str] = []
@@ -28,16 +28,16 @@ class OnboardingTutorialTests(unittest.TestCase):
         text = "\n".join(lines)
 
         self.assertTrue(completed)
-        self.assertIn("[1/6] What is Symphony?", text)
+        self.assertIn("[1/6] What is Jazzband?", text)
         self.assertIn("[5/6] What should I expect next?", text)
         self.assertIn("[6/6] One project per WORKFLOW.md", text)
         self.assertIn("WORKFLOW.md", text)
         self.assertIn("3-5 Codex sessions", text)
         self.assertIn("500% in the first three weeks", text)
-        self.assertIn("https://openai.com/index/open-source-codex-orchestration-symphony/", text)
-        self.assertIn("symphony doctor WORKFLOW.md", text)
-        self.assertIn("symphony run WORKFLOW.md --once", text)
-        self.assertIn("pkill -f 'symphony run'", text)
+        self.assertIn("https://openai.com/index/open-source-codex-orchestration-jazzband/", text)
+        self.assertIn("jazzband doctor WORKFLOW.md", text)
+        self.assertIn("jazzband run WORKFLOW.md --once", text)
+        self.assertIn("pkill -f 'jazzband run'", text)
 
     def test_print_init_tutorial_supports_simplified_chinese(self):
         lines: list[str] = []
@@ -45,16 +45,16 @@ class OnboardingTutorialTests(unittest.TestCase):
         text = "\n".join(lines)
 
         self.assertTrue(completed)
-        self.assertIn("欢迎使用 Symphony", text)
-        self.assertIn("[1/6] Symphony 是什么?", text)
+        self.assertIn("欢迎使用 Jazzband", text)
+        self.assertIn("[1/6] Jazzband 是什么?", text)
         self.assertIn("[6/6] 一个 WORKFLOW.md 对应一个项目", text)
         self.assertIn("WORKFLOW.md", text)
         self.assertIn("3-5 个 Codex session", text)
         self.assertIn("提升了 500%", text)
-        self.assertIn("https://openai.com/index/open-source-codex-orchestration-symphony/", text)
-        self.assertIn("symphony doctor WORKFLOW.md", text)
-        self.assertIn("symphony run WORKFLOW.md --once", text)
-        self.assertIn("pkill -f 'symphony run'", text)
+        self.assertIn("https://openai.com/index/open-source-codex-orchestration-jazzband/", text)
+        self.assertIn("jazzband doctor WORKFLOW.md", text)
+        self.assertIn("jazzband run WORKFLOW.md --once", text)
+        self.assertIn("pkill -f 'jazzband run'", text)
 
     def test_print_init_tutorial_skip_does_not_complete(self):
         lines: list[str] = []
@@ -164,7 +164,7 @@ class OnboardingTutorialTests(unittest.TestCase):
 
             self.assertTrue(first)
             self.assertFalse(second)
-            self.assertIn("Welcome to Symphony", "\n".join(first_lines))
+            self.assertIn("Welcome to Jazzband", "\n".join(first_lines))
             self.assertEqual([], second_lines)
 
     def test_run_init_tutorial_once_does_not_record_skipped_tutorial(self):

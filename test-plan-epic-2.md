@@ -26,7 +26,7 @@ already merged and the contracts are covered by automated tests.
 ## Prerequisites
 
 - Current branch: `feat/in-171-workspace-lifecycle`
-- PR: https://github.com/codatta/symphony/pull/7
+- PR: https://github.com/humanbased-ai/jazzband/pull/7
 - Python dependencies synced with `uv`
 - Linear auth available through `LINEAR_API_KEY`
 - Codex CLI authenticated and able to run `codex app-server`
@@ -61,7 +61,7 @@ Run:
 
 ```bash
 uv run python -m unittest discover -s tests -p 'test_*.py'
-uv run symphony --help
+uv run jazzband --help
 git diff --check
 ```
 
@@ -82,7 +82,7 @@ Evidence to record:
 Run against the workflow file intended for the smoke test:
 
 ```bash
-uv run symphony doctor /path/to/WORKFLOW.md
+uv run jazzband doctor /path/to/WORKFLOW.md
 ```
 
 Pass criteria:
@@ -104,7 +104,7 @@ Before enabling dispatch, run one polling tick with no disposable active issue
 or with the disposable issue outside active states:
 
 ```bash
-uv run symphony run /path/to/WORKFLOW.md --once --log-level INFO
+uv run jazzband run /path/to/WORKFLOW.md --once --log-level INFO
 ```
 
 Pass criteria:
@@ -132,12 +132,12 @@ state and ensure the prompt asks Codex to perform a low-risk action, such as:
 Run:
 
 ```bash
-uv run symphony run /path/to/WORKFLOW.md --once --log-level INFO
+uv run jazzband run /path/to/WORKFLOW.md --once --log-level INFO
 ```
 
 Pass criteria:
 
-- Symphony fetches the disposable active issue.
+- Jazzband fetches the disposable active issue.
 - The issue is selected for dispatch.
 - A workspace is created under `workspace.root`.
 - `after_create`, `before_run`, and `after_run` hooks behave as configured.
@@ -260,11 +260,11 @@ Use this format when moving a ticket to `Done`:
 Closed after Phase 1 closeout validation.
 
 PR:
-- https://github.com/codatta/symphony/pull/7
+- https://github.com/humanbased-ai/jazzband/pull/7
 
 Validation:
 - `uv run python -m unittest discover -s tests -p 'test_*.py'` -> <result>
-- `uv run symphony --help` -> <result>
+- `uv run jazzband --help` -> <result>
 - `git diff --check` -> <result>
 - Config preflight: <workflow path and result>
 - Live dispatch smoke test: <issue key, result, workspace path>

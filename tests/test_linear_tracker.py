@@ -1,9 +1,9 @@
 import unittest
 from collections import OrderedDict
 
-from symphony.auth import TokenStore
-from symphony.config import TrackerConfig
-from symphony.tracker.linear import (
+from jazzband.auth import TokenStore
+from jazzband.config import TrackerConfig
+from jazzband.tracker.linear import (
     CANDIDATE_ISSUES_QUERY,
     ISSUES_BY_ID_QUERY,
     GraphQLResponse,
@@ -13,7 +13,7 @@ from symphony.tracker.linear import (
     LinearMissingEndCursorError,
     normalize_issue,
 )
-from symphony.tools.linear_graphql import LinearGraphQLTool, linear_graphql_tool
+from jazzband.tools.linear_graphql import LinearGraphQLTool, linear_graphql_tool
 
 
 def issue_payload(issue_id="issue-1", identifier="IN-1", state="Todo", priority=1):
@@ -70,7 +70,7 @@ class LinearTrackerTests(unittest.TestCase):
             {
                 "tracker": {
                     "kind": "linear",
-                    "project_slug": "symphony-ai-agent-orchestration",
+                    "project_slug": "jazzband-ai-agent-orchestration",
                     "active_states": ["Todo", "In Progress"],
                     "api_key": "$LINEAR_KEY",
                 }
@@ -123,7 +123,7 @@ class LinearTrackerTests(unittest.TestCase):
         self.assertEqual(["IN-1", "IN-2"], [issue.identifier for issue in issues])
         self.assertIn("slugId", transport.calls[0]["payload"]["query"])
         self.assertEqual(CANDIDATE_ISSUES_QUERY, transport.calls[0]["payload"]["query"])
-        self.assertEqual("symphony-ai-agent-orchestration", transport.calls[0]["payload"]["variables"]["projectSlug"])
+        self.assertEqual("jazzband-ai-agent-orchestration", transport.calls[0]["payload"]["variables"]["projectSlug"])
         self.assertEqual(["Todo", "In Progress"], transport.calls[0]["payload"]["variables"]["stateNames"])
         self.assertIsNone(transport.calls[0]["payload"]["variables"]["after"])
         self.assertEqual("cursor-1", transport.calls[1]["payload"]["variables"]["after"])
@@ -303,6 +303,193 @@ class LinearTrackerTests(unittest.TestCase):
         self.assertEqual("linear_api_request", result["error"]["code"])
         self.assertIn("[REDACTED]", result["error"]["message"])
         self.assertNotIn("lin_secret", str(result))
+
+
+class FeedbackMethodTests(unittest.TestCase):
+    def client(self, transport):
+        tracker = TrackerConfig.from_mapping(
+            {
+                "tracker": {
+                    "kind": "linear",
+                    "project_slug": "jazzband-abc123",
+                    "api_key": "$K",
+                }
+            }
+        )
+        return LinearClient(tracker, token_store=TokenStore(tracker, environ={"K": "lin_tok"}), transport=transport)
+
+    def test_fetch_issue_comment_ids_returns_ids_in_order(self):
+        transport = RecordingTransport(
+            [
+                GraphQLResponse(
+                    200,
+                    {
+                        "data": {
+                            "issue": {
+                                "comments": {
+                                    "nodes": [
+                                        {"id": "cmt-1", "body": "hello", "createdAt": "2026-05-01T00:00:00Z", "user": {"name": "Alice"}},
+                                        {"id": "cmt-2", "body": "world", "createdAt": "2026-05-02T00:00:00Z", "user": {"name": "Bob"}},
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                )
+            ]
+        )
+        client = self.client(transport)
+        ids = client.fetch_issue_comment_ids("issue-x")
+        self.assertEqual(["cmt-1", "cmt-2"], ids)
+
+    def test_fetch_issue_comment_ids_returns_empty_on_missing_issue(self):
+        transport = RecordingTransport([GraphQLResponse(200, {"data": {"issue": None}})])
+        client = self.client(transport)
+        ids = client.fetch_issue_comment_ids("no-such-issue")
+        self.assertEqual([], ids)
+
+    def test_create_comment_returns_true_on_success(self):
+        transport = RecordingTransport(
+            [GraphQLResponse(200, {"data": {"commentCreate": {"success": True, "comment": {"id": "c-new"}}}})]
+        )
+        client = self.client(transport)
+        result = client.create_comment("issue-x", "LGTM!")
+        self.assertTrue(result)
+        self.assertEqual(1, len(transport.calls))
+        payload = transport.calls[0]["payload"]
+        self.assertIn("commentCreate", payload["query"])
+        self.assertEqual("issue-x", payload["variables"]["issueId"])
+        self.assertEqual("LGTM!", payload["variables"]["body"])
+
+    def test_create_comment_returns_false_on_graphql_error(self):
+        transport = RecordingTransport([GraphQLResponse(200, {"data": None, "errors": [{"message": "oops"}]})])
+        client = self.client(transport)
+        result = client.create_comment("issue-x", "hello")
+        self.assertFalse(result)
+
+    def test_update_issue_state_by_name_resolves_state_and_updates(self):
+        team_resp = GraphQLResponse(
+            200, {"data": {"projects": {"nodes": [{"teams": {"nodes": [{"id": "team-1"}]}}]}}}
+        )
+        states_resp = GraphQLResponse(
+            200, {"data": {"workflowStates": {"nodes": [{"id": "state-done", "name": "Done"}, {"id": "state-todo", "name": "Todo"}]}}}
+        )
+        update_resp = GraphQLResponse(
+            200, {"data": {"issueUpdate": {"success": True, "issue": {"id": "issue-x", "state": {"name": "Done"}}}}}
+        )
+        transport = RecordingTransport([team_resp, states_resp, update_resp])
+        client = self.client(transport)
+        result = client.update_issue_state_by_name("issue-x", "Done")
+        self.assertTrue(result)
+        self.assertEqual(3, len(transport.calls))
+        update_vars = transport.calls[2]["payload"]["variables"]
+        self.assertEqual("issue-x", update_vars["issueId"])
+        self.assertEqual("state-done", update_vars["stateId"])
+
+    def test_update_issue_state_by_name_returns_false_when_state_not_found(self):
+        team_resp = GraphQLResponse(
+            200, {"data": {"projects": {"nodes": [{"teams": {"nodes": [{"id": "team-1"}]}}]}}}
+        )
+        states_resp = GraphQLResponse(
+            200, {"data": {"workflowStates": {"nodes": [{"id": "state-todo", "name": "Todo"}]}}}
+        )
+        transport = RecordingTransport([team_resp, states_resp])
+        client = self.client(transport)
+        result = client.update_issue_state_by_name("issue-x", "NonExistent")
+        self.assertFalse(result)
+
+    def test_update_issue_state_by_name_returns_false_when_team_not_found(self):
+        team_resp = GraphQLResponse(200, {"data": {"projects": {"nodes": []}}})
+        transport = RecordingTransport([team_resp])
+        client = self.client(transport)
+        result = client.update_issue_state_by_name("issue-x", "Done")
+        self.assertFalse(result)
+
+
+class FeedbackSignalTests(unittest.TestCase):
+    """Unit tests for the classify_feedback function."""
+
+    def _make_response(self, label: str) -> bytes:
+        import json
+        return json.dumps({"content": [{"text": label}]}).encode()
+
+    def test_empty_list_returns_none_without_http_call(self):
+        from jazzband.feedback import classify_feedback
+        from unittest.mock import patch
+
+        with patch("urllib.request.urlopen") as mock_open:
+            result = classify_feedback([], api_key="test-key")
+        self.assertIsNone(result)
+        mock_open.assert_not_called()
+
+    def test_approve_label_parsed(self):
+        from jazzband.feedback import FeedbackSignal, classify_feedback
+        from unittest.mock import MagicMock, patch
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("APPROVE")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Alice: LGTM"], api_key="test-key")
+        self.assertEqual(FeedbackSignal.APPROVE, result)
+
+    def test_change_request_label_parsed(self):
+        from jazzband.feedback import FeedbackSignal, classify_feedback
+        from unittest.mock import MagicMock, patch
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("CHANGE_REQUEST")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Bob: please fix this"], api_key="test-key")
+        self.assertEqual(FeedbackSignal.CHANGE_REQUEST, result)
+
+    def test_close_label_parsed(self):
+        from jazzband.feedback import FeedbackSignal, classify_feedback
+        from unittest.mock import MagicMock, patch
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("CLOSE")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Carol: not needed"], api_key="test-key")
+        self.assertEqual(FeedbackSignal.CLOSE, result)
+
+    def test_none_label_returns_none(self):
+        from jazzband.feedback import classify_feedback
+        from unittest.mock import MagicMock, patch
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("NONE")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Dave: interesting"], api_key="test-key")
+        self.assertIsNone(result)
+
+    def test_http_error_raises_classify_error(self):
+        import urllib.error
+        from jazzband.feedback import ClassifyError, classify_feedback
+        from unittest.mock import patch
+
+        with self.assertRaises(ClassifyError):
+            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
+                classify_feedback(["Alice: LGTM"], api_key="test-key")
+
+    def test_label_is_case_insensitive(self):
+        from jazzband.feedback import FeedbackSignal, classify_feedback
+        from unittest.mock import MagicMock, patch
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = self._make_response("approve")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = classify_feedback(["Alice: LGTM"], api_key="test-key")
+        self.assertEqual(FeedbackSignal.APPROVE, result)
 
 
 if __name__ == "__main__":

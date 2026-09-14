@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from symphony.agents.base import (
+from jazzband.agents.base import (
     APIAgentRunner,
     AgentEvent,
     AgentEventCallback,
@@ -16,7 +16,7 @@ from symphony.agents.base import (
     TokenUsage,
     TurnResult,
 )
-from symphony.tracker.models import Issue
+from jazzband.tracker.models import Issue
 
 
 def issue() -> Issue:
@@ -99,12 +99,12 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
             events.append(event)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            runner = DummyCLIRunner('codex app-server --profile "symphony dev"')
+            runner = DummyCLIRunner('codex app-server --profile "jazzband dev"')
             session = await runner.start_session(Path(temp_dir), worker_host="local")
             result = await runner.run_turn(session, "Continue", issue(), on_event)
             await runner.stop_session(session)
 
-        self.assertEqual(("codex", "app-server", "--profile", "symphony dev"), runner.command)
+        self.assertEqual(("codex", "app-server", "--profile", "jazzband dev"), runner.command)
         self.assertEqual(Path(session.workspace), session.workspace.resolve())
         self.assertEqual("local", session.worker_host)
         self.assertTrue(result.success)

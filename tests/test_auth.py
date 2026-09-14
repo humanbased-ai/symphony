@@ -1,4 +1,4 @@
-"""Tests for symphony.auth — credential store adapters (IN-201)."""
+"""Tests for jazzband.auth — credential store adapters (IN-201)."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from symphony.auth import (
+from jazzband.auth import (
     CredentialStore,
     CredentialStoreError,
     FileCredentialStore,
@@ -18,7 +18,7 @@ from symphony.auth import (
     TokenStore,
     redact_tokens,
 )
-from symphony.config import TrackerConfig
+from jazzband.config import TrackerConfig
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +366,7 @@ class TestTokenStoreResolveLinearToken:
         tracker = _make_tracker()
         # Patch default_credential_store to return a FileCredentialStore pointed at our tmp file
         with patch(
-            "symphony.auth.default_credential_store",
+            "jazzband.auth.default_credential_store",
             return_value=FileCredentialStore(path=creds_file),
         ):
             store = TokenStore(tracker=tracker, environ={}, credentials_path=creds_file)
@@ -395,7 +395,7 @@ class TestTokenStoreResolveLinearToken:
 
         tracker = _make_tracker()
         with patch(
-            "symphony.auth.default_credential_store",
+            "jazzband.auth.default_credential_store",
             return_value=FileCredentialStore(path=creds_file),
         ):
             store = TokenStore(tracker=tracker, environ={}, credentials_path=creds_file)
@@ -419,7 +419,7 @@ class TestTokenStoreResolveLinearToken:
 
         tracker = _make_tracker()
         with patch(
-            "symphony.auth.default_credential_store",
+            "jazzband.auth.default_credential_store",
             return_value=FileCredentialStore(path=creds_file),
         ):
             store = TokenStore(tracker=tracker, environ={}, credentials_path=creds_file)

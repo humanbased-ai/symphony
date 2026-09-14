@@ -1,4 +1,5 @@
 import asyncio
+import re
 import urllib.request
 import tempfile
 import unittest
@@ -8,11 +9,17 @@ from pathlib import Path
 
 from unittest.mock import patch
 
-from symphony.cli import (
+from jazzband.cli import (
     RuntimeWorkflowReloader,
     StartupError,
-    _detect_github_from_remote,
+    _check_claude_login,
+    _detect_running_workflow_paths,
+    _run_first_run_wizard,
     _check_gh_auth,
+    _check_github_token_scopes,
+    _check_linear_key_valid,
+    _detect_github_from_remote,
+    _run_starter_mission,
     create_runtime,
     create_status_api,
     create_status_http_server,
@@ -20,11 +27,12 @@ from symphony.cli import (
     load_startup_context,
     main,
     print_setup_checks,
+    project_main,
     run_once,
     setup_environment_checks,
 )
-from symphony import __version__
-from symphony.orchestrator import OrchestratorState
+from jazzband import __version__
+from jazzband.orchestrator import OrchestratorState
 
 
 class CLITests(unittest.TestCase):
@@ -53,7 +61,7 @@ class CLITests(unittest.TestCase):
 tracker:
   kind: linear
   api_key: $LINEAR_KEY
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 codex:
   command: codex app-server
 ---
@@ -73,7 +81,7 @@ Work on {{ issue.identifier }}.
             self.assertEqual((root / "runtime-logs").resolve(), context.logs_root)
             self.assertEqual(7337, context.port)
             self.assertEqual("Work on {{ issue.identifier }}.", context.workflow.prompt_template)
-            self.assertEqual("symphony-ai-agent-orchestration", context.config.tracker.project_slug)
+            self.assertEqual("jazzband-ai-agent-orchestration", context.config.tracker.project_slug)
 
     def test_load_startup_context_rejects_missing_linear_token(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -83,7 +91,7 @@ Work on {{ issue.identifier }}.
 tracker:
   kind: linear
   api_key: $LINEAR_KEY
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 ---
 Body
 """,
@@ -106,7 +114,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 ---
 Body
 """,
@@ -126,7 +134,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 ---
 Body
 """,
@@ -146,7 +154,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 workspace:
   root: workspaces
 agent:
@@ -161,21 +169,65 @@ Body
 
             stdout = StringIO()
             with redirect_stdout(stdout):
-                result = main(
-                    [
-                        "onboard",
-                        "--mode",
-                        "automated",
-                        "--workflow-path",
-                        str(workflow_path),
-                        "--runner",
-                        "codex",
-                    ]
-                )
+                with patch("jazzband.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
+                    result = main(
+                        [
+                            "onboard",
+                            "--mode",
+                            "automated",
+                            "--workflow-path",
+                            str(workflow_path),
+                            "--runner",
+                            "codex",
+                        ]
+                    )
 
             self.assertEqual(0, result)
             self.assertIn("Onboarding already complete", stdout.getvalue())
             self.assertIn("Skipped init", stdout.getvalue())
+
+    def test_onboard_injects_github_config_when_missing(self):
+        """onboard upgrades an existing claude_code WORKFLOW.md that lacks github: block."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(
+                """---
+tracker:
+  kind: linear
+  api_key: literal-token
+  project_slug: myproject
+workspace:
+  root: workspaces
+agent:
+  runner: claude_code
+  max_turns: 5
+---
+Body
+""",
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with patch("jazzband.cli._check_linear_key_valid", return_value=(True, "valid")):
+                    with patch("jazzband.cli._check_command", return_value=(True, "found")):
+                        with patch("jazzband.cli._check_claude_login", return_value=(True, "ok")):
+                            with patch("jazzband.cli._check_github_token_scopes", return_value=(True, "ok")):
+                                result = main([
+                                    "onboard",
+                                    "--mode", "automated",
+                                    "--workflow-path", str(workflow_path),
+                                    "--runner", "claude_code",
+                                    "--github-org", "myorg",
+                                    "--github-repo", "myrepo",
+                                ])
+
+            self.assertEqual(0, result)
+            updated = workflow_path.read_text(encoding="utf-8")
+            self.assertIn("github:", updated)
+            self.assertIn("owner: myorg", updated)
+            self.assertIn("repo: myrepo", updated)
+            self.assertIn("$GITHUB_TOKEN", updated)
 
     def test_init_subcommand_writes_workflow_and_local_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -189,7 +241,7 @@ Body
                         "init",
                         "--yes",
                         "--project-slug",
-                        "symphony-ai-agent-orchestration",
+                        "jazzband-ai-agent-orchestration",
                         "--workflow-path",
                         str(workflow_path),
                         "--credentials-path",
@@ -204,7 +256,7 @@ Body
                 )
 
             self.assertEqual(0, result)
-            self.assertIn("project_slug: symphony-ai-agent-orchestration", workflow_path.read_text(encoding="utf-8"))
+            self.assertIn("project_slug: jazzband-ai-agent-orchestration", workflow_path.read_text(encoding="utf-8"))
             self.assertIn("lin_secret", credentials_path.read_text(encoding="utf-8"))
 
     def test_init_yes_requires_project_slug_without_prompting(self):
@@ -269,7 +321,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 workspace:
   root: workspaces
 codex:
@@ -284,7 +336,8 @@ Body
             with _socket.socket() as _s:
                 _s.bind(("127.0.0.1", 0))
                 free_port = _s.getsockname()[1]
-            checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
+            with patch("jazzband.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")):
+                checks = doctor_checks(workflow_path, logs_root="log", port=free_port)
 
             self.assertTrue(all(ok for ok, _, _ in checks))
 
@@ -356,7 +409,7 @@ Body
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 polling:
   interval_ms: 5000
 workspace:
@@ -375,7 +428,7 @@ First prompt {{ issue.identifier }}.
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
   active_states: [Reviewing]
 polling:
   interval_ms: 1234
@@ -405,7 +458,7 @@ Changed prompt {{ issue.identifier }}.
 tracker:
   kind: linear
   api_key: literal-token
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 polling:
   interval_ms: 5000
 ---
@@ -426,7 +479,7 @@ First prompt.
 tracker:
   kind: linear
   api_key: $MISSING_LINEAR_KEY
-  project_slug: symphony-ai-agent-orchestration
+  project_slug: jazzband-ai-agent-orchestration
 polling:
   interval_ms: 1234
 ---
@@ -467,14 +520,14 @@ class DetectGithubFromRemoteTests(unittest.TestCase):
             return _detect_github_from_remote()
 
     def test_parses_ssh_url(self):
-        org, repo = self._run("git@github.com:codatta/symphony.git\n")
+        org, repo = self._run("git@github.com:codatta/jazzband.git\n")
         self.assertEqual("codatta", org)
-        self.assertEqual("symphony", repo)
+        self.assertEqual("jazzband", repo)
 
     def test_parses_https_url(self):
-        org, repo = self._run("https://github.com/codatta/symphony.git\n")
+        org, repo = self._run("https://github.com/codatta/jazzband.git\n")
         self.assertEqual("codatta", org)
-        self.assertEqual("symphony", repo)
+        self.assertEqual("jazzband", repo)
 
     def test_parses_https_url_without_git_suffix(self):
         org, repo = self._run("https://github.com/acme/my-repo\n")
@@ -535,6 +588,206 @@ class PrintSetupChecksTests(unittest.TestCase):
             print_setup_checks("My Title", [])
         self.assertIn("My Title", out.getvalue())
 
+    def test_warn_prefix_renders_as_warning_state(self):
+        # IN-283: a check tuple (True, label, "warn: …") renders as a
+        # yellow warning (⚠) rather than a green pass, and the prefix is
+        # stripped from the displayed detail.
+        checks = [
+            (True, "linear auth", "LINEAR_API_KEY"),
+            (True, "claim guard", "warn: tracker.in_progress_state not set"),
+            (False, "gh command", "not found"),
+        ]
+        out = StringIO()
+        with redirect_stdout(out):
+            print_setup_checks("Environment scan", checks)
+        rendered = out.getvalue()
+        self.assertIn("⚠", rendered)
+        # warn: prefix is stripped in the rendered output
+        self.assertNotIn("warn: tracker", rendered)
+        self.assertIn("tracker.in_progress_state not set", rendered)
+
+    def test_summary_tally_reports_counts(self):
+        # IN-283: a single-line tally at the bottom of the table.
+        checks = [
+            (True, "linear auth", "LINEAR_API_KEY"),
+            (True, "claim guard", "warn: not set"),
+            (False, "gh command", "not found"),
+        ]
+        out = StringIO()
+        with redirect_stdout(out):
+            print_setup_checks("Environment scan", checks)
+        rendered = out.getvalue()
+        self.assertIn("1 ok", rendered)
+        self.assertIn("1 warning", rendered)
+        self.assertIn("1 missing", rendered)
+
+
+class CheckClaudeLoginTests(unittest.TestCase):
+    def test_returns_true_when_config_dir_exists_and_non_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".config" / "claude"
+            config_dir.mkdir(parents=True)
+            (config_dir / "settings.json").write_text("{}", encoding="utf-8")
+            with patch("jazzband.cli.Path.home", return_value=Path(tmp)):
+                ok, detail = _check_claude_login()
+        self.assertTrue(ok)
+        self.assertIn("config dir found", detail)
+
+    def test_returns_true_when_dot_claude_json_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude.json").write_text("{}", encoding="utf-8")
+            with patch("jazzband.cli.Path.home", return_value=Path(tmp)):
+                ok, detail = _check_claude_login()
+        self.assertTrue(ok)
+        self.assertIn("~/.claude.json", detail)
+
+    def test_returns_false_when_no_config_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("jazzband.cli.Path.home", return_value=Path(tmp)):
+                ok, detail = _check_claude_login()
+        self.assertFalse(ok)
+        self.assertIn("claude login", detail)
+
+
+class CheckLinearKeyValidTests(unittest.TestCase):
+    def _make_response(self, body: dict, status: int = 200):
+        import json as _json
+        import io
+        raw = _json.dumps(body).encode()
+        resp = type("R", (), {
+            "read": lambda self: raw,
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        return resp
+
+    def test_returns_true_with_viewer_name(self):
+        resp = self._make_response({"data": {"viewer": {"id": "u1", "name": "Alice"}}})
+        with patch("urllib.request.urlopen", return_value=resp):
+            ok, detail = _check_linear_key_valid("lin_api_key")
+        self.assertTrue(ok)
+        self.assertIn("Alice", detail)
+
+    def test_returns_false_on_401(self):
+        import urllib.error
+        exc = urllib.error.HTTPError(url="", code=401, msg="Unauthorized", hdrs=None, fp=None)
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_linear_key_valid("bad_key")
+        self.assertFalse(ok)
+        self.assertIn("invalid key", detail)
+
+    def test_returns_true_on_network_error(self):
+        import urllib.error
+        exc = urllib.error.URLError("connection refused")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_linear_key_valid("lin_key")
+        self.assertTrue(ok)
+        self.assertIn("network check skipped", detail)
+
+    def test_returns_true_on_non_auth_http_error(self):
+        import urllib.error
+        exc = urllib.error.HTTPError(url="", code=500, msg="Server Error", hdrs=None, fp=None)
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_linear_key_valid("lin_key")
+        self.assertTrue(ok)
+        self.assertIn("http 500", detail)
+
+
+class CheckGithubTokenScopesTests(unittest.TestCase):
+    def _make_response(self, scopes_header: str):
+        resp = type("R", (), {
+            "headers": {"X-OAuth-Scopes": scopes_header},
+            "read": lambda self: b"{}",
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        return resp
+
+    def test_returns_true_when_repo_scope_present(self):
+        with patch("urllib.request.urlopen", return_value=self._make_response("repo, read:user")):
+            ok, detail = _check_github_token_scopes("ghp_token")
+        self.assertTrue(ok)
+        self.assertIn("write scopes confirmed", detail)
+
+    def test_returns_true_for_fine_grained_pat_empty_scopes(self):
+        with patch("urllib.request.urlopen", return_value=self._make_response("")):
+            ok, detail = _check_github_token_scopes("github_pat_token")
+        self.assertTrue(ok)
+        self.assertIn("fine-grained PAT", detail)
+
+    def test_returns_false_when_repo_scope_missing(self):
+        with patch("urllib.request.urlopen", return_value=self._make_response("read:user, gist")):
+            ok, detail = _check_github_token_scopes("ghp_token")
+        self.assertFalse(ok)
+        self.assertIn("missing repo write scope", detail)
+
+    def test_returns_false_on_401(self):
+        import urllib.error
+        exc = urllib.error.HTTPError(url="", code=401, msg="Unauthorized", hdrs=None, fp=None)
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_github_token_scopes("bad_token")
+        self.assertFalse(ok)
+        self.assertIn("invalid token", detail)
+
+    def test_returns_true_on_network_error(self):
+        import urllib.error
+        exc = urllib.error.URLError("timeout")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            ok, detail = _check_github_token_scopes("ghp_token")
+        self.assertTrue(ok)
+        self.assertIn("network check skipped", detail)
+
+
+class SetupEnvironmentChecksAuthTests(unittest.TestCase):
+    def _make_args(self, tmp_dir: str, **kwargs):
+        defaults = {
+            "workflow_path": str(Path(tmp_dir) / "WORKFLOW.md"),
+            "linear_api_key": None,
+            "github_token": None,
+            "credentials_path": None,
+            "runner": "codex",
+            "codex_command": "python --version",
+            "github_org": None,
+            "github_repo": None,
+        }
+        defaults.update(kwargs)
+        return type("Args", (), defaults)()
+
+    def test_includes_linear_key_validity_when_token_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, linear_api_key="lin_key")
+            with patch("jazzband.cli._check_linear_key_valid", return_value=(True, "valid (mocked)")) as mock_valid:
+                checks = setup_environment_checks(args, environ={})
+        mock_valid.assert_called_once_with("lin_key")
+        self.assertTrue(any(label == "linear key validity" for _, label, _ in checks))
+
+    def test_includes_claude_login_check_when_claude_command_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, runner="claude_code", github_token="ghp_tok")
+            with (
+                patch("jazzband.cli._check_command", return_value=(True, "/usr/bin/claude")),
+                patch("jazzband.cli._check_gh_auth", return_value=(True, "authenticated")),
+                patch("jazzband.cli._check_claude_login", return_value=(True, "config found")) as mock_login,
+                patch("jazzband.cli._check_github_token_scopes", return_value=(True, "ok")),
+                patch("jazzband.cli._check_linear_key_valid", return_value=(True, "ok")),
+            ):
+                setup_environment_checks(args, environ={})
+        mock_login.assert_called_once()
+
+    def test_includes_github_scope_check_when_token_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, runner="claude_code", github_token="ghp_tok")
+            with (
+                patch("jazzband.cli._check_command", return_value=(True, "/usr/bin/claude")),
+                patch("jazzband.cli._check_gh_auth", return_value=(True, "authenticated")),
+                patch("jazzband.cli._check_claude_login", return_value=(True, "ok")),
+                patch("jazzband.cli._check_github_token_scopes", return_value=(True, "scopes ok")) as mock_scope,
+                patch("jazzband.cli._check_linear_key_valid", return_value=(True, "ok")),
+            ):
+                checks = setup_environment_checks(args, environ={"GITHUB_TOKEN": "ghp_tok"})
+        mock_scope.assert_called_once_with("ghp_tok")
+        self.assertTrue(any(label == "github token scopes" for _, label, _ in checks))
+
 
 class OnboardAutoDetectTests(unittest.TestCase):
     def test_onboard_auto_fills_github_from_remote(self):
@@ -569,6 +822,400 @@ class OnboardAutoDetectTests(unittest.TestCase):
             self.assertEqual(0, result)
             content = workflow_path.read_text()
             self.assertIn("my-project", content)
+
+
+class StarterMissionTests(unittest.TestCase):
+    def _make_args(self, tmp_dir: str, **kwargs):
+        defaults = {
+            "workflow_path": str(Path(tmp_dir) / "WORKFLOW.md"),
+            "linear_api_key": "lin_test",
+            "github_token": None,
+            "credentials_path": None,
+            "runner": "codex",
+            "codex_command": "python --version",
+            "github_org": "",
+            "github_repo": "",
+            "yes": True,
+            "mode": None,
+        }
+        defaults.update(kwargs)
+        return type("Args", (), defaults)()
+
+    def _make_gql_responses(self):
+        """Sequence of JSON responses for the 4 GraphQL calls made by _run_starter_mission."""
+        import json as _json
+        import io
+
+        responses = [
+            # viewer teams
+            {"data": {"viewer": {"teams": {"nodes": [{"id": "team-1", "name": "Acme"}]}}}},
+            # workflowStates
+            {"data": {"workflowStates": {"nodes": [{"id": "state-1", "name": "Todo"}]}}},
+            # find project (not found)
+            {"data": {"projects": {"nodes": []}}},
+            # projectCreate
+            {"data": {"projectCreate": {"success": True, "project": {"id": "proj-1", "name": "jazzband-hello-world", "slugId": "jazzband-hello-world-abc"}}}},
+            # find issue (not found)
+            {"data": {"issues": {"nodes": []}}},
+            # issueCreate
+            {"data": {"issueCreate": {"success": True, "issue": {"id": "i1", "identifier": "HW-1"}}}},
+        ]
+
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None):
+            idx = call_count[0]
+            call_count[0] += 1
+            body = _json.dumps(responses[idx]).encode()
+            resp = type("R", (), {
+                "read": lambda self: body,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *a: False,
+            })()
+            return resp
+
+        return fake_urlopen
+
+    def test_creates_project_and_issues_and_workflow_md(self):
+        import os as _os
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            orig = _os.getcwd()
+            _os.chdir(tmp)
+            try:
+                with (
+                    patch("urllib.request.urlopen", side_effect=self._make_gql_responses()),
+                    patch("jazzband.cli.main", return_value=0),
+                ):
+                    result = _run_starter_mission(args, environ={"LINEAR_API_KEY": "lin_test"})
+            finally:
+                _os.chdir(orig)
+
+            self.assertTrue(result)
+            demo_workflow = Path(tmp) / "jazzband-hello-world" / "WORKFLOW.md"
+            self.assertTrue(demo_workflow.exists())
+            content = demo_workflow.read_text()
+            self.assertIn("jazzband-hello-world-abc", content)
+
+    def test_returns_false_when_no_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp, linear_api_key="")
+            with patch("jazzband.cli.load_local_linear_token", return_value=None):
+                result = _run_starter_mission(args, environ={})
+        self.assertFalse(result)
+
+    def test_returns_false_when_project_create_fails(self):
+        import json as _json
+        call_count = [0]
+        responses = [
+            {"data": {"viewer": {"teams": {"nodes": [{"id": "team-1", "name": "Acme"}]}}}},
+            {"data": {"workflowStates": {"nodes": []}}},
+            {"data": {"projectCreate": {"success": False}}},
+        ]
+
+        def fake_urlopen(req, timeout=None):
+            body = _json.dumps(responses[call_count[0]]).encode()
+            call_count[0] += 1
+            resp = type("R", (), {
+                "read": lambda self: body,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *a: False,
+            })()
+            return resp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                result = _run_starter_mission(args, environ={"LINEAR_API_KEY": "lin_test"})
+        self.assertFalse(result)
+
+    def test_records_done_in_tutorials_json(self):
+        import os as _os
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._make_args(tmp)
+            history_path = Path(tmp) / "tutorials.json"
+            orig = _os.getcwd()
+            _os.chdir(tmp)
+            try:
+                with (
+                    patch("urllib.request.urlopen", side_effect=self._make_gql_responses()),
+                    patch("jazzband.cli.main", return_value=0),
+                ):
+                    _run_starter_mission(
+                        args,
+                        environ={"LINEAR_API_KEY": "lin_test"},
+                        history_path=history_path,
+                    )
+            finally:
+                _os.chdir(orig)
+
+            payload = _json.loads(history_path.read_text())
+            self.assertTrue(payload["tutorials"]["hello-world-mission"]["done"])
+
+
+class ProjectCommandTests(unittest.TestCase):
+    """Tests for `sy project` dashboard command."""
+
+    _FAKE_PROJECTS = [
+        {"id": "proj-1", "name": "Jazzband", "slugId": "abc123"},
+        {"id": "proj-2", "name": "Other Project", "slugId": "def456"},
+    ]
+
+    _FAKE_ISSUES = [
+        {"state": {"type": "completed"}},
+        {"state": {"type": "completed"}},
+        {"state": {"type": "started"}},
+        {"state": {"type": "unstarted"}},
+        {"state": {"type": "unstarted"}},
+        {"state": {"type": "unstarted"}},
+    ]
+
+    def _make_gql_response(self, query, variables=None):
+        _no_next = {"hasNextPage": False, "endCursor": None}
+        if "ProjectList" in query:
+            return {"data": {"projects": {"nodes": self._FAKE_PROJECTS, "pageInfo": _no_next}}}
+        if "ProjectIssues" in query:
+            return {"data": {"project": {"issues": {"nodes": self._FAKE_ISSUES, "pageInfo": _no_next}}}}
+        return {"data": {}}
+
+    def test_no_token_returns_error(self):
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("jazzband.auth.TokenStore") as mock_store:
+            mock_store.return_value.resolve_linear_token.side_effect = Exception("no token")
+            out = StringIO()
+            with redirect_stdout(out):
+                result = project_main([])
+        self.assertEqual(1, result)
+
+    def test_shows_configured_and_unconfigured_projects(self):
+        workflow_content = (
+            "---\ntracker:\n  kind: linear\n  project_slug: jazzband-abc123\n---\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            wf.write_text(workflow_content)
+
+            def fake_urlopen(req, timeout=15):
+                import json
+                body = json.loads(req.data.decode())
+                resp_data = self._make_gql_response(body["query"], body.get("variables"))
+                resp_bytes = json.dumps(resp_data).encode()
+                import io
+                return io.BytesIO(resp_bytes)
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("jazzband.cli._detect_running_workflow_paths", return_value=set()), \
+                 patch("os.getcwd", return_value=tmp), \
+                 patch("pathlib.Path.cwd", return_value=Path(tmp)):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = project_main(["--linear-api-key", "lin_api_test"])
+
+        self.assertEqual(0, result)
+        # Strip ANSI codes for plain-text assertions
+        plain = re.sub(r'\033\[[0-9;]*m', '', out.getvalue())
+        self.assertIn("Jazzband", plain)
+        self.assertIn("WORKFLOW.md", plain)
+        self.assertIn("2 done", plain)
+        self.assertIn("1 active", plain)
+        self.assertIn("3 open", plain)
+        self.assertIn("Other Project", plain)
+        self.assertIn("no workflow", plain)
+        self.assertIn("stopped", plain)
+
+    def test_running_project_shows_running_status(self):
+        workflow_content = (
+            "---\ntracker:\n  kind: linear\n  project_slug: jazzband-abc123\n---\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            wf.write_text(workflow_content)
+
+            def fake_urlopen(req, timeout=15):
+                import json
+                body = json.loads(req.data.decode())
+                resp_data = self._make_gql_response(body["query"], body.get("variables"))
+                resp_bytes = json.dumps(resp_data).encode()
+                import io
+                return io.BytesIO(resp_bytes)
+
+            abs_wf = str((Path(tmp) / "WORKFLOW.md").resolve())
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("jazzband.cli._detect_running_workflow_paths", return_value={abs_wf}), \
+                 patch("os.getcwd", return_value=tmp), \
+                 patch("pathlib.Path.cwd", return_value=Path(tmp)):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = project_main(["--linear-api-key", "lin_api_test"])
+
+        self.assertEqual(0, result)
+        output = out.getvalue()
+        self.assertIn("running", output)
+        self.assertIn("sy doctor", output)
+
+    def test_detect_running_workflow_paths_parses_ps_output(self):
+        fake_ps = type("R", (), {
+            "stdout": (
+                "user  123  0.0  sy run /abs/project-a/WORKFLOW.md\n"
+                "user  456  0.0  jazzband run /abs/root/WORKFLOW.md\n"
+                "user  789  0.0  python something else\n"
+            ),
+            "returncode": 0,
+        })()
+        with patch("subprocess.run", return_value=fake_ps):
+            paths = _detect_running_workflow_paths()
+        self.assertIn("/abs/project-a/WORKFLOW.md", paths)
+        self.assertIn("/abs/root/WORKFLOW.md", paths)
+        self.assertNotIn("python", paths)
+
+
+class FirstRunWizardTests(unittest.TestCase):
+    """Tests for the sy run first-run setup wizard."""
+
+    def test_wizard_writes_workflow_with_provided_inputs(self):
+        inputs = iter(["y", "my-project", "claude_code", "acme", "my-repo", ""])
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", side_effect=inputs), \
+                 patch("jazzband.cli._detect_github_from_remote", return_value=(None, None)):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = _run_first_run_wizard(wf)
+            self.assertTrue(result)
+            content = wf.read_text()
+            self.assertIn("my-project", content)
+            self.assertIn("claude_code", content)
+
+    def test_wizard_aborts_on_n_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", return_value="n"):
+                result = _run_first_run_wizard(wf)
+            self.assertFalse(result)
+            self.assertFalse(wf.exists())
+
+    def test_wizard_aborts_on_empty_slug(self):
+        inputs = iter(["y", ""])  # confirm yes, then empty slug
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", side_effect=inputs), \
+                 patch("jazzband.cli._detect_github_from_remote", return_value=(None, None)):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = _run_first_run_wizard(wf)
+            self.assertFalse(result)
+            self.assertFalse(wf.exists())
+
+    def test_wizard_prefills_github_from_remote(self):
+        inputs = iter(["y", "my-project", "", "", "", ""])
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", side_effect=inputs), \
+                 patch("jazzband.cli._detect_github_from_remote", return_value=("myorg", "myrepo")):
+                out = StringIO()
+                with redirect_stdout(out):
+                    result = _run_first_run_wizard(wf)
+            self.assertTrue(result)
+            content = wf.read_text()
+            self.assertIn("myorg", content)
+            self.assertIn("myrepo", content)
+
+    def test_run_triggers_wizard_when_workflow_missing_in_tty(self):
+        """sy run on a missing WORKFLOW.md triggers wizard in TTY mode."""
+        inputs = iter(["y", "my-project", "", "", "", ""])
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("builtins.input", side_effect=inputs), \
+                 patch("jazzband.cli._detect_github_from_remote", return_value=(None, None)), \
+                 patch("sys.stdin.isatty", return_value=True):
+                out = StringIO()
+                with redirect_stdout(out):
+                    # Wizard writes the file; subsequent startup fails (missing token or port) → SystemExit
+                    with self.assertRaises(SystemExit):
+                        main(["run", str(wf), "--log-level", "WARNING"])
+            # Wizard wrote the file before the startup error
+            self.assertTrue(wf.exists())
+
+    def test_run_skips_wizard_when_workflow_missing_in_non_tty(self):
+        """sy run on a missing WORKFLOW.md exits with error in non-TTY mode."""
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Path(tmp) / "WORKFLOW.md"
+            with patch("sys.stdin.isatty", return_value=False):
+                with self.assertRaises(SystemExit) as raised:
+                    main(["run", str(wf), "--log-level", "WARNING"])
+        self.assertEqual(2, raised.exception.code)
+
+
+class InfoCommandTests(unittest.TestCase):
+    _WORKFLOW = """---
+tracker:
+  kind: linear
+  project_slug: jazzband-ai-agent-orchestration
+agent:
+  runner: claude_code
+---
+Body
+"""
+
+    def test_info_text_prints_three_sections(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(self._WORKFLOW, encoding="utf-8")
+
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = main(["info", str(workflow_path)])
+
+            output = out.getvalue()
+            self.assertEqual(0, exit_code)
+            self.assertIn(f"Jazzband {__version__}", output)
+            self.assertIn(str(workflow_path.resolve()), output)
+            self.assertIn("claude_code", output)
+            self.assertIn("linear", output)
+
+    def test_info_json_emits_six_keys(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "WORKFLOW.md"
+            workflow_path.write_text(self._WORKFLOW, encoding="utf-8")
+
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = main(["info", str(workflow_path), "--json"])
+
+            self.assertEqual(0, exit_code)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(
+                {"version", "python", "platform", "workflow_path", "runner", "tracker"},
+                set(payload),
+            )
+            self.assertEqual(__version__, payload["version"])
+            self.assertEqual("claude_code", payload["runner"])
+            self.assertEqual("linear", payload["tracker"])
+            self.assertEqual(str(workflow_path.resolve()), payload["workflow_path"])
+
+    def test_info_missing_workflow_does_not_crash(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "WORKFLOW.md"
+
+            text_out = StringIO()
+            with redirect_stdout(text_out):
+                text_code = main(["info", str(missing)])
+            self.assertEqual(0, text_code)
+            self.assertIn("not found", text_out.getvalue())
+
+            json_out = StringIO()
+            with redirect_stdout(json_out):
+                json_code = main(["info", str(missing), "--json"])
+            self.assertEqual(0, json_code)
+            payload = json.loads(json_out.getvalue())
+            self.assertEqual("not found", payload["workflow_path"])
+            self.assertEqual("not found", payload["runner"])
+            self.assertEqual("not found", payload["tracker"])
 
 
 if __name__ == "__main__":
