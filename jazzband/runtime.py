@@ -576,7 +576,6 @@ class JazzbandRuntime:
                 self._acceptance_judged_sha.pop(branch, None)
                 self._verifyflow_run_sha.pop(branch, None)
                 self._pr_escalated.discard(branch)
-                await self.review_dispatcher.forget(branch)
                 return
             pr_number = cached_pr
         else:

@@ -904,6 +904,8 @@ def _update_review_strategy(workflow_path: Path, args: argparse.Namespace) -> No
     cfg = workflow.typed_config(workflow_path=workflow_path)
     block = _review_block(cfg.agent.runner, strategy)
     if block is not None:
+        if not (cfg.github.token or _resolve_github_token()):
+            raise OnboardingError("review_requires_github_auth")
         if not (cfg.github.owner and cfg.github.repo):
             raise OnboardingError("review_requires_github_repository")
         for command in ("crosscheck", "claude" if block["reviewer"] == "claude_code" else "codex"):
@@ -1600,7 +1602,7 @@ def _run_init_with_args(
 
         # --- Step 4: GitHub token (optional, for PR automation) ---
         github_token = args.github_token
-        if github_token is None and runner == "claude_code" and not automated:
+        if github_token is None and (runner == "claude_code" or review_strategy != "skip") and not automated:
             print("\nStep 5/5 — GitHub personal access token (for PR automation)")
             print("  Agents need this to push branches and open pull requests.")
             print("  Create a fine-grained token at: github.com/settings/tokens")
@@ -1647,6 +1649,8 @@ def _run_init_with_args(
             answer = input("Enable acceptance gate? [y/N]: ").strip().lower()
             acceptance_enabled = answer in ("y", "yes")
 
+        if review_strategy != "skip" and not (github_token or _resolve_github_token(Path(args.credentials_path) if args.credentials_path else None)):
+            raise OnboardingError("review_requires_github_auth")
         if review_strategy != "skip" and not (github_org and github_repo):
             raise OnboardingError("review_requires_github_repository")
         if review_strategy != "skip":
@@ -2023,6 +2027,12 @@ def setup_environment_checks(
         if command_ok:
             login_ok, login_detail = _check_claude_login()
             checks.append((login_ok, "claude login", login_detail))
+    else:
+        command_ok, command_detail = _check_command(getattr(args, "codex_command", "codex app-server"))
+        checks.append((command_ok, "codex command", command_detail))
+
+
+    if runner == "claude_code" or getattr(args, "review_strategy", None) not in (None, "skip"):
         gh_ok, gh_detail = _check_command("gh")
         checks.append((gh_ok, "gh command", gh_detail if gh_ok else f"{gh_detail} — install from cli.github.com"))
         github_source = _github_auth_source(
@@ -2055,9 +2065,6 @@ def setup_environment_checks(
         else:
             repo_detail = "not configured — pass --github-org and --github-repo"
         checks.append((bool(github_org and github_repo), "github repo", repo_detail))
-    else:
-        command_ok, command_detail = _check_command(getattr(args, "codex_command", "codex app-server"))
-        checks.append((command_ok, "codex command", command_detail))
 
     return checks
 
@@ -2463,7 +2470,14 @@ def _resolve_github_token(
     token = env.get("GITHUB_TOKEN")
     if token:
         return token
-    return load_local_github_token(path=credentials_path, environ=env)
+    local = load_local_github_token(path=credentials_path, environ=env)
+    if local:
+        return local
+    try:
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def _validate_github_token(token: str) -> str | None:

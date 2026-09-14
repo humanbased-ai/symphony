@@ -1091,3 +1091,7 @@ Tauri v2 (Rust)
   tauri-plugin-updater
   tauri-plugin-deep-link      # handles jazzband://oauth/callback deep links
 ```
+
+## Configured PR review dispatch (IN-285)
+
+The Python runtime reads `review` from WORKFLOW.md and invokes Crosscheck with the selected vendor and the tracked GitHub project PR URL. Reviews run in background tasks once per mergeable head. Crosscheck comments enter the existing PR feedback poll, while the primary runner retains ownership of fixes. Review dispatch is separate from acceptance and adds no merge path. Subprocesses receive an allowlisted environment with only the selected vendor credentials and configured GitHub token; PR closure and daemon shutdown terminate the review process group. Failed attempts require a manual retry or a new head.

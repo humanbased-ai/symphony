@@ -7,7 +7,10 @@ from jazzband.crosscheck_runtime import ReviewDispatcher
 import test_runtime as helpers
 
 
-def test_reviewer_pair_and_singleflight():
+def test_reviewer_pair_and_singleflight(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "unrelated-linear-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "unrelated-cloud-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "selected-reviewer-secret")
     async def run():
         dispatcher = ReviewDispatcher()
         proc = MagicMock(returncode=0)
@@ -21,10 +24,14 @@ def test_reviewer_pair_and_singleflight():
             assert spawn.await_count == 1
             assert spawn.call_args.args[:4] == ("crosscheck", "review", "--reviewer", "claude")
             assert spawn.call_args.kwargs["env"]["GITHUB_TOKEN"] == "fixture-token"
+            assert spawn.call_args.kwargs["env"]["ANTHROPIC_API_KEY"] == "selected-reviewer-secret"
+            assert "LINEAR_API_KEY" not in spawn.call_args.kwargs["env"]
+            assert "AWS_SECRET_ACCESS_KEY" not in spawn.call_args.kwargs["env"]
             dispatcher.schedule(**{**args, "sha": "b" * 40, "reviewer": "codex"})
             await dispatcher.tasks["feature"]
             assert spawn.await_count == 2
             assert spawn.call_args.args[3] == "codex"
+            assert "ANTHROPIC_API_KEY" not in spawn.call_args.kwargs["env"]
             await dispatcher.close()
     asyncio.run(run())
 

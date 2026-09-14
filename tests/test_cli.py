@@ -1274,10 +1274,18 @@ class SingleRunnerOnboardTests(unittest.TestCase):
             workflow = Path(tmp) / "WORKFLOW.md"
             workflow.write_text(generate_workflow(InitConfig(project_slug="fixture", runner="codex", github_org="acme", github_repo="demo")))
             old_prompt = load_workflow(workflow).prompt_template
-            with patch("jazzband.cli.doctor_checks", return_value=[(True, "fixture", "ready")]), patch("jazzband.cli.shutil.which", return_value="/fixture/command"), patch("jazzband.cli._offer_tutorial"), patch("jazzband.cli._offer_starter_mission"), redirect_stdout(StringIO()):
+            with patch("jazzband.cli.doctor_checks", return_value=[(True, "fixture", "ready")]), patch("jazzband.cli.shutil.which", return_value="/fixture/command"), patch("jazzband.cli._resolve_github_token", return_value="fixture-token"), patch("jazzband.cli._offer_tutorial"), patch("jazzband.cli._offer_starter_mission"), redirect_stdout(StringIO()):
                 result = main(["onboard", "--yes", "--workflow-path", str(workflow), "--review-strategy", "cross-vendor"])
             self.assertEqual(0, result)
             saved = load_workflow(workflow)
             self.assertEqual(old_prompt, saved.prompt_template)
             self.assertEqual("codex", saved.config["agent"]["runner"])
             self.assertEqual("claude_code", saved.config["review"]["reviewer"])
+
+    def test_codex_review_requires_runtime_github_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = Path(tmp) / "WORKFLOW.md"
+            with patch("jazzband.cli._resolve_github_token", return_value=None), patch("jazzband.cli._automated_setup_failures", return_value=[]), patch("jazzband.cli.setup_environment_checks", return_value=[]), redirect_stdout(StringIO()), redirect_stderr(StringIO()), self.assertRaises(SystemExit) as exit:
+                main(["onboard", "--yes", "--runner", "codex", "--workflow-path", str(workflow), "--project-slug", "fixture", "--github-org", "acme", "--github-repo", "demo", "--review-strategy", "single-vendor", "--no-acceptance"])
+            self.assertEqual(2, exit.exception.code)
+            self.assertFalse(workflow.exists())

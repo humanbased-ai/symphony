@@ -23,7 +23,9 @@ class ReviewDispatcher:
 
     async def _review(self, reviewer: str, url: str, token: str) -> None:
         vendor = {"claude_code": "claude", "codex": "codex"}[reviewer]
-        env = os.environ.copy()
+        allowed = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"}
+        allowed |= {"CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"} if vendor == "codex" else {"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}
+        env = {name: value for name, value in os.environ.items() if name in allowed}
         env["GITHUB_TOKEN"] = token
         proc = None
         try:
