@@ -875,9 +875,6 @@ def _run_init_with_args(
         mode = _resolve_init_mode(args)
         automated = mode == "automated"
 
-        if show_environment_scan:
-            print_setup_checks("Environment scan", setup_environment_checks(args))
-
         if not automated and show_tutorial_before:
             run_init_tutorial_once()
 
@@ -935,6 +932,7 @@ def _run_init_with_args(
             else:
                 runner = "claude_code"
         runner = runner or DEFAULT_RUNNER
+        args.runner = runner  # setup_environment_checks reads args.runner, not this local
 
         review_strategy = getattr(args, "review_strategy", None) or DEFAULT_REVIEW_STRATEGY
         if not automated and not getattr(args, "review_strategy", None) and len(available_runners) >= 2:
@@ -952,6 +950,9 @@ def _run_init_with_args(
                 "3": "skip",
                 "skip": "skip",
             }.get(choice, "skip")
+
+        if show_environment_scan:
+            print_setup_checks("Environment scan", setup_environment_checks(args))
 
         # --- Step 2: GitHub org + repo (claude_code runner only) ---
         github_org = args.github_org or ""
