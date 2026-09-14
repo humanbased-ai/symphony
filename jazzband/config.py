@@ -499,6 +499,33 @@ class WebhookConfig:
 
 
 @dataclass(frozen=True)
+class ReviewConfig:
+    enabled: bool = False
+    strategy: str = "skip"
+    reviewer: str | None = None
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "ReviewConfig":
+        review = _mapping(config.get("review"), "review_config_must_be_map")
+        raw_enabled = review.get("enabled")
+        if raw_enabled is not None and not isinstance(raw_enabled, bool):
+            raise ConfigError("review_enabled_must_be_boolean")
+        enabled = raw_enabled or False
+        strategy = _string_value(review.get("strategy")) or "skip"
+        reviewer = _string_value(review.get("reviewer"))
+        if strategy not in ("skip", "cross-vendor", "single-vendor"):
+            raise ConfigError(f"unsupported_review_strategy:{strategy}")
+        if reviewer is not None and reviewer not in ("codex", "claude_code"):
+            raise ConfigError(f"unsupported_reviewer:{reviewer}")
+        if enabled:
+            primary = AgentConfig.from_mapping(config).runner
+            expected = ("claude_code" if primary == "codex" else "codex") if strategy == "cross-vendor" else primary
+            if strategy == "skip" or reviewer != expected:
+                raise ConfigError("reviewer_does_not_match_strategy")
+        return cls(enabled=enabled, strategy=strategy, reviewer=reviewer)
+
+
+@dataclass(frozen=True)
 class WorkflowConfig:
     tracker: TrackerConfig
     polling: PollingConfig = field(default_factory=PollingConfig)
@@ -510,6 +537,7 @@ class WorkflowConfig:
     codex: CodexConfig = field(default_factory=CodexConfig)
     claude_code: ClaudeCodeConfig = field(default_factory=ClaudeCodeConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     acceptance: AcceptanceConfig = field(default_factory=AcceptanceConfig)
     verifyflow: VerifyflowConfig = field(default_factory=VerifyflowConfig)
@@ -532,6 +560,7 @@ class WorkflowConfig:
             codex=CodexConfig.from_mapping(config),
             claude_code=ClaudeCodeConfig.from_mapping(config),
             webhook=WebhookConfig.from_mapping(config, environ=environ),
+            review=ReviewConfig.from_mapping(config),
             github=GitHubConfig.from_mapping(config, environ=environ),
             acceptance=AcceptanceConfig.from_mapping(config),
             verifyflow=VerifyflowConfig.from_mapping(config),

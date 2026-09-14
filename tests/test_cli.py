@@ -1250,3 +1250,42 @@ Body
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SingleRunnerOnboardTests(unittest.TestCase):
+    def test_interactive_onboard_selects_only_installed_codex_without_runner_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = Path(tmp) / "WORKFLOW.md"
+            out = StringIO()
+            scans = []
+            def scan(args):
+                scans.append(args.runner)
+                return []
+            with patch("jazzband.cli.detect_available_runners", return_value=("codex",)), patch("jazzband.cli._check_linear_key_valid", return_value=(True, "mocked")), patch("jazzband.cli.setup_environment_checks", side_effect=scan), patch("builtins.input", return_value=""), redirect_stdout(out):
+                result = main(["onboard", "--mode", "interactive", "--workflow-path", str(workflow), "--project-slug", "fixture-project", "--linear-api-key", "fixture-token", "--credentials-path", str(Path(tmp) / "credentials.json"), "--workspace-root", str(Path(tmp) / "workspaces"), "--repo-mode", "single", "--no-acceptance"])
+            self.assertEqual(0, result)
+            self.assertIn("runner: codex", workflow.read_text())
+            self.assertEqual(["codex"], scans)
+
+    def test_explicit_strategy_updates_valid_existing_workflow_without_overwrite(self):
+        from jazzband.onboarding import InitConfig, generate_workflow
+        from jazzband.workflow import load_workflow
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = Path(tmp) / "WORKFLOW.md"
+            workflow.write_text(generate_workflow(InitConfig(project_slug="fixture", runner="codex", github_org="acme", github_repo="demo")))
+            old_prompt = load_workflow(workflow).prompt_template
+            with patch("jazzband.cli.doctor_checks", return_value=[(True, "fixture", "ready")]), patch("jazzband.cli.shutil.which", return_value="/fixture/command"), patch("jazzband.cli._resolve_github_token", return_value="fixture-token"), patch("jazzband.cli._offer_tutorial"), patch("jazzband.cli._offer_starter_mission"), redirect_stdout(StringIO()):
+                result = main(["onboard", "--yes", "--workflow-path", str(workflow), "--review-strategy", "cross-vendor"])
+            self.assertEqual(0, result)
+            saved = load_workflow(workflow)
+            self.assertEqual(old_prompt, saved.prompt_template)
+            self.assertEqual("codex", saved.config["agent"]["runner"])
+            self.assertEqual("claude_code", saved.config["review"]["reviewer"])
+
+    def test_codex_review_requires_runtime_github_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = Path(tmp) / "WORKFLOW.md"
+            with patch("jazzband.cli._resolve_github_token", return_value=None), patch("jazzband.cli._automated_setup_failures", return_value=[]), patch("jazzband.cli.setup_environment_checks", return_value=[]), redirect_stdout(StringIO()), redirect_stderr(StringIO()), self.assertRaises(SystemExit) as exit:
+                main(["onboard", "--yes", "--runner", "codex", "--workflow-path", str(workflow), "--project-slug", "fixture", "--github-org", "acme", "--github-repo", "demo", "--review-strategy", "single-vendor", "--no-acceptance"])
+            self.assertEqual(2, exit.exception.code)
+            self.assertFalse(workflow.exists())

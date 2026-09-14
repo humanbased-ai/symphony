@@ -494,13 +494,29 @@ class FeedbackTracker(FakeTracker):
 
 class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
     def _make_runtime(self, tracker, temp_dir: str) -> JazzbandRuntime:
-        return JazzbandRuntime(
+        runtime = JazzbandRuntime(
             config=make_config(Path(temp_dir) / "workspaces"),
             prompt_template="Work on {{ issue.identifier }}",
             tracker=tracker,
             workspace_manager=FakeWorkspaceManager(Path(temp_dir) / "workspaces"),
             runner=FakeSessionRunner(),
         )
+
+        # Model a daemon that observed these issues before the new comments.
+        runtime._feedback_seen = {item.id: frozenset() for item in tracker._review_issues}
+        return runtime
+
+    async def test_first_encounter_does_not_replay_old_approval(self):
+        tracked = issue("restart", state="In Review")
+        tracker = FeedbackTracker([], review_issues=[tracked], comment_ids={"restart": ["old"]}, comments={"restart": ["Alice: LGTM"]})
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._make_runtime(tracker, tmp)
+            runtime._feedback_seen.clear()
+            with patch("jazzband.runtime.classify_feedback") as classify:
+                await runtime.poll_feedback()
+            classify.assert_not_called()
+            self.assertEqual([], tracker.state_transitions)
+            self.assertEqual(frozenset({"old"}), runtime._feedback_seen["restart"])
 
     async def test_approve_signal_transitions_to_done(self):
         review_issue = issue("r-1", "IN-500", state="In Review")
@@ -649,7 +665,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
             with patch("jazzband.runtime.classify_feedback", side_effect=ClassifyError("timeout")):
                 await runtime.poll_feedback()  # fails: _feedback_seen NOT updated
             self.assertEqual([], tracker.state_transitions)
-            self.assertNotIn("r-e", runtime._feedback_seen)
+            self.assertEqual(frozenset(), runtime._feedback_seen["r-e"])
 
             with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.poll_feedback()  # retries and succeeds
@@ -681,6 +697,7 @@ class FeedbackGateTests(unittest.IsolatedAsyncioTestCase):
                 workspace_manager=FakeWorkspaceManager(Path(tmp) / "workspaces"),
                 runner=FakeSessionRunner(),
             )
+            runtime._feedback_seen["r-6"] = frozenset()
             with patch("jazzband.runtime.classify_feedback", return_value=FeedbackSignal.APPROVE):
                 await runtime.run_tick()
 

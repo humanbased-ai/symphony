@@ -1,3 +1,4 @@
+from unittest.mock import patch
 import unittest
 from collections import OrderedDict
 
@@ -407,89 +408,30 @@ class FeedbackMethodTests(unittest.TestCase):
 
 
 class FeedbackSignalTests(unittest.TestCase):
-    """Unit tests for the classify_feedback function."""
+    """The classifier uses the local Claude CLI, not an API-key HTTP client."""
 
-    def _make_response(self, label: str) -> bytes:
-        import json
-        return json.dumps({"content": [{"text": label}]}).encode()
-
-    def test_empty_list_returns_none_without_http_call(self):
+    def test_empty_list_does_not_start_cli(self):
         from jazzband.feedback import classify_feedback
-        from unittest.mock import patch
+        with patch("jazzband.feedback.subprocess.run") as run:
+            self.assertIsNone(classify_feedback([]))
+        run.assert_not_called()
 
-        with patch("urllib.request.urlopen") as mock_open:
-            result = classify_feedback([], api_key="test-key")
-        self.assertIsNone(result)
-        mock_open.assert_not_called()
-
-    def test_approve_label_parsed(self):
+    def test_cli_labels(self):
+        import subprocess
         from jazzband.feedback import FeedbackSignal, classify_feedback
-        from unittest.mock import MagicMock, patch
+        for label, expected in [("APPROVE", FeedbackSignal.APPROVE), ("CHANGE_REQUEST", FeedbackSignal.CHANGE_REQUEST), ("CLOSE", FeedbackSignal.CLOSE), ("NONE", None), ("approve", FeedbackSignal.APPROVE)]:
+            with self.subTest(label=label), patch("jazzband.feedback.subprocess.run", return_value=subprocess.CompletedProcess([], 0, label, "")) as run:
+                self.assertEqual(expected, classify_feedback(["Alice: feedback"]))
+                self.assertEqual(["claude", "-p"], run.call_args.args[0][:2])
 
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = self._make_response("APPROVE")
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = classify_feedback(["Alice: LGTM"], api_key="test-key")
-        self.assertEqual(FeedbackSignal.APPROVE, result)
-
-    def test_change_request_label_parsed(self):
-        from jazzband.feedback import FeedbackSignal, classify_feedback
-        from unittest.mock import MagicMock, patch
-
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = self._make_response("CHANGE_REQUEST")
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = classify_feedback(["Bob: please fix this"], api_key="test-key")
-        self.assertEqual(FeedbackSignal.CHANGE_REQUEST, result)
-
-    def test_close_label_parsed(self):
-        from jazzband.feedback import FeedbackSignal, classify_feedback
-        from unittest.mock import MagicMock, patch
-
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = self._make_response("CLOSE")
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = classify_feedback(["Carol: not needed"], api_key="test-key")
-        self.assertEqual(FeedbackSignal.CLOSE, result)
-
-    def test_none_label_returns_none(self):
-        from jazzband.feedback import classify_feedback
-        from unittest.mock import MagicMock, patch
-
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = self._make_response("NONE")
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = classify_feedback(["Dave: interesting"], api_key="test-key")
-        self.assertIsNone(result)
-
-    def test_http_error_raises_classify_error(self):
-        import urllib.error
+    def test_cli_failures_raise_classify_error(self):
+        import subprocess
         from jazzband.feedback import ClassifyError, classify_feedback
-        from unittest.mock import patch
-
-        with self.assertRaises(ClassifyError):
-            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
-                classify_feedback(["Alice: LGTM"], api_key="test-key")
-
-    def test_label_is_case_insensitive(self):
-        from jazzband.feedback import FeedbackSignal, classify_feedback
-        from unittest.mock import MagicMock, patch
-
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = self._make_response("approve")
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = classify_feedback(["Alice: LGTM"], api_key="test-key")
-        self.assertEqual(FeedbackSignal.APPROVE, result)
+        for error in (FileNotFoundError("claude"), subprocess.TimeoutExpired("claude", 30)):
+            with self.subTest(error=type(error).__name__), patch("jazzband.feedback.subprocess.run", side_effect=error), self.assertRaises(ClassifyError):
+                classify_feedback(["Alice: LGTM"])
+        with patch("jazzband.feedback.subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "failed")), self.assertRaises(ClassifyError):
+            classify_feedback(["Alice: LGTM"])
 
 
 if __name__ == "__main__":

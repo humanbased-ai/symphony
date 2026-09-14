@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from jazzband.auth import MissingLinearTokenError, TokenStore, save_local_linear_token
-from jazzband.config import ConfigError, TrackerConfig, WorkflowConfig
+from jazzband.config import ConfigError, ReviewConfig, TrackerConfig, WorkflowConfig
 from jazzband.workflow import WorkflowError, WorkflowReloader, parse_workflow, render_prompt, watch_workflow
 
 
@@ -253,3 +253,17 @@ class WorkflowWatchTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewConfigTests(unittest.TestCase):
+    def test_valid_review_preferences_for_each_primary_runner(self):
+        for primary, other in (("codex", "claude_code"), ("claude_code", "codex")):
+            for strategy, reviewer in (("cross-vendor", other), ("single-vendor", primary)):
+                with self.subTest(primary=primary, strategy=strategy):
+                    parsed = ReviewConfig.from_mapping({"agent": {"runner": primary}, "review": {"enabled": True, "strategy": strategy, "reviewer": reviewer}})
+                    self.assertEqual(reviewer, parsed.reviewer)
+
+    def test_invalid_review_preferences_fail_before_workflow_start(self):
+        for review in ({"strategy": "unknown"}, {"reviewer": "unknown"}, {"enabled": True, "strategy": "skip"}, {"enabled": True, "strategy": "cross-vendor", "reviewer": "codex"}, {"enabled": True, "strategy": "single-vendor", "reviewer": "claude_code"}):
+            with self.subTest(review=review), self.assertRaises(ConfigError):
+                ReviewConfig.from_mapping({"agent": {"runner": "codex"}, "review": review})

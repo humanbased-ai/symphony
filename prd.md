@@ -1144,13 +1144,15 @@ be the first Phase 2 gate before desktop or productionization work expands.
   dispatch. Neither runner receives repository-creation instructions inside its
   isolated per-issue workspace; Claude's normal clone step remains valid after
   the operator publishes the project. Adds `repo_mode` to `InitConfig`.
-- [ ] **[CLI: Primary runner picker + cross-vendor CR] (Linear: IN-285)** — when
+- [x] **[CLI: Primary runner picker + cross-vendor CR] (Linear: IN-285)** — when
   both `claude` and `codex` are installed, show an interactive runner picker
   instead of silently auto-selecting. Follow with a code review strategy
   question: cross-vendor (primary implements, other reviews via crosscheck
   pipeline), single-vendor, or skip. Cross-vendor selection writes a `review`
   block to WORKFLOW.md and wires up the crosscheck project. Automated mode
-  defaults to claude_code + no review.
+  defaults to claude_code + no review. Implemented in PR #47: project PR URL
+  dispatch runs in the background once per mergeable head, findings return to
+  the primary runner, and failed reviews never imply approval.
 - [x] **[Auth: Interactive/automated setup modes] (Linear: IN-268)** — make
   `jazzband init` support guided interactive setup and non-prompting automated
   setup while detecting and validating Linear CLI/MCP auth, GitHub access
