@@ -25,10 +25,10 @@ DEFAULT_ACTIVE_STATES = ("Todo", "In Progress")
 DEFAULT_TERMINAL_STATES = ("Done", "Canceled", "Duplicate")
 DEFAULT_RUNNER = "claude_code"
 
-# IN-285: code review strategy in WORKFLOW.md. Cross-vendor wires the primary
-# runner against the OTHER vendor's reviewer (the crosscheck pipeline runs as
-# a separate dispatch after the implementing PR opens). Single-vendor uses the
-# same vendor for review. Skip writes nothing.
+# IN-285 captures the intended reviewer in WORKFLOW.md. Runtime Crosscheck
+# dispatch is a follow-up; this configuration does not execute a review.
+# Cross-vendor selects the other vendor, single-vendor the primary. Skip writes
+# nothing.
 ReviewStrategy = Literal["cross-vendor", "single-vendor", "skip"]
 DEFAULT_REVIEW_STRATEGY: ReviewStrategy = "skip"
 

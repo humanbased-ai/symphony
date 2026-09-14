@@ -1250,3 +1250,14 @@ Body
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SingleRunnerOnboardTests(unittest.TestCase):
+    def test_interactive_onboard_selects_only_installed_codex_without_runner_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = Path(tmp) / "WORKFLOW.md"
+            out = StringIO()
+            with patch("jazzband.cli.detect_available_runners", return_value=("codex",)), patch("jazzband.cli._check_linear_key_valid", return_value=(True, "mocked")), patch("jazzband.cli.setup_environment_checks", return_value=[]), patch("builtins.input", return_value=""), redirect_stdout(out):
+                result = main(["onboard", "--mode", "interactive", "--workflow-path", str(workflow), "--project-slug", "fixture-project", "--linear-api-key", "fixture-token", "--credentials-path", str(Path(tmp) / "credentials.json"), "--workspace-root", str(Path(tmp) / "workspaces"), "--repo-mode", "single", "--no-acceptance"])
+            self.assertEqual(0, result)
+            self.assertIn("runner: codex", workflow.read_text())

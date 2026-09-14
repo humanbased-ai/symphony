@@ -363,9 +363,10 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--review-strategy",
         choices=("cross-vendor", "single-vendor", "skip"),
         help=(
-            "Code review strategy (IN-285). 'cross-vendor' = primary runner "
-            "implements, other vendor reviews via the crosscheck pipeline; "
-            "'single-vendor' = same runner reviews; 'skip' = no review block. "
+            "Save the intended reviewer (IN-285): 'cross-vendor' selects the "
+            "other vendor; 'single-vendor' selects the primary runner; "
+            "'skip' writes no review block. Review execution is not available "
+            "in this release; saving the choice does not run a review. "
             "Defaults to interactive prompt when both runners are on PATH, "
             "and 'skip' in automated mode."
         ),
@@ -1489,15 +1490,17 @@ def _run_init_with_args(
                 runner = "codex"
             else:
                 runner = "claude_code"
+        if not automated and runner is None and len(available_runners) == 1:
+            runner = available_runners[0]
         runner = runner or DEFAULT_RUNNER
         args.runner = runner  # setup_environment_checks reads args.runner, not this local
 
         review_strategy = getattr(args, "review_strategy", None) or DEFAULT_REVIEW_STRATEGY
         if not automated and not getattr(args, "review_strategy", None) and len(available_runners) >= 2:
             other_runner = "codex" if runner == "claude_code" else "claude_code"
-            print("\nCode review strategy:")
-            print(f"  1) cross-vendor — {runner} implements, {other_runner} reviews via crosscheck (recommended)")
-            print(f"  2) single-vendor — {runner} reviews its own PRs")
+            print("\nSave a review preference (review execution is not available in this release):")
+            print(f"  1) cross-vendor — {runner} implements, {other_runner} selected for review")
+            print(f"  2) single-vendor — {runner} selected for review")
             print("  3) skip — no review block in WORKFLOW.md")
             choice = _prompt_default("Pick a strategy [1/2/3]", "3").strip()
             review_strategy = {
@@ -1612,6 +1615,8 @@ def _run_init_with_args(
             answer = input("Enable acceptance gate? [y/N]: ").strip().lower()
             acceptance_enabled = answer in ("y", "yes")
 
+        if review_strategy != "skip":
+            print("Review execution is not available in this release. Saving this choice does not run a review.")
         workflow = generate_workflow(
             InitConfig(
                 project_slug=project_slug,

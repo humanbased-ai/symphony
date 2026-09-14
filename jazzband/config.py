@@ -510,11 +510,19 @@ class ReviewConfig:
         raw_enabled = review.get("enabled")
         if raw_enabled is not None and not isinstance(raw_enabled, bool):
             raise ConfigError("review_enabled_must_be_boolean")
-        return cls(
-            enabled=raw_enabled or False,
-            strategy=_string_value(review.get("strategy")) or "skip",
-            reviewer=_string_value(review.get("reviewer")),
-        )
+        enabled = raw_enabled or False
+        strategy = _string_value(review.get("strategy")) or "skip"
+        reviewer = _string_value(review.get("reviewer"))
+        if strategy not in ("skip", "cross-vendor", "single-vendor"):
+            raise ConfigError(f"unsupported_review_strategy:{strategy}")
+        if reviewer is not None and reviewer not in ("codex", "claude_code"):
+            raise ConfigError(f"unsupported_reviewer:{reviewer}")
+        if enabled:
+            primary = AgentConfig.from_mapping(config).runner
+            expected = ("claude_code" if primary == "codex" else "codex") if strategy == "cross-vendor" else primary
+            if strategy == "skip" or reviewer != expected:
+                raise ConfigError("reviewer_does_not_match_strategy")
+        return cls(enabled=enabled, strategy=strategy, reviewer=reviewer)
 
 
 @dataclass(frozen=True)
