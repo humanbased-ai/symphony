@@ -1,218 +1,159 @@
-# Symphony
+# Jazzband
 
 > Turn Linear issues into isolated agent implementation runs.
+<!-- test comment -->
 
-Symphony is an agent orchestration system for teams that want to manage project
+Jazzband is an agent orchestration system for teams that want to manage project
 work in Linear instead of supervising one-off coding-agent chats. You write a
-clear issue, move it into an active state, and Symphony prepares an isolated
+clear issue, move it into an active state, and Jazzband prepares an isolated
 workspace, runs the configured agent, and hands the result back through a pull
 request and Linear updates.
 
 This repository contains the Python CLI implementation of the language-agnostic
-[Symphony specification](SPEC.md). The current working slice is built for local
-operator use with Linear, GitHub, and Claude Code. Codex app-server support is
-also available.
+[Jazzband specification](SPEC.md). The current working slice is built for local
+operator use with Linear, GitHub, and Claude Code; Codex app-server is also
+supported.
 
-## Why Use It
+## Key Features
 
-- Keep agent work scoped to reviewable Linear tickets.
-- Run implementation attempts in deterministic per-issue workspaces.
-- Version orchestration policy in each repository with `WORKFLOW.md`.
-- Use one repeatable loop for dispatch, review feedback, retries, and handoff.
-- Train teammates on the workflow with a disposable ticket before using it on
-  real project work.
+- **Issue-driven dispatch** — poll Linear, pick eligible tickets, run the agent,
+  open a PR, close the loop with Linear comments and state transitions. Issues
+  that already have an open PR are skipped automatically — no duplicate
+  dispatches.
+- **Per-run workspace isolation** — each dispatch gets its own
+  `<root>/<issue>/<run_id>` directory. Optional git mode maintains a bare clone
+  with `git worktree` per run and force-cleans the branch on completion.
+- **Pluggable agent runners** — Claude Code and Codex app-server today;
+  AgentRunner ABCs are in place for Gemini, Hermes/OpenAI-compatible, and
+  GPT-Image-1.
+- **Multi-instance safety** — best-effort state-transition claim before
+  dispatch, blocker eligibility gate, structured `claim_*` events tagged with
+  `host:pid` so duplicate dispatch is visible in logs.
+- **Fail-closed approval gate** — `jazzband doctor` hard-fails when the runner
+  can request approval but no resolution path is configured. Approval requests
+  are routed to a configured `approval_state` instead of looping.
+- **Acceptance gate** — opt-in via `acceptance.enabled` in `WORKFLOW.md`. Once
+  a PR converges (CI green, no new feedback for the quiet period), Jazzband
+  dispatches a one-shot judge that compares the diff against the original
+  Linear issue and posts a `pass` / `fail` / `uncertain` verdict comment on
+  the PR. Phase 1 only judges and escalates to a human; Phase 2 can
+  auto-merge when the user explicitly sets `acceptance.auto_merge: true` and
+  the four-condition gate passes (pass verdict, confidence at or above
+  `confidence_threshold` (default `0.80`), no guard-rail paths touched, and
+  GitHub branch protection still gets the final say). Guard-rail paths
+  (`SPEC.md`, migrations, `.github/**`, secrets) force a `pass` down to
+  `uncertain` so a human still reviews.
+- **Failure-state transition** — non-recoverable runs move to a configured
+  `failure_state` and clean up the workspace; no auto-retry into a dirty tree.
+- **WORKFLOW.md hot reload** — change YAML front matter or the prompt body and
+  the daemon picks it up without restart.
+- **Linear OAuth + webhooks** — PKCE flow, secure credential storage, webhook
+  receiver with HMAC-SHA256 verification, polling fallback.
+- **`linear_graphql` agent tool** — agents can read issues, post comments, and
+  move state through Jazzband-managed auth.
+- **Terminal dashboard** — alt-screen UI showing live issue state, current PR
+  URL, and CI check status per issue. REST API at `/api/v1/state`,
+  `/api/v1/<issue>`, `/api/v1/refresh`, `/api/v1/health`.
+- **PR feedback loop** — polls GitHub PR review comments and Linear issue
+  comments each tick. Change-request feedback is routed to the existing PR
+  branch; approve or close signals trigger the matching state transition.
+- **CI auto-fix** — monitors check-runs on tracked PR branches; when new
+  failures appear and no human comment was posted that tick, the agent is
+  dispatched with the failure details to fix and re-push. CI status resets to
+  open automatically when checks recover.
+- **LLM feedback classification** — approve / change-request / close signals in
+  Linear comments are classified by the Claude CLI, not just regex, so natural
+  language feedback is reliably detected.
+- **Colored console logging** — timestamps, log levels, and per-issue activity
+  lines are color-coded in TTY sessions; file handler always writes plain text.
 
-Symphony is useful when a task is clear enough to become an issue and important
-enough to deserve a pull request review.
+## Install
 
-## Current Status
+Pick one channel.
 
-The CLI MVP can:
-
-- generate a starter `WORKFLOW.md` with `symphony init`;
-- store local Linear and GitHub credentials;
-- validate setup with `symphony doctor`;
-- poll Linear for active issues;
-- create isolated per-issue workspaces;
-- run Claude Code or Codex;
-- let agents open PRs and report progress back to Linear.
-
-It is not production-ready yet. Desktop packaging, Linear OAuth, webhooks, the
-full dashboard, and IM approval flows are planned follow-on work. See
-[prd.md](prd.md) for the product plan and [ARCHITECTURE.md](ARCHITECTURE.md) for
-the deeper system design.
-
-## Requirements
-
-- Python 3.12+
-- [`uv`](https://docs.astral.sh/uv/) for the recommended install path
-- A Linear API key with access to the target project
-- [`gh`](https://cli.github.com/) authenticated for the target GitHub repo
-- Claude Code installed and authenticated for the default runner
-
-Install and authenticate Claude Code:
+**Homebrew (macOS, recommended):**
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-claude
+brew install codatta/jazzband/jazzband
 ```
 
-Install and authenticate GitHub CLI:
+**pipx / uv / pip:**
 
 ```bash
-brew install gh
-gh auth login
+pipx install jazzband
+# or: uv tool install jazzband
 ```
 
-Create a Linear API key at `linear.app/settings/api` under Personal API keys.
+Both channels register two entry points: `jazzband` and the shorthand `sy`.
 
-## Installation
-
-### Homebrew (recommended on macOS)
+**From source:**
 
 ```bash
-brew install codatta/symphony/symphony
+git clone https://github.com/humanbased-ai/jazzband.git
+cd jazzband && uv sync
+uv run jazzband --help
 ```
 
-Upgrade:
+Authenticate the supporting tools once:
 
 ```bash
-brew upgrade symphony
+# Claude Code (default runner)
+npm install -g @anthropic-ai/claude-code && claude
+
+# GitHub CLI (used by the agent to clone and push)
+brew install gh && gh auth login
+
+# Linear API key — create at linear.app/settings/api → Personal API keys
 ```
 
-### pip / pipx / uv
+### Environment variables
 
-Install from PyPI:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `LINEAR_API_KEY` | Yes | Linear personal API key (`lin_api_…`) |
+| `GITHUB_TOKEN` | Fallback | GitHub token if `gh auth` is unavailable |
+| `ANTHROPIC_API_KEY` | claude_code runner | API key for Claude Code |
+| `OPENAI_API_KEY` | codex runner | API key for Codex |
+| `JAZZBAND_NTFY_TOPIC` | Optional | ntfy topic for push notifications |
+| `JAZZBAND_WEBHOOK_URL` | Optional | Generic webhook for event notifications |
+
+Variables can also be stored in the local credentials file written by
+`jazzband onboard` — you do not need to export them in every shell session.
+
+## Quick Start
+
+Run onboarding from the repository where you want `WORKFLOW.md` to live:
 
 ```bash
-pipx install symphony
-# or
-uv tool install symphony
+jazzband onboard --project-slug your-linear-project-slug
+# sy is a short alias for jazzband
+sy onboard --project-slug your-linear-project-slug
 ```
 
-Install the latest from GitHub:
+`jazzband onboard` scans the local environment first, reports detected Linear /
+GitHub auth and runner availability, asks only for the gaps, and writes
+`WORKFLOW.md` + stores credentials under the local Jazzband config path.
+
+Validate the setup:
 
 ```bash
-uv tool install git+https://github.com/codatta/symphony.git
+jazzband doctor WORKFLOW.md
 ```
 
-Install a specific branch while testing a PR:
+Run one controlled poll tick against a real Linear ticket:
 
 ```bash
-uv tool install git+https://github.com/codatta/symphony.git@branch-name
+jazzband run WORKFLOW.md --once --log-level INFO
 ```
 
-Install from a local checkout:
+A successful run prints `Tick OK: fetched=1 dispatched=1 completed=1 failed=0 …`
+and the agent opens a PR + posts the URL back to Linear. For continuous
+operation, drop `--once` and add `--port 7337 --logs-root ./log`.
+
+For scripted setup (no prompts):
 
 ```bash
-git clone https://github.com/codatta/symphony.git
-cd symphony
-uv tool install .
-```
-
-Verify the command:
-
-```bash
-symphony --help
-symphony --version
-symphony onboard --help
-symphony init --help
-symphony doctor --help
-symphony run --help
-```
-
-Upgrade an existing `uv tool` install:
-
-```bash
-uv tool install --force git+https://github.com/codatta/symphony.git
-```
-
-Uninstall:
-
-```bash
-uv tool uninstall symphony
-```
-
-## Get Started
-
-### Local Development
-
-Use this path when you are changing Symphony itself rather than operating it:
-
-```bash
-git clone https://github.com/codatta/symphony.git
-cd symphony
-uv sync
-uv run symphony --help
-```
-
-In the rest of this README, `symphony ...` means the installed CLI. From a
-development checkout, replace it with `uv run symphony ...`.
-
-Build release artifacts before tagging or attaching a release:
-
-```bash
-uv build
-ls dist/
-```
-
-This release-prep command should be verified in a network-enabled environment
-before cutting a release tag, because build isolation may need to download the
-configured build backend. Expected artifacts are a source distribution and wheel
-under `dist/`, for example `symphony-<version>.tar.gz` and
-`symphony-<version>-py3-none-any.whl`. Smoke test the wheel in an isolated CLI
-install from a clean `dist/` directory:
-
-```bash
-uv tool install --force ./dist/symphony-*.whl
-symphony --help
-```
-
-Native single-file binaries are not part of this packaging slice.
-
-The Homebrew tap (`codatta/symphony`) is auto-updated on each tagged release via
-`.github/workflows/homebrew-tap.yml`. See [homebrew/README.md](homebrew/README.md).
-
-Release automation is defined in `.github/workflows/release.yml`. Use the
-manual `workflow_dispatch` path with `channel=dry-run` or `channel=staging` to
-build artifacts and smoke-test the installed wheel before cutting a stable
-`vX.Y.Z` tag for the main release channel. User-facing CLI changes should be
-recorded in `CHANGELOG.md` before a release tag is created.
-
-### First Run Setup
-
-Run onboarding from the repository where you want to keep the generated
-`WORKFLOW.md`:
-
-```bash
-symphony onboard --project-slug your-linear-project-slug
-```
-
-`symphony onboard` is the recommended first-run command. It scans the local
-environment first, reports detected Linear/GitHub auth and Claude/Codex tooling,
-and skips the init step when an existing `WORKFLOW.md` and local prerequisites
-already validate. Use `--overwrite` when you intentionally want to regenerate an
-existing workflow.
-
-In an interactive terminal, onboarding starts with a short paginated orientation
-when it has not been shown for the current tutorial version, then guides you
-through:
-
-- the Linear project slug;
-- active and terminal Linear state names;
-- the workspace root for per-issue checkouts;
-- the GitHub org or user and repo name;
-- a Linear API key;
-- a GitHub token if you want Symphony to store one locally.
-
-The command writes `WORKFLOW.md` and stores credentials under the local Symphony
-config path. Keep raw tokens out of committed workflow files.
-
-For scripted setup, use automated mode:
-
-```bash
-symphony onboard \
-  --mode automated \
+jazzband onboard --mode automated \
   --project-slug your-linear-project-slug \
   --linear-api-key lin_api_... \
   --github-token ghp_... \
@@ -220,155 +161,166 @@ symphony onboard \
   --github-repo your-repo
 ```
 
-`--yes` remains available as an alias for `--mode automated`. Automated setup
-never prompts; if required input or local auth is missing, it exits with
-remediation steps before writing `WORKFLOW.md`.
+Available presets: `codex-safe`, `codex-autonomous`, `review-only`.
 
-`symphony init` remains available as the lower-level workflow generation command
-for scripted setups that do not need skip/resume behavior.
+## Development Roadmap
 
-Available presets are `codex-safe`, `codex-autonomous`, and `review-only`.
+| Phase | Status | Highlights |
+|-------|--------|-----------|
+| **0 — Guardrails** | 🟡 open | AGENTS.md tracking, PR template, LFS docs |
+| **1 — MVP (Linear + Codex)** | 🟢 shipped | Python skeleton, WORKFLOW.md parser, Linear read path, `linear_graphql` tool, orchestration state machine, workspace lifecycle, Codex runner, status API |
+| **1 — SPEC compliance** | 🟢 shipped | Per-run workspace isolation, blocker gate, fail-closed approval, failure-state transition, claim race prevention |
+| **2A — CLI onboarding** | 🟢 mostly shipped | `init` / `doctor` / `run` / `onboard`, bilingual tutorial, presets, Homebrew tap, colored logging |
+| **2B — Linear productionization** | 🟡 partial | OAuth/PKCE, webhooks, PR feedback loop, CI auto-fix, terminal dashboard. Remaining: Tauri desktop shell |
+| **3 — Operator visibility** | ⚪ planned | SSE stream, web dashboard/PWA, mobile push, approval gate UI |
+| **4 — Multi-agent runners** | ⚪ planned | Gemini API, OpenAI-compatible / Hermes, GPT-Image-1 |
+| **5 — IM & distribution** | ⚪ planned | Telegram bot, Slack bot, marketplace channels |
+| **6 — Backlog** | ⚪ planned | GitHub Issues / Jira adapters, Docker sandboxing, persistent retry queue |
 
-## Validate Setup
+See [prd.md](prd.md) §7 for the full build queue with ticket links, and
+[CHANGELOG.md](CHANGELOG.md) for user-facing changes.
 
-Run:
+## Operating Jazzband
+
+### Doctor checks
+
+`jazzband doctor WORKFLOW.md` validates: workflow parse, Linear auth source,
+runner command, `gh auth`, GitHub token, workspace root writability, logs root,
+status API port, claim guard (warn), approval gate (hard fail when
+misconfigured), failure state (warn).
+
+### Day-to-day
 
 ```bash
-symphony doctor WORKFLOW.md
+jazzband run WORKFLOW.md --port 7337 --logs-root ./log --log-level INFO
 ```
 
-Expected checks:
+Stop with `Ctrl-C`. Status API: `http://127.0.0.1:7337/api/v1/state`.
 
-- `WORKFLOW.md` parses successfully;
-- Linear auth resolves;
-- the configured workspace root is writable;
-- `gh auth` resolves;
-- a GitHub token resolves;
-- the selected agent command is available;
-- logs and status API paths are printable.
+### Terminal dashboard
 
-Fix any failed checks before dispatching a real issue.
+When `--port` is set, Jazzband exposes a live alt-screen dashboard and a REST
+API alongside the daemon:
 
-## Quick Training Tickets
+```
+http://127.0.0.1:7337/api/v1/state        # all tracked issues
+http://127.0.0.1:7337/api/v1/<issue-id>   # single issue detail
+http://127.0.0.1:7337/api/v1/refresh      # force a poll tick
+http://127.0.0.1:7337/api/v1/health       # liveness check
+```
 
-Before running Symphony on important work, create one disposable Linear issue in
-the configured project. Use Linear's UI or your team's interactive Linear
-command session; Symphony only needs the finished ticket to exist in an active
-state. This lets a new operator finish onboarding and practice the
-dispatch/review loop in a controlled session.
+The terminal UI shows each issue's current state, the open PR URL, and live
+CI check status. Omit `--port` to run headless with log output only.
 
-Start with a small docs-only issue:
+### PR feedback loop
+
+Once the agent opens a PR, Jazzband keeps polling both the GitHub PR review
+comments and the Linear issue comments on every tick. You do not need to
+restart the daemon after leaving review feedback.
+
+- **Change-request** — post a review comment on the GitHub PR (or a comment
+  on the Linear issue) describing what to fix. Jazzband classifies the signal
+  via the Claude CLI and re-dispatches the agent to the same branch.
+- **Approved** — Jazzband moves the issue to the configured handoff state.
+- **Closed** — Jazzband treats the PR close as a terminal signal and
+  transitions the issue accordingly.
+
+### CI auto-fix
+
+Jazzband monitors check-runs on each tracked PR branch. When new CI failures
+appear and no human comment was posted in the same tick, Jazzband dispatches
+the agent with the failure details so it can push a fix automatically. Once
+checks recover, the CI status resets and polling resumes normally.
+
+Good fits: scoped implementation tickets, docs/cleanup tasks, review follow-up
+where feedback lands on the Linear issue. Avoid: secret rotation, broad
+refactors, high-risk production changes, repos where agent PRs are unsafe.
+
+### Webhooks (optional)
+
+Webhooks let Linear push state changes to Jazzband instantly instead of
+waiting for the next poll tick. Add these fields to `WORKFLOW.md` and expose
+a public URL (or a local tunnel):
+
+```yaml
+tracker:
+  webhook_secret: $LINEAR_WEBHOOK_SECRET   # set in Linear webhook settings
+server:
+  public_url: $JAZZBAND_PUBLIC_URL         # e.g. https://jazzband.yourteam.com
+  tunnel: none                             # none | cloudflared | ngrok
+```
+
+When webhooks are active you can raise `polling.interval_ms` to `120000`
+(2 min) — webhooks handle the fast path and polling acts as a safety net.
+Without a public URL, polling-only mode works fine for local use.
+
+### Multiple projects
+
+Each `WORKFLOW.md` targets one Linear project. Run one process per project on
+different ports:
+
+```bash
+jazzband run project-a/WORKFLOW.md --port 7337 --logs-root ./log/a
+jazzband run project-b/WORKFLOW.md --port 7338 --logs-root ./log/b
+```
+
+Stop with `pkill -f "jazzband run"` or `kill <PID>`. Update
+`tracker.project_slug` in a watched `WORKFLOW.md` to hot-switch the running
+daemon.
+
+### Quick training ticket
+
+Before running against real work, create one disposable Linear ticket like:
 
 ```text
-Title:
-Add a CLI smoke-test note to README
-
+Title: Add a CLI smoke-test note to README
 Description:
-Repository: https://github.com/your-org/your-repo
-
-Please add one short paragraph to README.md explaining how to run the CLI smoke
-test. Keep the change docs-only. Open a PR when done and post the PR URL back on
-this Linear issue.
-
+  Repository: https://github.com/your-org/your-repo
+  Add a short paragraph to README.md about the smoke test. Keep it docs-only.
+  Open a PR and post the URL back here.
 Acceptance criteria:
-- README.md contains the new note.
-- A GitHub PR is opened.
-- The PR URL is commented on this Linear issue.
+  - README.md contains the new note.
+  - A GitHub PR is opened.
+  - The PR URL is commented on this Linear issue.
 ```
 
-Move the ticket into one of the active states from `WORKFLOW.md`, usually `Todo`
-or `In Progress`.
+Move it to `Todo`, run `jazzband run WORKFLOW.md --once --log-level INFO`,
+inspect the workspace and PR. For the review loop, post a revision request as
+a GitHub PR review comment or Linear issue comment — Jazzband polls both each
+tick and automatically dispatches the agent to address the feedback.
 
-Run one controlled poll tick:
+## Troubleshooting
 
-```bash
-symphony run WORKFLOW.md --once --log-level INFO
-```
+**Jazzband starts but never dispatches an issue**
+- Check `jazzband doctor WORKFLOW.md` — the most common cause is a missing or
+  invalid `LINEAR_API_KEY`.
+- Confirm the issue is in one of the states listed in `active_states`.
+- If an open PR already exists for the issue, Jazzband skips it by design.
+  Close or merge the PR first.
 
-A successful smoke run prints a summary like:
+**Agent runs but does not open a PR**
+- Verify `gh auth status` shows the correct account with repo write access.
+- Check `--logs-root` for the per-issue log file — it usually contains the
+  exact error from the agent.
 
-```text
-Tick OK: fetched=1 dispatched=1 completed=1 failed=0 released=0
-```
+**Workspace is dirty after a failed run**
+- Set `keep_on_failure: true` in WORKFLOW.md to preserve the workspace for
+  inspection, then clean it up manually.
+- Stale worktrees from crashed runs are swept automatically on the next daemon
+  start.
 
-The exact counts can vary, but the training issue should be fetched and
-dispatched. Inspect the created workspace, GitHub PR, and Linear comments.
+**`jazzband doctor` reports a fatal approval-gate error**
+- This means `approval_policy: on-request` is set but no `approval_state` is
+  configured. Either add `approval_state` or change the policy to `never`.
 
-To practice the feedback loop, leave one requested change as a Linear comment,
-move the issue back to an active state, and run another controlled tick:
-
-```bash
-symphony run WORKFLOW.md --once --log-level INFO
-```
-
-When the result is acceptable, merge the PR and move the Linear issue to a
-terminal state such as `Done`.
-
-For team onboarding, repeat the same pattern with a second small ticket owned by
-the trainee. Keep the acceptance criteria narrow enough that the trainee can
-review the whole PR and close the Linear issue without needing production
-context.
-
-Current limitation: GitHub PR review comments are not read automatically. Put
-revision instructions on the Linear issue and manually move the issue back to an
-active state for another agent pass.
-
-## Day-To-Day Operation
-
-For continuous local operation:
-
-```bash
-symphony run WORKFLOW.md --port 7337 --logs-root ./log --log-level INFO
-```
-
-Stop the process with `Ctrl-C`.
-
-Good first use cases:
-
-- scoped implementation tickets with clear acceptance criteria;
-- documentation and cleanup tasks;
-- review follow-up where feedback is copied to the Linear issue;
-- live-dispatch smoke tests with `--once`.
-
-Avoid using the current CLI loop for secret rotation, broad refactors,
-high-risk production changes, or repositories where an agent-created PR is not
-safe to review.
-
-### Running Multiple Projects
-
-Each `WORKFLOW.md` targets one Linear project. To run Symphony across multiple
-projects, start one process per project, each pointing at its own file:
-
-```bash
-symphony run project-a/WORKFLOW.md --port 7337 --logs-root ./log/a
-symphony run project-b/WORKFLOW.md --port 7338 --logs-root ./log/b
-```
-
-To stop a specific process, find its PID and send SIGTERM:
-
-```bash
-# list running symphony processes
-ps aux | grep "symphony run"
-
-# stop a specific process
-kill <PID>
-```
-
-Or stop all symphony processes at once:
-
-```bash
-pkill -f "symphony run"
-```
-
-To switch a running process to a different project, update `tracker.project_slug`
-in the watched `WORKFLOW.md`; the daemon hot-reloads it automatically. To point
-at a completely different `WORKFLOW.md` file, stop the process and restart with
-the new path.
+**Hot reload is not picking up WORKFLOW.md changes**
+- Only YAML front matter and the prompt body are reloaded. Changing the runner
+  binary or workspace root requires a daemon restart.
 
 ## WORKFLOW.md Basics
 
-`WORKFLOW.md` is the team-owned runtime contract. It contains YAML front matter
-for configuration and a Markdown prompt body rendered for each issue.
+`WORKFLOW.md` is the team-owned runtime contract: YAML front matter for
+configuration, Markdown body rendered as the per-issue prompt.
 
 Minimal Claude Code example:
 
@@ -377,16 +329,14 @@ Minimal Claude Code example:
 tracker:
   kind: linear
   project_slug: "your-linear-project-slug"
-  active_states:
-    - Todo
-    - In Progress
-  terminal_states:
-    - Done
-    - Canceled
-    - Duplicate
+  active_states: [Todo, In Progress]
+  terminal_states: [Done, Canceled, Duplicate]
 
 workspace:
-  root: ~/.symphony/workspaces/your-project
+  root: ~/.jazzband/workspaces/your-project
+  # Optional git mode — Jazzband manages bare clone + worktree per run:
+  # repo_url: https://github.com/your-org/your-repo
+  # default_branch: main
 
 agent:
   runner: claude_code
@@ -409,68 +359,47 @@ Implement only what the issue asks for. Open a pull request and post the PR URL
 back to Linear when finished.
 ```
 
-Switch to Codex by changing the runner:
-
-```yaml
-agent:
-  runner: codex
-```
-
-Use hooks when every issue workspace needs setup or verification:
-
-```yaml
-hooks:
-  before_run: |
-    uv sync
-  after_run: |
-    git status --short
-```
-
-For the full workflow schema and service contract, read [SPEC.md](SPEC.md).
+Switch runners by changing `agent.runner` to `codex`. Add `hooks.before_run`,
+`hooks.after_run`, `hooks.before_remove` for per-workspace setup. See
+[SPEC.md](SPEC.md) for the full schema.
 
 ## Local Development
 
-Use this path when changing Symphony itself:
-
 ```bash
-git clone https://github.com/codatta/symphony.git
-cd symphony
-uv sync
-uv run symphony --help
-```
+git clone https://github.com/humanbased-ai/jazzband.git
+cd jazzband && uv sync
 
-Run tests:
-
-```bash
+uv run jazzband --help
 uv run python -m unittest discover -s tests -p 'test_*.py'
-git diff --check
 ```
 
-Build release artifacts:
+Build a wheel and smoke-test the installed CLI:
 
 ```bash
 uv build
-ls dist/
+uv tool install --force ./dist/jazzband-*.whl
+jazzband --help
 ```
 
-Smoke test a built wheel:
+Release automation lives in `.github/workflows/release.yml`; the
+`workflow_dispatch` path supports `channel=dry-run` / `staging` / `main`. The
+Homebrew tap (`codatta/jazzband`) auto-updates on tagged releases via
+`.github/workflows/homebrew-tap.yml`.
 
-```bash
-uv tool install --force ./dist/symphony-*.whl
-symphony --help
-```
+Native single-file binaries are out of scope for the current packaging slice.
 
 ## Learn More
 
-- [SPEC.md](SPEC.md): language-agnostic Symphony service specification.
-- [ARCHITECTURE.md](ARCHITECTURE.md): Python architecture, runtime model, and
-  planned desktop/IM surfaces.
-- [prd.md](prd.md): product requirements, build phases, and roadmap.
-- [test-plan-epic-2.md](test-plan-epic-2.md): live-dispatch validation plan.
+- [SPEC.md](SPEC.md) — language-agnostic Jazzband service specification.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Python architecture, runtime model, and
+  planned desktop / IM surfaces.
+- [prd.md](prd.md) — product requirements and full build queue.
+- [CHANGELOG.md](CHANGELOG.md) — user-facing changes per release.
+- [test-plan-epic-2.md](test-plan-epic-2.md) — live-dispatch validation plan.
 
 ## Attribution
 
-Symphony and its specification were created by OpenAI and are licensed under the
+Jazzband and its specification were created by OpenAI and are licensed under the
 [Apache License 2.0](LICENSE). This repository is an independent implementation
 of that specification. The original project is at
-[github.com/openai/symphony](https://github.com/openai/symphony).
+[github.com/openai/jazzband](https://github.com/openai/jazzband).

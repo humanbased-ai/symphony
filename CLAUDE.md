@@ -1,11 +1,11 @@
-# Symphony Contribution Guide For Claude
+# Jazzband Contribution Guide For Claude
 
 This repository is governed by the root `AGENTS.md`. Follow that file first;
 this file mirrors the highest-impact rules for Claude Code sessions.
 
 ## Product Context
 
-Symphony turns Linear issues into isolated agent implementation runs. Keep
+Jazzband turns Linear issues into isolated agent implementation runs. Keep
 behavior aligned with `prd.md`, `SPEC.md`, and `ARCHITECTURE.md`.
 
 Read `prd.md` before implementing. If `prd.md`, `SPEC.md`, and

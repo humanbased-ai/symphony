@@ -1,7 +1,7 @@
-# codatta/homebrew-symphony
+# codatta/homebrew-jazzband
 
-Homebrew tap for [Symphony](https://github.com/codatta/symphony).
+Homebrew tap for [Jazzband](https://github.com/humanbased-ai/jazzband).
 
-    brew install codatta/symphony/symphony
+    brew install codatta/jazzband/jazzband
 
 The formula is auto-updated on each GitHub release via the `Update Homebrew tap` workflow.

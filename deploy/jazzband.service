@@ -1,0 +1,42 @@
+[Unit]
+Description=Jazzband AI Agent Orchestrator
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jazzband
+Group=jazzband
+WorkingDirectory=/opt/jazzband
+
+# Path to WORKFLOW.md — adjust to your deployment
+ExecStart=/opt/jazzband/.venv/bin/jazzband run /opt/jazzband/WORKFLOW.md \
+    --logs-root /var/log/jazzband \
+    --log-level INFO
+
+# Graceful shutdown: send SIGTERM and wait up to 60s before SIGKILL
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Restart policy — always restart unless manually stopped
+Restart=on-failure
+RestartSec=10
+
+# Environment — secrets via environment variables
+# Set LINEAR_API_KEY and GITHUB_TOKEN here or in a credentials file
+EnvironmentFile=-/etc/jazzband/env
+
+# Resource limits
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jazzband
+
+[Install]
+WantedBy=multi-user.target

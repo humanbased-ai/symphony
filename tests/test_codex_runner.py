@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from symphony.agents.base import AgentEvent, AgentEventType, AgentRunnerError
-from symphony.agents.codex import CodexRunner, NON_INTERACTIVE_TOOL_INPUT_ANSWER
-from symphony.tracker.models import Issue
+from jazzband.agents.base import AgentEvent, AgentEventType, AgentRunnerError
+from jazzband.agents.codex import CodexRunner, NON_INTERACTIVE_TOOL_INPUT_ANSWER
+from jazzband.tracker.models import Issue
 
 
 def issue() -> Issue:
@@ -264,7 +264,7 @@ class CodexRunnerTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "id": 202,
                         "method": "item/fileChange/requestApproval",
-                        "params": {"path": "symphony/agents/codex.py"},
+                        "params": {"path": "jazzband/agents/codex.py"},
                     }
                 )
             elif payload.get("id") == 202:

@@ -1,0 +1,348 @@
+"""GitHub REST API client — post PR comments and fetch diffs."""
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any
+
+
+GITHUB_API_BASE = "https://api.github.com"
+
+
+class GitHubClientError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class GitHubClient:
+    token: str
+    owner: str
+    repo: str
+
+    def post_pr_comment(self, pr_number: int, body: str) -> bool:
+        """Post a comment on a PR's issue thread. Returns True on success."""
+        try:
+            self._request(
+                "POST",
+                f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/comments",
+                {"body": body},
+            )
+            return True
+        except GitHubClientError:
+            return False
+
+    def list_pr_labels(self, pr_number: int) -> list[str]:
+        """Return the label names currently on a PR (issue thread). [] on failure."""
+        try:
+            result = self._request("GET", f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/labels")
+            if isinstance(result, list):
+                return [str(item.get("name")) for item in result if isinstance(item, dict) and item.get("name")]
+            return []
+        except GitHubClientError:
+            return []
+
+    def add_pr_labels(self, pr_number: int, labels: list[str]) -> bool:
+        """Add labels to a PR (additive; existing labels are kept). True on success."""
+        try:
+            self._request(
+                "POST",
+                f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/labels",
+                {"labels": labels},
+            )
+            return True
+        except GitHubClientError:
+            return False
+
+    def remove_pr_label(self, pr_number: int, label: str) -> bool:
+        """Remove a single label from a PR. A label that is already absent (404) is
+        treated as success so releasing a lock is idempotent."""
+        encoded = urllib.parse.quote(label, safe="")
+        try:
+            self._request(
+                "DELETE",
+                f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/labels/{encoded}",
+            )
+            return True
+        except GitHubClientError as exc:
+            if "github_http_error:404" in str(exc):
+                return True
+            return False
+
+    def get_pr_diff(self, pr_number: int) -> str:
+        """Return the unified diff for a PR. Returns empty string on failure."""
+        try:
+            return self._request_text(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}",
+                accept="application/vnd.github.diff",
+            )
+        except GitHubClientError:
+            return ""
+
+    def get_pr(self, pr_number: int) -> dict[str, Any] | None:
+        """Return PR data (state, merged, etc.) or None on failure."""
+        try:
+            return self._request("GET", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}")
+        except GitHubClientError:
+            return None
+
+    def close_pr(self, pr_number: int) -> bool:
+        """Close an open PR. Returns True on success."""
+        try:
+            self._request("PATCH", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}", {"state": "closed"})
+            return True
+        except GitHubClientError:
+            return False
+
+    def merge_pr(
+        self,
+        pr_number: int,
+        *,
+        sha: str | None = None,
+        merge_method: str = "squash",
+        commit_title: str | None = None,
+    ) -> bool:
+        """Merge a PR. Returns True on success.
+
+        ``sha`` is forwarded to GitHub's ``required_head`` check: the merge
+        request fails if the PR head has advanced past this sha. The
+        acceptance runtime passes the sha it just judged, which closes the
+        race between verdict and merge — a human or auto-fix push after the
+        judge ran will block the merge instead of merging unreviewed code.
+        ``merge_method`` defaults to ``squash`` because squash merges keep
+        ``main``'s history flat regardless of how many turns the implementer
+        agent took on the feature branch.
+        """
+        payload: dict[str, Any] = {"merge_method": merge_method}
+        if sha is not None:
+            payload["sha"] = sha
+        if commit_title is not None:
+            payload["commit_title"] = commit_title
+        try:
+            self._request(
+                "PUT",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge",
+                payload,
+            )
+            return True
+        except GitHubClientError:
+            return False
+
+    def find_open_pr_for_branch(self, branch: str) -> int | None:
+        """Return the PR number of the first open PR with the given head branch, or None."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls"
+                f"?head={self.owner}:{branch}&state=open&per_page=1",
+            )
+            if isinstance(result, list) and result:
+                return int(result[0]["number"])
+            return None
+        except (GitHubClientError, KeyError, TypeError, ValueError):
+            return None
+
+    def find_open_pr_for_issue(self, issue_identifier: str) -> int | None:
+        """Search for an open PR mentioning the issue identifier. Returns PR number or None."""
+        try:
+            result = self._request(
+                "GET",
+                f"/search/issues?q=is:pr+is:open+{issue_identifier}"
+                f"+repo:{self.owner}/{self.repo}&per_page=1",
+            )
+            items = (result or {}).get("items", [])
+            if items:
+                return int(items[0]["number"])
+            return None
+        except (GitHubClientError, KeyError, TypeError, ValueError):
+            return None
+
+    def get_pr_failed_check_runs(self, pr_number: int) -> list[dict]:
+        """Return failed check runs for a PR's HEAD commit as list of
+        ``{id, name, details_url, summary}``.
+
+        GitHub's ``?filter=latest`` returns the latest check run **per
+        check_suite**, not per check name. When the same check (e.g.
+        ``validate-pr-description``) is re-triggered against the same
+        commit via a different mechanism — a PR description edit
+        spawning a new check_suite, a manual re-run, a workflow_dispatch
+        — the response contains multiple entries for that name: the old
+        failure AND the new success. Without per-name deduplication the
+        old failure looks "still failing" forever and the silent
+        acceptance branch never sees ``ci_green=True``. Keep only the
+        most recent run per name (by ``started_at``) so a successful
+        re-run actually supersedes the earlier failure.
+        """
+        try:
+            pr_data = self.get_pr(pr_number)
+            if not pr_data:
+                return []
+            sha = (pr_data.get("head") or {}).get("sha")
+            if not sha:
+                return []
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/commits/{sha}/check-runs"
+                f"?filter=latest&per_page=100",
+            )
+            runs = result.get("check_runs", []) if isinstance(result, dict) else []
+            latest_by_name: dict[str, dict] = {}
+            for r in runs:
+                if not isinstance(r, dict):
+                    continue
+                name = str(r.get("name") or "")
+                if not name:
+                    continue
+                started = str(r.get("started_at") or "")
+                prev = latest_by_name.get(name)
+                if prev is None or started > str(prev.get("started_at") or ""):
+                    latest_by_name[name] = r
+            return [
+                {
+                    "id": int(r["id"]),
+                    "name": str(r.get("name") or ""),
+                    "details_url": str(r.get("details_url") or r.get("html_url") or ""),
+                    "summary": str((r.get("output") or {}).get("summary") or ""),
+                }
+                for r in latest_by_name.values()
+                if str(r.get("conclusion") or "") == "failure"
+            ]
+        except (GitHubClientError, KeyError, TypeError, ValueError):
+            return []
+
+    def list_pr_review_comments(self, pr_number: int) -> list[dict]:
+        """List inline review comments (pull_request_review_comment) on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/comments?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def list_pr_issue_comments(self, pr_number: int) -> list[dict]:
+        """List general PR comments (issue-level) on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/comments?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def list_pr_reviews(self, pr_number: int) -> list[dict]:
+        """List review submissions on a PR."""
+        try:
+            result = self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/reviews?per_page=100",
+            )
+            return result if isinstance(result, list) else []
+        except GitHubClientError:
+            return []
+
+    def get_authenticated_login(self) -> str | None:
+        """Return the GitHub login for the current token, or None on failure."""
+        try:
+            result = self._request("GET", "/user")
+            login = result.get("login")
+            return str(login) if login else None
+        except GitHubClientError:
+            return None
+
+    def list_webhooks(self) -> list[dict]:
+        """List all webhooks registered for the repository."""
+        result = self._request("GET", f"/repos/{self.owner}/{self.repo}/hooks")
+        if isinstance(result, list):
+            return result
+        return []
+
+    def delete_webhook(self, webhook_id: int) -> None:
+        """Delete a webhook by its ID."""
+        try:
+            self._request("DELETE", f"/repos/{self.owner}/{self.repo}/hooks/{webhook_id}")
+        except GitHubClientError as exc:
+            # 404 means it's already gone — treat as success
+            if "github_http_error:404" in str(exc):
+                return
+            raise
+
+    def register_webhook(
+        self,
+        url: str,
+        secret: str,
+        events: list[str] | None = None,
+    ) -> str:
+        """Register a webhook, returning the webhook id as a string.
+
+        If a webhook with the same URL already exists it is deleted first so
+        the secret is guaranteed to be up-to-date.
+        """
+        if events is None:
+            events = ["pull_request", "pull_request_review", "pull_request_review_comment"]
+
+        # Remove any existing webhook pointing at the same URL
+        try:
+            existing = self.list_webhooks()
+            for hook in existing:
+                config_block = hook.get("config") or {}
+                if config_block.get("url") == url:
+                    self.delete_webhook(int(hook["id"]))
+        except GitHubClientError:
+            pass
+
+        payload = {
+            "name": "web",
+            "active": True,
+            "events": events,
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        }
+        result = self._request("POST", f"/repos/{self.owner}/{self.repo}/hooks", payload)
+        return str(result["id"])
+
+    # ------------------------------------------------------------------
+
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            f"{GITHUB_API_BASE}{path}",
+            data=data,
+            headers=self._headers(),
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            raise GitHubClientError(f"github_http_error:{exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise GitHubClientError(f"github_url_error:{exc}") from exc
+
+    def _request_text(self, method: str, path: str, *, accept: str) -> str:
+        headers = {**self._headers(), "Accept": accept}
+        req = urllib.request.Request(f"{GITHUB_API_BASE}{path}", headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            raise GitHubClientError(f"github_http_error:{exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise GitHubClientError(f"github_url_error:{exc}") from exc
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }

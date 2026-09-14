@@ -1,4 +1,4 @@
-"""Tests for symphony.tracker.webhooks and the HTTP webhook endpoint."""
+"""Tests for jazzband.tracker.webhooks and the HTTP webhook endpoint."""
 from __future__ import annotations
 
 import asyncio
@@ -7,8 +7,8 @@ import hmac
 import json
 import unittest
 
-from symphony.http_server import WebhookAPI
-from symphony.tracker.webhooks import (
+from jazzband.http_server import WebhookAPI
+from jazzband.tracker.webhooks import (
     LinearWebhookEvent,
     parse_webhook_payload,
     verify_signature,
