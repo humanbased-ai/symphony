@@ -170,14 +170,10 @@ locally with `origin` configured.
 def _repo_mode_preamble(mode: RepoMode, runner: str, github_org: str, github_repo: str) -> str:
     if mode == "monorepo":
         return _MONOREPO_PREAMBLE
-    # The new-project preamble is GitHub/clone-specific guidance; only the
-    # claude_code prompt has a clone step, so keep it out of Codex prompts.
-    if mode == "new" and runner == "claude_code":
-        return (
-            _NEW_PROJECT_PREAMBLE
-            .replace("__GITHUB_ORG__", github_org or "YOUR_ORG")
-            .replace("__GITHUB_REPO__", github_repo or "YOUR_REPO")
-        )
+    # "new" project setup must happen in the original project directory during
+    # onboarding, not inside per-issue agent workspaces where cwd is an
+    # isolated issue workspace (IN-284). Neither runner should create a remote
+    # here; cli.py tells the operator to create and publish the original project.
     return ""
 
 
@@ -262,8 +258,8 @@ def detect_repo_shape(cwd: str | Path | None = None) -> RepoMode:
     Returns one of:
 
     * ``"new"`` — no git directory or no remote configured. Operator likely
-      wants ``gh repo create`` flow; the workflow's clone step is replaced
-      with a project-creation hint.
+      wants ``gh repo create`` flow; onboarding prints an operator setup hint
+      for the original project directory before dispatch starts.
     * ``"monorepo"`` — root contains a recognized workspace signal file
       (pnpm-workspace.yaml, nx.json, lerna.json, rush.json, go.work,
       turbo.json) OR a top-level ``packages/`` directory OR an npm

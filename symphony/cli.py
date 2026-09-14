@@ -961,8 +961,8 @@ def _run_init_with_args(
                 github_repo = _prompt_default("Repository name", github_repo) if github_repo else _prompt("Repository name (blank to fill in later)").strip()
 
         # IN-284: show the detected repo shape so the operator can confirm
-        # before WORKFLOW.md is generated with a monorepo / new-project
-        # preamble. Skipped in automated mode and when the user passed
+        # before generating a monorepo preamble or operator new-project hint.
+        # Skipped in automated mode and when the user passed
         # --repo-mode explicitly.
         repo_mode = getattr(args, "repo_mode", None) or DEFAULT_REPO_MODE
         if detected_repo_mode and not automated:
@@ -1050,6 +1050,13 @@ def _run_init_with_args(
         print("GitHub token not stored. Set GITHUB_TOKEN or re-run with --github-token.")
 
     print(f"\nWrote workflow: {workflow_path}")
+    if repo_mode == "new":
+        org = github_org or "YOUR_ORG"
+        repo = github_repo or "YOUR_REPO"
+        print(_dim(
+            "\nNew-project setup — run this from your project root before starting dispatch:"
+        ))
+        print(f"  gh repo create {org}/{repo} --private --source=. --remote=origin --push")
     print(f"Next: {_cyan(_cli_name() + ' doctor ' + str(workflow_path))}")
     print(_dim(
         "Tip: each WORKFLOW.md targets one Linear project. "

@@ -160,18 +160,26 @@ class GenerateWorkflowRepoModeTests(unittest.TestCase):
         self.assertIn("Monorepo scope", content)
         self.assertIn("smallest", content)
 
-    def test_new_mode_includes_gh_repo_create_hint(self):
-        content = generate_workflow(
-            InitConfig(
-                project_slug="example",
-                runner="claude_code",
-                github_org="acme",
-                github_repo="repo",
-                repo_mode="new",
-            )
-        )
-        self.assertIn("New project scope", content)
-        self.assertIn("gh repo create acme/repo", content)
+    def test_new_mode_never_creates_repository_in_issue_workspace(self):
+        for runner in ("claude_code", "codex"):
+            with self.subTest(runner=runner):
+                content = generate_workflow(
+                    InitConfig(
+                        project_slug="example",
+                        runner=runner,
+                        github_org="acme",
+                        github_repo="repo",
+                        repo_mode="new",
+                    )
+                )
+                workflow = parse_workflow(content)
+                self.assertEqual(runner, workflow.config["agent"]["runner"])
+                self.assertNotIn("New project scope", workflow.prompt_template)
+                self.assertNotIn("gh repo create", workflow.prompt_template)
+                if runner == "claude_code":
+                    self.assertIn("gh repo clone acme/repo .", workflow.prompt_template)
+                else:
+                    self.assertNotIn("gh repo clone", workflow.prompt_template)
 
     def test_single_mode_has_no_preamble(self):
         content = generate_workflow(
