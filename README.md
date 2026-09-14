@@ -168,7 +168,7 @@ other installed agent on each tracked, mergeable PR head. `single-vendor`
 uses the primary runner; `skip` disables automatic reviews. Install Crosscheck
 and the selected reviewer, and configure the GitHub repository and credentials.
 The daemon starts reviews in the background once per head, and its existing
-PR feedback loop passes findings to the implementer. Reviews do not merge PRs.
+PR feedback loop passes findings to the implementer. Reviews do not merge PRs. Crosscheck and its reviewer are trusted local tools running under your account; environment filtering does not isolate your home/configuration files.
 An explicit strategy also updates an existing valid WORKFLOW.md without
 regenerating its agent configuration or prompt. A failed review logs a warning;
 it supplies no approval. Retry it manually with `crosscheck review PR_URL`.

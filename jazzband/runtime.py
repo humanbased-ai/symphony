@@ -595,7 +595,7 @@ class JazzbandRuntime:
             elif mergeable_state and mergeable_state != "dirty":
                 self._pr_conflict_dispatched.discard(branch)
             sha = (pr_data.get("head") or {}).get("sha")
-            if self.config.review.enabled and sha and pr_data.get("mergeable") is True:
+            if self.config.review.enabled and self.config.review.reviewer is not None and sha and pr_data.get("mergeable") is True:
                 self.review_dispatcher.schedule(
                     branch=branch, sha=sha, reviewer=self.config.review.reviewer,
                     url=f"https://github.com/{gh.owner}/{gh.repo}/pull/{pr_number}",
