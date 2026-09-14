@@ -25,8 +25,8 @@ DEFAULT_ACTIVE_STATES = ("Todo", "In Progress")
 DEFAULT_TERMINAL_STATES = ("Done", "Canceled", "Duplicate")
 DEFAULT_RUNNER = "claude_code"
 
-# IN-285 captures the intended reviewer in WORKFLOW.md. Runtime Crosscheck
-# dispatch is a follow-up; this configuration does not execute a review.
+# IN-285 configures Crosscheck dispatch on tracked PR heads. Feedback is
+# handled by the existing primary-runner loop; reviews never auto-merge.
 # Cross-vendor selects the other vendor, single-vendor the primary. Skip writes
 # nothing.
 ReviewStrategy = Literal["cross-vendor", "single-vendor", "skip"]

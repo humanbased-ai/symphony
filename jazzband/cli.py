@@ -363,10 +363,9 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--review-strategy",
         choices=("cross-vendor", "single-vendor", "skip"),
         help=(
-            "Save the intended reviewer (IN-285): 'cross-vendor' selects the "
+            "Run Crosscheck reviews (IN-285): 'cross-vendor' selects the "
             "other vendor; 'single-vendor' selects the primary runner; "
-            "'skip' writes no review block. Review execution is not available "
-            "in this release; saving the choice does not run a review. "
+            "'skip' disables automatic reviews. Findings feed the primary runner. "
             "Defaults to interactive prompt when both runners are on PATH, "
             "and 'skip' in automated mode."
         ),
@@ -874,6 +873,7 @@ async def run_daemon(
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await runtime.review_dispatcher.close()
         if dashboard is not None:
             dashboard.stop()
         _prompt_generate_report(runtime)
@@ -890,6 +890,36 @@ def _inject_github_config(workflow_path: Path, owner: str, repo: str) -> None:
         content[:close_idx] + github_block + content[close_idx:],
         encoding="utf-8",
     )
+
+
+def _update_review_strategy(workflow_path: Path, args: argparse.Namespace) -> None:
+    """Apply an explicit strategy without regenerating the agent or prompt."""
+    strategy = getattr(args, "review_strategy", None)
+    if strategy is None:
+        return
+    import yaml
+    from jazzband.onboarding import _review_block
+
+    workflow = load_workflow(workflow_path)
+    cfg = workflow.typed_config(workflow_path=workflow_path)
+    block = _review_block(cfg.agent.runner, strategy)
+    if block is not None:
+        if not (cfg.github.owner and cfg.github.repo):
+            raise OnboardingError("review_requires_github_repository")
+        for command in ("crosscheck", "claude" if block["reviewer"] == "claude_code" else "codex"):
+            if not shutil.which(command):
+                raise OnboardingError(f"review_command_missing:{command}")
+        workflow.config["review"] = block
+    else:
+        workflow.config.pop("review", None)
+    # Keep the prompt byte-for-byte; only serialize the front matter.
+    content = workflow_path.read_text(encoding="utf-8")
+    match = re.match(r"\A---\s*\n.*?\n---(?:\r?\n|$)", content, re.DOTALL)
+    if match is None:
+        raise OnboardingError("workflow_front_matter_missing")
+    front = yaml.safe_dump(workflow.config, sort_keys=False)
+    workflow_path.write_text("---\n" + front + "---\n" + content[match.end():], encoding="utf-8")
+    print(f"Updated {workflow_path} review strategy: {strategy}.")
 
 
 def _maybe_upgrade_github_config(
@@ -1368,9 +1398,6 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
             LOGGER.warning("Repo shape detection failed (%s); defaulting to 'single'.", exc)
             args.repo_mode = DEFAULT_REPO_MODE
 
-    _env_checks = setup_environment_checks(args)
-    print_setup_checks("Environment scan", _env_checks)
-
     # Propagate env-detected credentials into args so _run_init_with_args
     # does not re-prompt for auth the scan already validated.
     if not getattr(args, "linear_api_key", None) and os.environ.get("LINEAR_API_KEY"):
@@ -1383,6 +1410,10 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         checks = doctor_checks(workflow_path, logs_root="./log", port=DEFAULT_PORT, skip_port_check=True)
         print_setup_checks("Existing setup", checks)
         if all(ok for ok, _, _ in checks):
+            try:
+                _update_review_strategy(workflow_path, args)
+            except OnboardingError as exc:
+                parser.exit(2, f"jazzband onboard: {exc}\n")
             _maybe_upgrade_github_config(
                 workflow_path,
                 args,
@@ -1411,7 +1442,7 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         args,
         parser,
         command_name="onboard",
-        show_environment_scan=False,
+        show_environment_scan=True,
         show_tutorial_before=False,
         detected_github_org=detected_github_org,
         detected_github_repo=detected_github_repo,
@@ -1498,7 +1529,7 @@ def _run_init_with_args(
         review_strategy = getattr(args, "review_strategy", None) or DEFAULT_REVIEW_STRATEGY
         if not automated and not getattr(args, "review_strategy", None) and len(available_runners) >= 2:
             other_runner = "codex" if runner == "claude_code" else "claude_code"
-            print("\nSave a review preference (review execution is not available in this release):")
+            print("\nChoose automatic PR reviews:")
             print(f"  1) cross-vendor — {runner} implements, {other_runner} selected for review")
             print(f"  2) single-vendor — {runner} selected for review")
             print("  3) skip — no review block in WORKFLOW.md")
@@ -1511,6 +1542,7 @@ def _run_init_with_args(
                 "3": "skip",
                 "skip": "skip",
             }.get(choice, "skip")
+        args.review_strategy = review_strategy
 
         if show_environment_scan:
             print_setup_checks("Environment scan", setup_environment_checks(args))
@@ -1518,7 +1550,7 @@ def _run_init_with_args(
         # --- Step 2: GitHub org + repo (claude_code runner only) ---
         github_org = args.github_org or ""
         github_repo = args.github_repo or ""
-        if runner == "claude_code" and not automated:
+        if (runner == "claude_code" or review_strategy != "skip") and not automated:
             # Only show Step 3 when at least one value needs input or confirmation.
             # Explicit CLI flags are accepted as-is; only auto-detected values are
             # shown as editable defaults so the user can correct a wrong detection.
@@ -1615,8 +1647,13 @@ def _run_init_with_args(
             answer = input("Enable acceptance gate? [y/N]: ").strip().lower()
             acceptance_enabled = answer in ("y", "yes")
 
+        if review_strategy != "skip" and not (github_org and github_repo):
+            raise OnboardingError("review_requires_github_repository")
         if review_strategy != "skip":
-            print("Review execution is not available in this release. Saving this choice does not run a review.")
+            reviewer = ("codex" if runner == "claude_code" else "claude_code") if review_strategy == "cross-vendor" else runner
+            for command in ("crosscheck", "claude" if reviewer == "claude_code" else "codex"):
+                if not shutil.which(command):
+                    raise OnboardingError(f"review_command_missing:{command}")
         workflow = generate_workflow(
             InitConfig(
                 project_slug=project_slug,

@@ -21,6 +21,7 @@ from jazzband.acceptance_runtime import (
 )
 from jazzband.agents.base import AgentEvent, AgentEventCallback, TokenUsage
 from jazzband.config import WorkflowConfig
+from jazzband.crosscheck_runtime import ReviewDispatcher
 from jazzband.verifyflow_runtime import maybe_run_verifyflow
 from jazzband.github.webhooks import GitHubEvent, PRClosedEvent, PRCommentEvent, PRReviewEvent
 from jazzband.orchestrator import (
@@ -104,6 +105,7 @@ class JazzbandRuntime:
         self.on_pr_update = on_pr_update
         self.github_client = github_client
         self.manifest_writer = manifest_writer
+        self.review_dispatcher = ReviewDispatcher()
         # Tracks the issue IDs seen in the previous poll tick.  An issue is
         # eligible for dispatch only when it newly appears (present in current
         # candidates but absent from _prev_candidate_ids).  Starts empty so
@@ -574,6 +576,7 @@ class JazzbandRuntime:
                 self._acceptance_judged_sha.pop(branch, None)
                 self._verifyflow_run_sha.pop(branch, None)
                 self._pr_escalated.discard(branch)
+                await self.review_dispatcher.forget(branch)
                 return
             pr_number = cached_pr
         else:
@@ -592,6 +595,13 @@ class JazzbandRuntime:
                 await self._handle_pr_conflict(branch, pr_number, issue)
             elif mergeable_state and mergeable_state != "dirty":
                 self._pr_conflict_dispatched.discard(branch)
+            sha = (pr_data.get("head") or {}).get("sha")
+            if self.config.review.enabled and sha and pr_data.get("mergeable") is True:
+                self.review_dispatcher.schedule(
+                    branch=branch, sha=sha, reviewer=self.config.review.reviewer,
+                    url=f"https://github.com/{gh.owner}/{gh.repo}/pull/{pr_number}",
+                    token=gh.token,
+                )
 
         review_comments, issue_comments, reviews = await asyncio.gather(
             asyncio.to_thread(gh.list_pr_review_comments, pr_number),
@@ -921,6 +931,7 @@ class JazzbandRuntime:
         self._acceptance_judged_sha.pop(event.pr_head_branch, None)
         self._verifyflow_run_sha.pop(event.pr_head_branch, None)
         self._pr_escalated.discard(event.pr_head_branch)
+        await self.review_dispatcher.forget(event.pr_head_branch)
         if issue is not None:
             release_issue(issue.id, self.state)
 
