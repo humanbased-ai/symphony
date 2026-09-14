@@ -1139,7 +1139,11 @@ be the first Phase 2 gate before desktop or productionization work expands.
   dir → monorepo; otherwise single repo), then show the result with a
   `github.com/org/______` fill-in for confirmation or correction. No manual
   picker. Monorepo mode adds a self-scoping preamble to the agent prompt;
-  new-project mode runs `gh repo create`. Adds `repo_mode` to `InitConfig`.
+  new-project mode prints an operator command to create and publish the original
+  project (`gh repo create ... --source=. --remote=origin --push`) before
+  dispatch. Neither runner receives repository-creation instructions inside its
+  isolated per-issue workspace; Claude's normal clone step remains valid after
+  the operator publishes the project. Adds `repo_mode` to `InitConfig`.
 - [ ] **[CLI: Primary runner picker + cross-vendor CR] (Linear: IN-285)** — when
   both `claude` and `codex` are installed, show an interactive runner picker
   instead of silently auto-selecting. Follow with a code review strategy

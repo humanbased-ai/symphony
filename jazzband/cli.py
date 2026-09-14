@@ -37,6 +37,8 @@ from jazzband.onboarding import (
     DEFAULT_ACTIVE_STATES,
     DEFAULT_PRESET,
     DEFAULT_REVIEW_STRATEGY,
+
+    DEFAULT_REPO_MODE,
     DEFAULT_RUNNER,
     DEFAULT_TERMINAL_STATES,
     DEFAULT_WORKFLOW_PATH,
@@ -45,6 +47,8 @@ from jazzband.onboarding import (
     OnboardingError,
     default_workspace_root,
     detect_available_runners,
+
+    detect_repo_shape,
     generate_workflow,
     parse_state_list,
     write_workflow,
@@ -364,6 +368,16 @@ def build_init_parser(prog: str | None = None) -> argparse.ArgumentParser:
             "'single-vendor' = same runner reviews; 'skip' = no review block. "
             "Defaults to interactive prompt when both runners are on PATH, "
             "and 'skip' in automated mode."
+        ),
+    )
+    parser.add_argument(
+        "--repo-mode",
+        choices=("new", "monorepo", "single"),
+        help=(
+            "Force a repository shape (IN-284). Defaults to auto-detection from "
+            "the working directory: no git remote → 'new'; pnpm-workspace.yaml / "
+            "nx.json / go.work / packages/ / npm workspaces → 'monorepo'; "
+            "otherwise 'single'."
         ),
     )
     parser.add_argument(
@@ -1312,7 +1326,15 @@ def run_with_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
 def init_main(argv: Sequence[str] | None = None) -> int:
     parser = build_init_parser()
     args = parser.parse_args(argv)
-    return _run_init_with_args(args, parser, command_name="init")
+    detected_repo_mode: str | None = None
+    if not getattr(args, "repo_mode", None):
+        try:
+            args.repo_mode = detect_repo_shape()
+            detected_repo_mode = args.repo_mode
+        except Exception as exc:  # noqa: BLE001 - detection is best-effort.
+            LOGGER.warning("Repo shape detection failed (%s); defaulting to 'single'.", exc)
+            args.repo_mode = DEFAULT_REPO_MODE
+    return _run_init_with_args(args, parser, command_name="init", detected_repo_mode=detected_repo_mode)
 
 
 def onboard_main(argv: Sequence[str] | None = None) -> int:
@@ -1332,6 +1354,18 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         if detected_repo and not args.github_repo:
             args.github_repo = detected_repo
             detected_github_repo = detected_repo
+
+    # Auto-detect repository shape from cwd (IN-284): new project / monorepo
+    # / single repo. The explicit --repo-mode flag wins; auto-detection only
+    # fires when the flag is absent.
+    detected_repo_mode: str | None = None
+    if not getattr(args, "repo_mode", None):
+        try:
+            args.repo_mode = detect_repo_shape()
+            detected_repo_mode = args.repo_mode
+        except Exception as exc:  # noqa: BLE001 - detection is best-effort.
+            LOGGER.warning("Repo shape detection failed (%s); defaulting to 'single'.", exc)
+            args.repo_mode = DEFAULT_REPO_MODE
 
     _env_checks = setup_environment_checks(args)
     print_setup_checks("Environment scan", _env_checks)
@@ -1380,6 +1414,7 @@ def onboard_main(argv: Sequence[str] | None = None) -> int:
         show_tutorial_before=False,
         detected_github_org=detected_github_org,
         detected_github_repo=detected_github_repo,
+        detected_repo_mode=detected_repo_mode,
     )
 
 
@@ -1392,6 +1427,7 @@ def _run_init_with_args(
     show_tutorial_before: bool = True,
     detected_github_org: str | None = None,
     detected_github_repo: str | None = None,
+    detected_repo_mode: str | None = None,
 ) -> int:
     try:
         mode = _resolve_init_mode(args)
@@ -1489,10 +1525,31 @@ def _run_init_with_args(
                 print("\nStep 3/5 — GitHub repository for PR automation")
                 print("  Agents will clone this repo, push a branch, and open a PR.")
                 print("  Example: for github.com/acme-corp/my-backend, org = 'acme-corp', repo = 'my-backend'")
+                # IN-284 confirmation surface: show the auto-detected fill-in
+                # in the github.com/<org>/<repo> form so the operator can sanity
+                # check and correct before answering the next prompts.
+                if detected_github_org and detected_github_repo:
+                    print(_dim(f"  detected: github.com/{detected_github_org}/{detected_github_repo}"))
             if org_needs_input:
                 github_org = _prompt_default("GitHub org/user", github_org) if github_org else _prompt("GitHub org/user (blank to fill in later)").strip()
             if repo_needs_input:
                 github_repo = _prompt_default("Repository name", github_repo) if github_repo else _prompt("Repository name (blank to fill in later)").strip()
+
+        # IN-284: show the detected repo shape so the operator can confirm
+        # before generating a monorepo preamble or operator new-project hint.
+        # Skipped in automated mode and when the user passed
+        # --repo-mode explicitly.
+        repo_mode = getattr(args, "repo_mode", None) or DEFAULT_REPO_MODE
+        if detected_repo_mode and not automated:
+            label = {
+                "new": "no git remote — new project",
+                "monorepo": "monorepo (workspace signals detected)",
+                "single": "single repository",
+            }.get(detected_repo_mode, detected_repo_mode)
+            print(f"\nDetected repo shape: {_cyan(label)}")
+            print(_dim(
+                "  Override with --repo-mode {new,monorepo,single} if this is wrong."
+            ))
 
         # --- Step 3: Linear API key ---
         linear_token = args.linear_api_key
@@ -1567,6 +1624,8 @@ def _run_init_with_args(
                 github_org=github_org,
                 github_repo=github_repo,
                 review_strategy=review_strategy,
+
+                repo_mode=repo_mode,
                 acceptance_enabled=acceptance_enabled,
             )
         )
@@ -1599,6 +1658,13 @@ def _run_init_with_args(
         print("GitHub token not stored. Set GITHUB_TOKEN or re-run with --github-token.")
 
     print(f"\nWrote workflow: {workflow_path}")
+    if repo_mode == "new":
+        org = github_org or "YOUR_ORG"
+        repo = github_repo or "YOUR_REPO"
+        print(_dim(
+            "\nNew-project setup — run this from your project root before starting dispatch:"
+        ))
+        print(f"  gh repo create {org}/{repo} --private --source=. --remote=origin --push")
     print(f"Next: {_cyan(_cli_name() + ' doctor ' + str(workflow_path))}")
     print(_dim(
         "Tip: each WORKFLOW.md targets one Linear project. "

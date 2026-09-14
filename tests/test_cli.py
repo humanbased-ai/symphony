@@ -266,6 +266,36 @@ Body
 
         self.assertEqual(2, raised.exception.code)
 
+    def test_new_project_init_prints_publish_command_without_running_it(self):
+        for runner in ("claude_code", "codex"):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as temp_dir:
+                workflow_path = Path(temp_dir) / "WORKFLOW.md"
+                stdout = StringIO()
+                with (
+                    patch("jazzband.cli.setup_environment_checks", return_value=[]),
+                    patch("jazzband.cli._automated_setup_failures", return_value=[]),
+                    patch("jazzband.cli.subprocess.run") as command,
+                    redirect_stdout(stdout),
+                ):
+                    result = main([
+                        "init", "--mode", "automated",
+                        "--project-slug", "example",
+                        "--workflow-path", str(workflow_path),
+                        "--credentials-path", str(Path(temp_dir) / "credentials.json"),
+                        "--runner", runner,
+                        "--github-org", "acme", "--github-repo", "repo",
+                        "--repo-mode", "new",
+                    ])
+
+                self.assertEqual(0, result)
+                self.assertIn("from your project root before starting dispatch", stdout.getvalue())
+                self.assertIn(
+                    "gh repo create acme/repo --private --source=. --remote=origin --push",
+                    stdout.getvalue(),
+                )
+                self.assertNotIn("gh repo create", workflow_path.read_text(encoding="utf-8"))
+                command.assert_not_called()
+
     def test_init_automated_reports_all_missing_inputs_without_prompting(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workflow_path = Path(temp_dir) / "WORKFLOW.md"
